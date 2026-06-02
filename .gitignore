@@ -1,0 +1,13 @@
+# Compiled binary
+/work
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Go
+*.test
+*.out
