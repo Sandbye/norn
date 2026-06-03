@@ -31,6 +31,11 @@ type Dashboard struct {
 	result   Result
 	lastLoad time.Time
 
+	// scopeRepo: when non-empty, only sessions for this repo basename are shown.
+	// Set automatically when `work -d` runs inside a git repo. Press `a` to
+	// clear and see all repos.
+	scopeRepo string
+
 	// prCache: branch -> cached PR result. TTL prevents re-fetch on every tick.
 	prCache map[string]prCacheEntry
 }
@@ -64,13 +69,20 @@ type prFetchedMsg struct {
 	ok     bool
 }
 
-func NewDashboard(cfg config.Config) Dashboard {
+// NewDashboard creates a dashboard. If scopeRepo is non-empty, only sessions
+// for that repo basename are shown; press `a` to clear.
+func NewDashboard(cfg config.Config, scopeRepo string) Dashboard {
 	store, _ := state.Load()
 	if store == nil {
 		store = &state.Store{}
 	}
 	store.SortByActivity()
-	return Dashboard{cfg: cfg, store: store, prCache: map[string]prCacheEntry{}}
+	return Dashboard{
+		cfg:       cfg,
+		store:     store,
+		scopeRepo: scopeRepo,
+		prCache:   map[string]prCacheEntry{},
+	}
 }
 
 func (d Dashboard) Result() Result { return d.result }
@@ -107,6 +119,11 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.cursor = len(d.rows) - 1
 		case "r":
 			return d, d.loadCmd()
+		case "a":
+			if d.scopeRepo != "" {
+				d.scopeRepo = ""
+				return d, d.loadCmd()
+			}
 		case "enter", "c":
 			if d.cursor < len(d.rows) {
 				row := d.rows[d.cursor]
@@ -210,12 +227,22 @@ func (d Dashboard) View() string {
 	}
 
 	header := titleStyle.Render("work") + " " + dimStyle.Render("dashboard")
+	scope := "all repos"
+	if d.scopeRepo != "" {
+		scope = d.scopeRepo
+	}
+	header += dimStyle.Render(fmt.Sprintf("   scope: %s", scope))
 	if !d.lastLoad.IsZero() {
 		header += dimStyle.Render(fmt.Sprintf("   refreshed %s ago", shortAge(d.lastLoad)))
 	}
 
 	if len(d.rows) == 0 {
-		body := dimStyle.Render("no sessions yet — start one with `work \"hint\"`")
+		var body string
+		if d.scopeRepo != "" {
+			body = dimStyle.Render(fmt.Sprintf("no sessions in %s yet — start one with `work \"hint\"`, or press `a` for all repos", d.scopeRepo))
+		} else {
+			body = dimStyle.Render("no sessions yet — start one with `work \"hint\"`")
+		}
 		return fmt.Sprintf("\n%s\n\n%s\n\n%s\n", header, body, d.dashKeyHelp())
 	}
 
@@ -286,7 +313,11 @@ func (d Dashboard) dashKeyHelp() string {
 			parts = append(parts, "t task")
 		}
 	}
-	parts = append(parts, "r refresh", "d drop", "q quit")
+	parts = append(parts, "r refresh", "d drop")
+	if d.scopeRepo != "" {
+		parts = append(parts, "a all repos")
+	}
+	parts = append(parts, "q quit")
 	return dimStyle.Render(strings.Join(parts, " · "))
 }
 
@@ -306,6 +337,7 @@ func openURL(url string) {
 // Fast path only — PR data is fetched async via fetchPRCmd after this returns.
 func (d Dashboard) loadCmd() tea.Cmd {
 	cfg := d.cfg
+	scope := d.scopeRepo
 	return func() tea.Msg {
 		store, err := state.Load()
 		if err != nil || store == nil {
@@ -323,6 +355,9 @@ func (d Dashboard) loadCmd() tea.Cmd {
 		store.SortByActivity()
 		rows := make([]dashRow, 0, len(store.Sessions))
 		for _, sess := range store.Sessions {
+			if scope != "" && sess.Repo != scope {
+				continue
+			}
 			rows = append(rows, dashRow{Session: sess, WorktreeAlive: alive[sess.Path]})
 		}
 		return dashLoadedMsg{rows: rows}

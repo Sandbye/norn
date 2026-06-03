@@ -68,15 +68,35 @@ type worktreeCreatedMsg struct {
 type errMsg struct{ err error }
 
 func NewApp(cfg config.Config, repoRoot string, initialView View) App {
+	// Surface pr_base as the default choice in the base-branch picker by
+	// putting it first. Keeps "branch base" and "PR target" identical.
+	bases := orderBases(cfg.BaseBranches, cfg.PRBase)
 	return App{
 		cfg:      cfg,
 		repoRoot: repoRoot,
 		current:  initialView,
 		menu:     newMenuModel(),
 		clean:    newCleanModel(),
-		create:   newCreateModel(cfg.BaseBranches),
+		create:   newCreateModel(bases),
 		cd:       newCdModel(),
 	}
+}
+
+func orderBases(bases []string, preferred string) []string {
+	if preferred == "" {
+		return bases
+	}
+	// If preferred already first, return as-is.
+	if len(bases) > 0 && bases[0] == preferred {
+		return bases
+	}
+	out := []string{preferred}
+	for _, b := range bases {
+		if b != preferred {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 func (a App) Init() tea.Cmd {

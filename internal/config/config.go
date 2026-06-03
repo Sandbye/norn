@@ -2,11 +2,32 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// originRepoName returns the basename of the upstream/main repo for a given
+// directory. Inside a worktree, this returns the original repo's name rather
+// than the worktree dir name, so project config lookups stay stable.
+func originRepoName(dir string) string {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--git-common-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		return filepath.Base(dir)
+	}
+	common := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(dir, common)
+	}
+	if abs, err := filepath.EvalSymlinks(common); err == nil {
+		common = abs
+	}
+	// common typically looks like ".../<repo>/.git". Repo dir is the parent.
+	return filepath.Base(filepath.Dir(common))
+}
 
 type Config struct {
 	WorktreeDir  string       `yaml:"worktree_dir" json:"worktree_dir"`
@@ -14,6 +35,13 @@ type Config struct {
 	Verify       []string     `yaml:"verify,omitempty" json:"verify,omitempty"`
 	Setup        string       `yaml:"setup,omitempty" json:"setup,omitempty"`
 	BaseBranches []string     `yaml:"base_branches" json:"base_branches"`
+
+	// PRBase is the default branch new worktrees fork from and that PRs target.
+	// Keeps "branch base" and "PR base" identical → diff contains only your
+	// commits. If unset, falls back to BaseBranches[0].
+	//
+	// Hotfix workflow can override per-invocation (future: `work --from master`).
+	PRBase string `yaml:"pr_base,omitempty" json:"pr_base,omitempty"`
 	User         User         `yaml:"user" json:"user"`
 	Templates    TemplatesDir `yaml:"templates,omitempty" json:"templates,omitempty"`
 
@@ -34,6 +62,11 @@ type Config struct {
 	// Paths can be absolute, ~-prefixed, or repo-relative.
 	// `work --refresh-docs` pulls every git repo containing one of these paths.
 	Docs map[string]string `yaml:"docs,omitempty" json:"docs,omitempty"`
+
+	// DoneWhen: shell commands that constitute "actually done" beyond /precheck.
+	// Read by the /done skill. Each entry is one criterion (functional check,
+	// CI gate, translation sync, etc). Same execution model as `verify:`.
+	DoneWhen []string `yaml:"done_when,omitempty" json:"done_when,omitempty"`
 }
 
 type User struct {
@@ -95,7 +128,9 @@ func Load(repoRoot string) (Config, error) {
 			return cfg, err
 		}
 
-		repoName := filepath.Base(repoRoot)
+		// Use the *origin* repo name (not the worktree basename) so the same
+		// config matches whether we're in the main checkout or any worktree.
+		repoName := originRepoName(repoRoot)
 		localProjectPath := filepath.Join(home, ".config", "work", "projects", repoName+".yaml")
 		if err := mergeFromFile(&cfg, localProjectPath); err != nil && !os.IsNotExist(err) {
 			return cfg, err

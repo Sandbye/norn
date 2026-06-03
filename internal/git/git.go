@@ -28,6 +28,30 @@ func RepoRoot() (string, error) {
 	return out, nil
 }
 
+// OriginRepoName returns the basename of the *main* repo for a given directory.
+// Inside a worktree, this resolves to the upstream repo's name rather than the
+// worktree's own dir name — so per-project config (~/.config/work/projects/<name>.yaml)
+// keeps matching no matter which worktree you're in.
+func OriginRepoName(dir string) string {
+	common, err := CommonDir(dir)
+	if err != nil || common == "" {
+		// Fallback: basename of show-toplevel.
+		if top, err2 := cmdOutput(dir, "git", "rev-parse", "--show-toplevel"); err2 == nil {
+			return filepath.Base(top)
+		}
+		return filepath.Base(dir)
+	}
+	// CommonDir is the path to the main repo's .git dir (or .git/worktrees/...
+	// inside a worktree). Strip the trailing .git component to get the repo dir.
+	parent := filepath.Dir(common)
+	if filepath.Base(common) != ".git" {
+		// Worktree case: common ends in something like .git, but parent is repo.
+		// Walk up until we find a dir whose .git matches.
+		parent = filepath.Dir(common)
+	}
+	return filepath.Base(parent)
+}
+
 func CommonDir(dir string) (string, error) {
 	common, err := cmdOutput(dir, "git", "rev-parse", "--git-common-dir")
 	if err != nil {
@@ -128,6 +152,14 @@ func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) 
 
 	if err := cmdRun(repoRoot, "git", "worktree", "add", "-b", branch, wtPath, "origin/"+base); err != nil {
 		return "", fmt.Errorf("worktree add failed: %w", err)
+	}
+
+	// Push the empty branch immediately so origin tracks it from day one.
+	// Without this, the dashboard's PR lookup and `work diff` against origin/<branch>
+	// produce false negatives until the user pushes manually. Best-effort:
+	// failures don't block worktree creation (offline / auth issues happen).
+	if err := cmdRun(wtPath, "git", "push", "-u", "origin", branch, "--quiet"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: initial push of %s failed: %v\n", branch, err)
 	}
 
 	return wtPath, nil
