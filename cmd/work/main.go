@@ -54,16 +54,23 @@ func main() {
 			return
 		case "--diff", "diff":
 			plain := false
+			list := false
 			prNum := ""
 			for _, a := range args[1:] {
 				switch {
 				case a == "--plain" || a == "-p":
 					plain = true
+				case a == "--list" || a == "-l":
+					list = true
 				case strings.HasPrefix(a, "#"):
 					prNum = strings.TrimPrefix(a, "#")
 				case isAllDigits(a):
 					prNum = a
 				}
+			}
+			if list {
+				cmdDiffList(cfg, repoRoot, plain)
+				return
 			}
 			if prNum != "" {
 				cmdDiffPR(cfg, repoRoot, prNum, plain)
@@ -319,6 +326,65 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// cmdDiffList shows a picker of open PRs in the current repo. On selection,
+// transitions to cmdDiffPR for the chosen PR.
+func cmdDiffList(cfg config.Config, repoRoot string, plain bool) {
+	if repoRoot == "" {
+		fmt.Fprintln(os.Stderr, "error: not inside a git repository (gh needs repo context)")
+		os.Exit(1)
+	}
+
+	out, err := exec.Command("gh", "pr", "list",
+		"--state", "open",
+		"--limit", "50",
+		"--json", "number,title,author,baseRefName,headRefName,isDraft,updatedAt").Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: gh pr list failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	var raw []struct {
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		Author      struct{ Login string } `json:"author"`
+		BaseRefName string `json:"baseRefName"`
+		HeadRefName string `json:"headRefName"`
+		IsDraft     bool   `json:"isDraft"`
+		UpdatedAt   time.Time `json:"updatedAt"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		fmt.Fprintf(os.Stderr, "error: parse pr list: %v\n", err)
+		os.Exit(1)
+	}
+
+	prs := make([]tui.PRListItem, 0, len(raw))
+	for _, r := range raw {
+		prs = append(prs, tui.PRListItem{
+			Number:    r.Number,
+			Title:     r.Title,
+			Author:    r.Author.Login,
+			BaseRef:   r.BaseRefName,
+			HeadRef:   r.HeadRefName,
+			IsDraft:   r.IsDraft,
+			UpdatedAt: r.UpdatedAt,
+		})
+	}
+
+	picker := tui.NewPRList(prs)
+	p := tea.NewProgram(picker, tea.WithAltScreen())
+	m, err := p.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "picker error: %v\n", err)
+		os.Exit(1)
+	}
+	selected := m.(tui.PRList).Selected()
+	if selected == 0 {
+		return // cancelled
+	}
+	clearScreen()
+	cmdDiffPR(cfg, repoRoot, fmt.Sprintf("%d", selected), plain)
 }
 
 // cmdDiffPR shows the diff for any open PR (yours or a colleague's). Uses
@@ -1352,7 +1418,8 @@ Usage:
                           (also opens by default when run outside any git repo)
   work diff               TUI diff vs pr_base (warn if forked from wrong base)
   work diff <pr#>         TUI diff of any open PR (yours or colleague's)
-  work diff --plain       Plain text diff for piping
+  work diff --list, -l    Pick an open PR from a list, then view its diff
+  work diff --plain, -p   Plain text diff for piping
   work init               Scaffold a project config for the current repo
   work doctor             Diagnose hooks, skills, configs, docs, state
   work --refresh-docs     git pull every doc repo referenced in any project config
