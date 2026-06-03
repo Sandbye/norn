@@ -8,6 +8,7 @@ import (
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -51,6 +52,7 @@ type DiffView struct {
 	parsed     []parsedDiffLine // populated when a file's diff loads
 	fileCursor int              // focused line index
 	fileScroll int              // top of visible viewport
+	visualStart int             // -1 when not in visual mode; else parsed index where selection began
 
 	width  int
 	height int
@@ -60,11 +62,15 @@ type DiffView struct {
 	// Review state (PR mode only)
 	pending        []PendingComment
 	commentArea    textarea.Model
-	commentLineIdx int // index into d.parsed for the comment being authored
+	commentLineIdx int // index into d.parsed for the comment being authored, or -1 for file-level
+	commentEndIdx  int // for multi-line selection: last index in selection (== commentLineIdx for single)
+	editingIdx     int // index into d.pending we're editing, or -1 for new
 
 	reviewArea  textarea.Model
 	reviewEvent string // "COMMENT" | "APPROVE" | "REQUEST_CHANGES"
 	statusMsg   string // shown briefly after submit / errors
+	submitting  bool   // true while a review POST is in flight
+	spinner     spinner.Model
 }
 
 type diffMode int
@@ -76,12 +82,20 @@ const (
 	modeReview  // overlay: composing the review submission
 )
 
-// PendingComment is one inline comment buffered before submitting a review.
+// PendingComment is one comment buffered before submitting a review.
+//
+// Three shapes:
+//   - line: Line + Side, SubjectType "line"
+//   - multi-line: above + StartLine + StartSide (must equal Side)
+//   - file-level: SubjectType "file", no line/side
 type PendingComment struct {
-	Path string
-	Line int    // line number on the chosen side
-	Side string // "LEFT" (removed) or "RIGHT" (added/context)
-	Body string
+	Path        string
+	Line        int    // ignored for file-level
+	Side        string // "LEFT" / "RIGHT" — ignored for file-level
+	StartLine   int    // 0 when single-line
+	StartSide   string // "LEFT" / "RIGHT" — empty when single-line
+	SubjectType string // "line" (default) or "file"
+	Body        string
 }
 
 // parsedDiffLine is one row of the file view.
@@ -127,6 +141,8 @@ func NewPRDiffView(repoRoot string, meta PRMeta, files []DiffFile, perFileDiff m
 		prFileDiffs: perFileDiff,
 		files:       files,
 		reviewEvent: "COMMENT",
+		visualStart: -1,
+		editingIdx:  -1,
 	}
 }
 
@@ -141,6 +157,10 @@ func (d DiffView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.idx == d.cursor {
 			d.parsed = parseDiff(msg.content)
 			d.fileScroll = 0
+			// Skip the leading meta + hunk rows so the cursor lands on the
+			// first real code line, where comments are actually meaningful.
+			d.fileCursor = firstCodeRow(d.parsed)
+			d.adjustFileScroll()
 		}
 	case tea.KeyMsg:
 		switch d.mode {
@@ -154,14 +174,23 @@ func (d DiffView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d.updateReviewMode(msg)
 		}
 	case reviewSubmittedMsg:
+		d.submitting = false
 		if msg.err != nil {
 			d.statusMsg = "✗ submit failed: " + msg.err.Error()
+			// Keep the user in review mode so they can retry / edit.
 		} else {
 			d.statusMsg = fmt.Sprintf("✓ review posted (%d comment(s))", len(d.pending))
 			d.pending = nil
+			d.mode = modeFile
 		}
-		d.mode = modeFile
 		return d, nil
+
+	case spinner.TickMsg:
+		if d.submitting {
+			var cmd tea.Cmd
+			d.spinner, cmd = d.spinner.Update(msg)
+			return d, cmd
+		}
 	}
 
 	// Forward unhandled events to the active text area so cursors blink, etc.
@@ -173,6 +202,39 @@ func (d DiffView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.reviewArea, cmd = d.reviewArea.Update(msg)
 	}
 	return d, cmd
+}
+
+// isCodeKind reports whether a parsed diff row is a real code line that the
+// cursor (and `c` to comment) should target. Meta + hunk rows are skipped.
+func isCodeKind(k diffLineKind) bool {
+	return k == kindContext || k == kindAdded || k == kindRemoved
+}
+
+// firstCodeRow returns the index of the first code row in p, or 0 if none.
+func firstCodeRow(p []parsedDiffLine) int {
+	for i, r := range p {
+		if isCodeKind(r.kind) {
+			return i
+		}
+	}
+	return 0
+}
+
+// nextCodeRow walks from `from` in `step` (+1 or -1), returning the next index
+// whose row is a code line. If none exists in that direction, the cursor
+// stops at the current position (no wrap).
+func nextCodeRow(p []parsedDiffLine, from, step int) int {
+	if len(p) == 0 {
+		return 0
+	}
+	i := from + step
+	for i >= 0 && i < len(p) {
+		if isCodeKind(p[i].kind) {
+			return i
+		}
+		i += step
+	}
+	return from
 }
 
 // adjustFileScroll keeps the cursor inside the viewport.
@@ -194,7 +256,8 @@ type reviewSubmittedMsg struct {
 
 func newCommentArea(width int) textarea.Model {
 	ta := textarea.New()
-	ta.Placeholder = "leave an inline comment… (ctrl+s submit · esc cancel)"
+	// Convention nudge — see ~/.claude/.../memory/review-comment-conventions.md
+	ta.Placeholder = "nit | suggestion | issue (blocking) | question | praise: body…"
 	ta.Focus()
 	ta.ShowLineNumbers = false
 	if width > 8 {
@@ -224,21 +287,49 @@ func (d DiffView) updateCommentMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+s":
 		body := strings.TrimSpace(d.commentArea.Value())
 		if body == "" {
-			return d, nil // empty comment — silently ignore
+			return d, nil
 		}
-		row := d.parsed[d.commentLineIdx]
-		side := "RIGHT"
-		line := row.newNum
-		if row.kind == kindRemoved {
-			side = "LEFT"
-			line = row.oldNum
-		}
-		d.pending = append(d.pending, PendingComment{
+		pc := PendingComment{
 			Path: d.files[d.cursor].Path,
-			Line: line,
-			Side: side,
 			Body: body,
-		})
+		}
+		if d.commentLineIdx < 0 {
+			pc.SubjectType = "file"
+		} else {
+			lo, hi := d.commentLineIdx, d.commentEndIdx
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			endRow := d.parsed[hi]
+			pc.SubjectType = "line"
+			pc.Side = "RIGHT"
+			pc.Line = endRow.newNum
+			if endRow.kind == kindRemoved {
+				pc.Side = "LEFT"
+				pc.Line = endRow.oldNum
+			}
+			// Multi-line: set start_line + start_side if the range spans >1 row.
+			if lo != hi {
+				startRow := d.parsed[lo]
+				pc.StartSide = "RIGHT"
+				pc.StartLine = startRow.newNum
+				if startRow.kind == kindRemoved {
+					pc.StartSide = "LEFT"
+					pc.StartLine = startRow.oldNum
+				}
+				// GitHub: start/end must share a side. If they differ, drop the
+				// start hint and just use the end as a single-line comment.
+				if pc.StartSide != pc.Side {
+					pc.StartLine = 0
+					pc.StartSide = ""
+				}
+			}
+		}
+		if d.editingIdx >= 0 && d.editingIdx < len(d.pending) {
+			d.pending[d.editingIdx] = pc
+		} else {
+			d.pending = append(d.pending, pc)
+		}
 		d.mode = modeFile
 		return d, nil
 	}
@@ -248,6 +339,15 @@ func (d DiffView) updateCommentMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (d DiffView) updateReviewMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// While a submit is in flight, ignore all keypresses except ctrl+c. This
+	// prevents a double-submit when the user impatiently re-hits ctrl+s before
+	// the spinner has rendered.
+	if d.submitting {
+		if msg.String() == "ctrl+c" {
+			return d, tea.Quit
+		}
+		return d, nil
+	}
 	switch msg.String() {
 	case "esc":
 		d.mode = modeFile
@@ -264,12 +364,34 @@ func (d DiffView) updateReviewMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return d, nil
 	case "ctrl+s":
-		if len(d.pending) == 0 && strings.TrimSpace(d.reviewArea.Value()) == "" {
-			d.statusMsg = "nothing to submit"
-			d.mode = modeFile
-			return d, nil
+		body := strings.TrimSpace(d.reviewArea.Value())
+		// GitHub rules:
+		//   APPROVE       — body + comments both optional
+		//   COMMENT       — needs at least body OR comments
+		//   REQUEST_CHANGES — body strongly recommended (and required if no comments)
+		switch d.reviewEvent {
+		case "COMMENT":
+			if body == "" && len(d.pending) == 0 {
+				d.statusMsg = "comment review needs a body or inline comments"
+				return d, nil
+			}
+		case "REQUEST_CHANGES":
+			if body == "" && len(d.pending) == 0 {
+				d.statusMsg = "request-changes needs a body or inline comments"
+				return d, nil
+			}
 		}
-		return d, submitReviewCmd(d.prMeta.Number, d.reviewArea.Value(), d.reviewEvent, d.pending)
+		// Lock submit and start a spinner so the user sees we're working.
+		d.submitting = true
+		d.statusMsg = ""
+		sp := spinner.New()
+		sp.Spinner = spinner.Dot
+		sp.Style = lipgloss.NewStyle().Foreground(colorBlue)
+		d.spinner = sp
+		return d, tea.Batch(
+			d.spinner.Tick,
+			submitReviewCmd(d.prMeta.Number, d.reviewArea.Value(), d.reviewEvent, d.pending),
+		)
 	}
 	var cmd tea.Cmd
 	d.reviewArea, cmd = d.reviewArea.Update(msg)
@@ -280,11 +402,17 @@ func (d DiffView) updateReviewMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // POST to /pulls/<n>/reviews with all inline comments + summary + event.
 func submitReviewCmd(prNum int, summary, event string, comments []PendingComment) tea.Cmd {
 	return func() tea.Msg {
+		// Each comment is either line-level (path + line + side + body) or
+		// file-level (path + subject_type=file + body). GitHub rejects the
+		// payload if line/side are present on a file-level entry, so omit them.
 		type apiComment struct {
-			Path string `json:"path"`
-			Line int    `json:"line"`
-			Side string `json:"side"`
-			Body string `json:"body"`
+			Path        string `json:"path"`
+			Line        int    `json:"line,omitempty"`
+			Side        string `json:"side,omitempty"`
+			StartLine   int    `json:"start_line,omitempty"`
+			StartSide   string `json:"start_side,omitempty"`
+			SubjectType string `json:"subject_type,omitempty"`
+			Body        string `json:"body"`
 		}
 		payload := struct {
 			Body     string       `json:"body,omitempty"`
@@ -295,9 +423,18 @@ func submitReviewCmd(prNum int, summary, event string, comments []PendingComment
 			Event: event,
 		}
 		for _, c := range comments {
-			payload.Comments = append(payload.Comments, apiComment{
-				Path: c.Path, Line: c.Line, Side: c.Side, Body: c.Body,
-			})
+			a := apiComment{Path: c.Path, Body: c.Body}
+			if c.SubjectType == "file" {
+				a.SubjectType = "file"
+			} else {
+				a.Line = c.Line
+				a.Side = c.Side
+				if c.StartLine > 0 && c.StartSide != "" {
+					a.StartLine = c.StartLine
+					a.StartSide = c.StartSide
+				}
+			}
+			payload.Comments = append(payload.Comments, a)
 		}
 		raw, err := json.Marshal(payload)
 		if err != nil {
@@ -365,15 +502,59 @@ func (d DiffView) updateFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q":
 		return d, tea.Quit
 	case "c":
-		// Only available when reviewing a PR.
-		if d.prMeta != nil && d.fileCursor < len(d.parsed) {
-			idx := d.fileCursor
-			row := d.parsed[idx]
-			if row.kind == kindContext || row.kind == kindAdded || row.kind == kindRemoved {
-				d.mode = modeComment
-				d.commentLineIdx = idx
-				d.commentArea = newCommentArea(d.width)
-				return d, textarea.Blink
+		// Line- or range-level comment. If a pending comment already exists on
+		// this line/range, open the overlay pre-filled to edit. If visualStart
+		// is set, comment spans visualStart..fileCursor.
+		if d.prMeta == nil || d.fileCursor >= len(d.parsed) {
+			return d, nil
+		}
+		row := d.parsed[d.fileCursor]
+		if !(row.kind == kindContext || row.kind == kindAdded || row.kind == kindRemoved) {
+			return d, nil
+		}
+		d.mode = modeComment
+		d.commentLineIdx = d.fileCursor
+		d.commentEndIdx = d.fileCursor
+		if d.visualStart >= 0 {
+			d.commentLineIdx = d.visualStart
+			d.commentEndIdx = d.fileCursor
+			d.visualStart = -1
+		}
+		// Look for an existing pending comment to edit.
+		d.editingIdx = d.findPendingForCursor()
+		d.commentArea = newCommentArea(d.width)
+		if d.editingIdx >= 0 {
+			d.commentArea.SetValue(d.pending[d.editingIdx].Body)
+		}
+		return d, textarea.Blink
+	case "C":
+		// File-level comment.
+		if d.prMeta != nil {
+			d.mode = modeComment
+			d.commentLineIdx = -1
+			d.commentEndIdx = -1
+			d.editingIdx = -1
+			d.commentArea = newCommentArea(d.width)
+			return d, textarea.Blink
+		}
+		return d, nil
+	case "D", "x":
+		// Delete pending comment on the focused row (or file-level pending if
+		// that's all the file has at this position).
+		if d.prMeta != nil {
+			if idx := d.findPendingForCursor(); idx >= 0 {
+				d.pending = append(d.pending[:idx], d.pending[idx+1:]...)
+				d.statusMsg = "deleted comment"
+			}
+		}
+		return d, nil
+	case "v":
+		// Toggle visual mode — anchor a multi-line selection at the cursor.
+		if d.prMeta != nil {
+			if d.visualStart < 0 {
+				d.visualStart = d.fileCursor
+			} else {
+				d.visualStart = -1
 			}
 		}
 		return d, nil
@@ -387,14 +568,10 @@ func (d DiffView) updateFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "h", "left":
 		d.mode = modeList
 	case "j", "down":
-		if d.fileCursor < len(d.parsed)-1 {
-			d.fileCursor++
-		}
+		d.fileCursor = nextCodeRow(d.parsed, d.fileCursor, +1)
 		d.adjustFileScroll()
 	case "k", "up":
-		if d.fileCursor > 0 {
-			d.fileCursor--
-		}
+		d.fileCursor = nextCodeRow(d.parsed, d.fileCursor, -1)
 		d.adjustFileScroll()
 	case "d", "ctrl+d":
 		d.fileCursor += d.viewportHeight() / 2
@@ -454,7 +631,13 @@ func (d DiffView) View() string {
 func (d DiffView) renderCommentOverlay() string {
 	var b strings.Builder
 	b.WriteString("\n" + titleStyle.Render("work") + " " + subtitleStyle.Render("comment"))
-	if d.commentLineIdx < len(d.parsed) {
+
+	switch {
+	case d.commentLineIdx < 0:
+		b.WriteString(dimStyle.Render(fmt.Sprintf("   %s (file-level)", d.files[d.cursor].Path)))
+		b.WriteString("\n\n")
+
+	case d.commentLineIdx < len(d.parsed):
 		row := d.parsed[d.commentLineIdx]
 		side := "RIGHT"
 		ln := row.newNum
@@ -463,10 +646,45 @@ func (d DiffView) renderCommentOverlay() string {
 			ln = row.oldNum
 		}
 		b.WriteString(dimStyle.Render(fmt.Sprintf("   %s:%d (%s)", d.files[d.cursor].Path, ln, side)))
+		b.WriteString("\n\n")
+		// Show 2 lines of context above + the focused line + 2 below, so the
+		// user has a glance at what they're commenting on without leaving the
+		// overlay.
+		b.WriteString(d.renderLineContext(d.commentLineIdx, d.commentLineIdx, 2))
+		b.WriteString("\n")
 	}
-	b.WriteString("\n\n")
+
 	b.WriteString(boxStyle.Render(d.commentArea.View()))
 	b.WriteString("\n" + helpStyle.Render("ctrl+s save · esc cancel"))
+	return b.String()
+}
+
+// renderLineContext renders rows around a focus index with the same renderer
+// used in file view, so the user sees the comment's target with full syntax +
+// row colouring. `lo` and `hi` mark a possible range (for multi-line); pass
+// the same index twice for a single line.
+func (d DiffView) renderLineContext(lo, hi, ctx int) string {
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	from := lo - ctx
+	if from < 0 {
+		from = 0
+	}
+	to := hi + ctx + 1
+	if to > len(d.parsed) {
+		to = len(d.parsed)
+	}
+	lexer := lexers.Match(d.files[d.cursor].Path)
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	masks := computeWordHighlights(d.parsed)
+	var b strings.Builder
+	for i := from; i < to; i++ {
+		focused := i >= lo && i <= hi
+		b.WriteString(d.renderRow(d.parsed[i], masks[i], lexer, focused, false) + "\n")
+	}
 	return b.String()
 }
 
@@ -501,13 +719,26 @@ func (d DiffView) renderReviewOverlay() string {
 			if len(snippet) > 60 {
 				snippet = snippet[:59] + "…"
 			}
-			b.WriteString(fmt.Sprintf("  • %s:%d  %s\n", c.Path, c.Line, snippet))
+			loc := fmt.Sprintf("%s:%d", c.Path, c.Line)
+			if c.SubjectType == "file" {
+				loc = fmt.Sprintf("%s (file-level)", c.Path)
+			}
+			b.WriteString(fmt.Sprintf("  • %s  %s\n", loc, snippet))
 		}
 		b.WriteString("\n")
 	}
 
 	b.WriteString(boxStyle.Render(d.reviewArea.View()))
-	b.WriteString("\n" + helpStyle.Render("tab cycle event · ctrl+s submit · esc cancel"))
+	b.WriteString("\n")
+
+	if d.submitting {
+		b.WriteString(lipgloss.NewStyle().Foreground(colorBlue).Bold(true).PaddingLeft(1).
+			Render(d.spinner.View()+" submitting review to GitHub…") + "\n")
+	} else if d.statusMsg != "" {
+		// Surface failures (or any leftover hint) just above the help line.
+		b.WriteString(helpStyle.Render(d.statusMsg) + "\n")
+	}
+	b.WriteString(helpStyle.Render("tab cycle event · ctrl+s submit · esc cancel"))
 	return b.String()
 }
 
@@ -610,24 +841,42 @@ func (d DiffView) renderFile() string {
 	if end > len(d.parsed) {
 		end = len(d.parsed)
 	}
-	for i := d.fileScroll; i < end; i++ {
-		hasComment := d.lineHasPending(i)
-		b.WriteString(d.renderRow(d.parsed[i], hiMasks[i], lexer, i == d.fileCursor, hasComment) + "\n")
+	// Visual-mode range
+	vLo, vHi := -1, -1
+	if d.visualStart >= 0 {
+		vLo, vHi = d.visualStart, d.fileCursor
+		if vLo > vHi {
+			vLo, vHi = vHi, vLo
+		}
 	}
 
-	if len(d.parsed) > vh {
-		pct := 0
-		if len(d.parsed) > 0 {
-			pct = (d.fileScroll + vh) * 100 / len(d.parsed)
-			if pct > 100 {
-				pct = 100
-			}
+	for i := d.fileScroll; i < end; i++ {
+		hasComment := d.lineHasPending(i)
+		focused := i == d.fileCursor || (vLo >= 0 && i >= vLo && i <= vHi)
+		b.WriteString(d.renderRow(d.parsed[i], hiMasks[i], lexer, focused, hasComment) + "\n")
+	}
+
+	if len(d.parsed) > 0 {
+		pages := (len(d.parsed) + vh - 1) / vh
+		page := (d.fileScroll / vh) + 1
+		if page > pages {
+			page = pages
 		}
-		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("[%d%%]", pct)))
+		pct := (d.fileScroll + vh) * 100 / len(d.parsed)
+		if pct > 100 {
+			pct = 100
+		}
+		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("[page %d/%d · %d%%]", page, pages, pct)))
 	}
 	help := "j/k line · d/u page · g/G top/bottom · n/p next/prev file · esc back · q quit"
 	if d.prMeta != nil {
-		help = "j/k line · d/u page · n/p file · c comment · R review (" + fmt.Sprintf("%d pending", len(d.pending)) + ") · esc back · q quit"
+		vmark := ""
+		if d.visualStart >= 0 {
+			vmark = " · VISUAL"
+		}
+		help = fmt.Sprintf(
+			"j/k · d/u · n/p · v select%s · c comment · C file · D delete · R review (%d) · esc · q",
+			vmark, len(d.pending))
 	}
 	b.WriteString("\n" + helpStyle.Render(help))
 	if d.statusMsg != "" {
@@ -637,7 +886,8 @@ func (d DiffView) renderFile() string {
 	return b.String()
 }
 
-// lineHasPending reports whether a pending comment targets this row.
+// lineHasPending reports whether a pending comment targets this row (including
+// rows inside a multi-line range).
 func (d DiffView) lineHasPending(idx int) bool {
 	if idx >= len(d.parsed) {
 		return false
@@ -645,17 +895,49 @@ func (d DiffView) lineHasPending(idx int) bool {
 	row := d.parsed[idx]
 	path := d.files[d.cursor].Path
 	for _, c := range d.pending {
-		if c.Path != path {
+		if c.Path != path || c.SubjectType == "file" {
 			continue
 		}
-		if c.Side == "LEFT" && row.oldNum == c.Line {
-			return true
+		ln := row.newNum
+		if c.Side == "LEFT" {
+			ln = row.oldNum
 		}
-		if c.Side == "RIGHT" && row.newNum == c.Line {
+		if c.StartLine > 0 {
+			if ln >= c.StartLine && ln <= c.Line {
+				return true
+			}
+		} else if ln == c.Line {
 			return true
 		}
 	}
 	return false
+}
+
+// findPendingForCursor returns the index of the pending comment whose target
+// covers the focused line, or -1 if none.
+func (d DiffView) findPendingForCursor() int {
+	if d.fileCursor >= len(d.parsed) {
+		return -1
+	}
+	row := d.parsed[d.fileCursor]
+	path := d.files[d.cursor].Path
+	for i, c := range d.pending {
+		if c.Path != path || c.SubjectType == "file" {
+			continue
+		}
+		ln := row.newNum
+		if c.Side == "LEFT" {
+			ln = row.oldNum
+		}
+		if c.StartLine > 0 {
+			if ln >= c.StartLine && ln <= c.Line {
+				return i
+			}
+		} else if ln == c.Line {
+			return i
+		}
+	}
+	return -1
 }
 
 // renderRow lays out one parsed line with gutter + prefix cell + syntax-coloured
