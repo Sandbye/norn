@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,10 +47,29 @@ func main() {
 			cmdActivityTick(repoRoot)
 			return
 		case "--dashboard", "-d":
-			cmdDashboard(cfg)
+			cmdDashboard(cfg, repoRoot)
 			return
 		case "--refresh-docs":
 			cmdRefreshDocs()
+			return
+		case "--diff", "diff":
+			plain := false
+			prNum := ""
+			for _, a := range args[1:] {
+				switch {
+				case a == "--plain" || a == "-p":
+					plain = true
+				case strings.HasPrefix(a, "#"):
+					prNum = strings.TrimPrefix(a, "#")
+				case isAllDigits(a):
+					prNum = a
+				}
+			}
+			if prNum != "" {
+				cmdDiffPR(cfg, repoRoot, prNum, plain)
+				return
+			}
+			cmdDiff(cfg, repoRoot, plain)
 			return
 		case "init":
 			cmdInit(repoRoot)
@@ -90,7 +111,7 @@ func main() {
 	// Outside any git repo with no other intent → open the cross-session
 	// dashboard. Lets you `work` from any random terminal pane.
 	if repoRoot == "" && initialView == tui.ViewMenu {
-		cmdDashboard(cfg)
+		cmdDashboard(cfg, "")
 		return
 	}
 	if repoRoot == "" && initialView != tui.ViewClean {
@@ -216,9 +237,13 @@ func reapStale(cfg config.Config, repoRoot string) {
 }
 
 func directCreate(cfg config.Config, repoRoot, kind, hint string) {
-	// Pick first base branch
+	// Default base: pr_base (single source of truth for branch + PR target).
+	// Falls back to first base_branches entry, then "master".
 	base := "master"
-	if len(cfg.BaseBranches) > 0 {
+	switch {
+	case cfg.PRBase != "":
+		base = cfg.PRBase
+	case len(cfg.BaseBranches) > 0:
 		base = cfg.BaseBranches[0]
 	}
 
@@ -283,6 +308,355 @@ func cmdStatus(cfg config.Config, repoRoot string) {
 // cmdActivityTick bumps last_activity_at for the session matching the current
 // repo + branch. Called by the activity-log.py hook on every Claude tool use.
 // Silent on no-op; never fails the caller.
+// isAllDigits returns true if s consists solely of ASCII digits and is non-empty.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// cmdDiffPR shows the diff for any open PR (yours or a colleague's). Uses
+// `gh pr diff` so no local checkout is needed. Renders in the same TUI as
+// the local-branch view, with PR metadata in the header instead of "vs branch".
+func cmdDiffPR(cfg config.Config, repoRoot, prNum string, plain bool) {
+	if repoRoot == "" {
+		fmt.Fprintln(os.Stderr, "error: not inside a git repository (gh needs repo context)")
+		os.Exit(1)
+	}
+
+	// Fetch PR metadata so the header shows useful context.
+	meta, err := fetchPRMeta(repoRoot, prNum)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Fetch the full diff once. Parse per-file from there.
+	diffOut, err := exec.Command("gh", "pr", "diff", prNum).Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: gh pr diff failed: %v\n", err)
+		os.Exit(1)
+	}
+	files, perFileDiff := splitDiffByFile(string(diffOut))
+
+	if plain {
+		printDiffPlain(meta.BaseRef, meta.Commits, files, "")
+		return
+	}
+
+	dv := tui.NewPRDiffView(repoRoot, meta, files, perFileDiff)
+	p := tea.NewProgram(dv, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "diff TUI error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// fetchPRMeta pulls PR metadata for the header.
+func fetchPRMeta(repoRoot, prNum string) (tui.PRMeta, error) {
+	out, err := exec.Command("gh", "pr", "view", prNum,
+		"--json", "number,title,author,baseRefName,headRefName,commits").Output()
+	if err != nil {
+		return tui.PRMeta{}, fmt.Errorf("gh pr view: %w", err)
+	}
+	var raw struct {
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		Author      struct{ Login string } `json:"author"`
+		BaseRefName string `json:"baseRefName"`
+		HeadRefName string `json:"headRefName"`
+		Commits     []any  `json:"commits"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return tui.PRMeta{}, fmt.Errorf("parse pr view: %w", err)
+	}
+	return tui.PRMeta{
+		Number:  raw.Number,
+		Title:   raw.Title,
+		Author:  raw.Author.Login,
+		BaseRef: raw.BaseRefName,
+		HeadRef: raw.HeadRefName,
+		Commits: len(raw.Commits),
+	}, nil
+}
+
+// splitDiffByFile takes one big unified diff and produces:
+//   - a DiffFile entry per file (path + added/removed line counts)
+//   - a map from file path → that file's slice of raw diff text
+func splitDiffByFile(diff string) ([]tui.DiffFile, map[string]string) {
+	files := []tui.DiffFile{}
+	perFile := map[string]string{}
+
+	lines := strings.Split(diff, "\n")
+	var (
+		cur     strings.Builder
+		curPath string
+		added   int
+		removed int
+	)
+	flush := func() {
+		if curPath == "" {
+			return
+		}
+		files = append(files, tui.DiffFile{Path: curPath, Added: added, Removed: removed})
+		perFile[curPath] = cur.String()
+		cur.Reset()
+		added, removed = 0, 0
+	}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "diff --git ") {
+			flush()
+			// "diff --git a/<path> b/<path>" — take the b/ side (post-image)
+			parts := strings.Fields(line)
+			if len(parts) >= 4 {
+				curPath = strings.TrimPrefix(parts[3], "b/")
+			}
+		}
+		if curPath != "" {
+			cur.WriteString(line)
+			cur.WriteByte('\n')
+			switch {
+			case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+				added++
+			case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+				removed++
+			}
+		}
+	}
+	flush()
+	return files, perFile
+}
+
+// cmdDiff shows what's about to be shipped: current branch vs pr_base.
+// TUI by default; plain text mode behind --plain for piping / scripts.
+func cmdDiff(cfg config.Config, repoRoot string, plain bool) {
+	if repoRoot == "" {
+		fmt.Fprintln(os.Stderr, "error: not inside a git repository")
+		os.Exit(1)
+	}
+	target := resolvePRBase(cfg)
+	if target == "" {
+		fmt.Fprintln(os.Stderr, "error: no pr_base or base_branches configured")
+		os.Exit(1)
+	}
+
+	branch := strings.TrimSpace(currentBranch(repoRoot))
+	if branch == "" {
+		fmt.Fprintln(os.Stderr, "error: could not determine current branch")
+		os.Exit(1)
+	}
+	if branch == target {
+		fmt.Printf("On %s — nothing to compare.\n", target)
+		return
+	}
+
+	ref := "origin/" + target
+	ancestorErr := exec.Command("git", "-C", repoRoot, "merge-base", "--is-ancestor", ref, "HEAD").Run()
+	mergeBase, _ := gitOutput(repoRoot, "git", "merge-base", ref, "HEAD")
+	mergeBase = strings.TrimSpace(mergeBase)
+
+	warn := ""
+	if ancestorErr != nil {
+		warn = fmt.Sprintf(
+			"⚠ branch not forked from %s · actual fork: %s · diff includes commits not in %s · fix: `git rebase --onto %s <actual-base> HEAD`",
+			target, shortSha(mergeBase), ref, ref,
+		)
+	}
+
+	commitCountRaw, _ := gitOutput(repoRoot, "git", "rev-list", "--count", ref+"..HEAD")
+	commitCount, _ := strconv.Atoi(strings.TrimSpace(commitCountRaw))
+
+	numstat, _ := gitOutput(repoRoot, "git", "diff", "--numstat", ref+"...HEAD")
+	files := parseNumstat(numstat)
+
+	if plain {
+		printDiffPlain(target, commitCount, files, warn)
+		return
+	}
+
+	dv := tui.NewDiffView(repoRoot, ref, commitCount, files, warn)
+	p := tea.NewProgram(dv, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "diff TUI error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func parseNumstat(numstat string) []tui.DiffFile {
+	var out []tui.DiffFile
+	for _, line := range strings.Split(numstat, "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+		added, _ := strconv.Atoi(parts[0])
+		removed, _ := strconv.Atoi(parts[1])
+		out = append(out, tui.DiffFile{Path: parts[2], Added: added, Removed: removed})
+	}
+	return out
+}
+
+func printDiffPlain(target string, commits int, files []tui.DiffFile, warn string) {
+	if warn != "" {
+		fmt.Println(warnStyle(warn))
+		fmt.Println()
+	}
+	if len(files) == 0 {
+		fmt.Printf("No diff vs %s.\n", target)
+		return
+	}
+	added, removed := 0, 0
+	for _, f := range files {
+		added += f.Added
+		removed += f.Removed
+	}
+	fmt.Printf("%d files changed, +%d / -%d · base: %s · %d commit(s)\n\n", len(files), added, removed, target, commits)
+
+	groups := groupTUI(files)
+	for _, g := range groups {
+		fmt.Printf("%-40s %4d file(s)   +%-6d / -%d\n", g.dir+"/", len(g.files), g.added, g.removed)
+		for _, f := range g.files {
+			fmt.Printf("  %-50s +%-6d / -%d\n", f.relPath, f.added, f.removed)
+		}
+		fmt.Println()
+	}
+}
+
+func groupTUI(files []tui.DiffFile) []diffGroup {
+	byDir := map[string]*diffGroup{}
+	var order []string
+	for _, f := range files {
+		dir := topTwoDirs(f.Path)
+		if _, ok := byDir[dir]; !ok {
+			byDir[dir] = &diffGroup{dir: dir}
+			order = append(order, dir)
+		}
+		g := byDir[dir]
+		g.files = append(g.files, diffFile{relPath: relTo(f.Path, dir), added: f.Added, removed: f.Removed})
+		g.added += f.Added
+		g.removed += f.Removed
+	}
+	out := make([]diffGroup, 0, len(order))
+	for _, d := range order {
+		g := byDir[d]
+		sortFilesByChurn(g.files)
+		out = append(out, *g)
+	}
+	return out
+}
+
+func resolvePRBase(cfg config.Config) string {
+	if cfg.PRBase != "" {
+		return cfg.PRBase
+	}
+	if len(cfg.BaseBranches) > 0 {
+		return cfg.BaseBranches[0]
+	}
+	return ""
+}
+
+func gitOutput(dir string, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+func shortSha(s string) string {
+	if len(s) > 7 {
+		return s[:7]
+	}
+	return s
+}
+
+func warnStyle(s string) string {
+	// Yellow ANSI in case terminal supports color; falls back to plain text fine.
+	return "\033[33m" + s + "\033[0m"
+}
+
+type diffFile struct {
+	relPath string
+	added   int
+	removed int
+}
+
+type diffGroup struct {
+	dir     string
+	files   []diffFile
+	added   int
+	removed int
+}
+
+// groupByDir parses git diff --numstat output and groups by top two path
+// components, falling back to top-1 if shallow.
+func groupByDir(numstat string) []diffGroup {
+	byDir := map[string]*diffGroup{}
+	var order []string
+
+	for _, line := range strings.Split(numstat, "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+		added, _ := strconv.Atoi(parts[0])
+		removed, _ := strconv.Atoi(parts[1])
+		path := parts[2]
+		// "-" means binary file
+		dir := topTwoDirs(path)
+		if _, ok := byDir[dir]; !ok {
+			byDir[dir] = &diffGroup{dir: dir}
+			order = append(order, dir)
+		}
+		g := byDir[dir]
+		g.files = append(g.files, diffFile{relPath: relTo(path, dir), added: added, removed: removed})
+		g.added += added
+		g.removed += removed
+	}
+
+	out := make([]diffGroup, 0, len(order))
+	for _, d := range order {
+		g := byDir[d]
+		// Sort files largest first within group
+		sortFilesByChurn(g.files)
+		out = append(out, *g)
+	}
+	return out
+}
+
+func topTwoDirs(p string) string {
+	parts := strings.Split(p, "/")
+	switch len(parts) {
+	case 1:
+		return "(root)"
+	case 2:
+		return parts[0]
+	default:
+		return parts[0] + "/" + parts[1]
+	}
+}
+
+func relTo(p, dir string) string {
+	if dir == "(root)" {
+		return p
+	}
+	if strings.HasPrefix(p, dir+"/") {
+		return p[len(dir)+1:]
+	}
+	return p
+}
+
+func sortFilesByChurn(fs []diffFile) {
+	sort.Slice(fs, func(i, j int) bool {
+		return (fs[i].added + fs[i].removed) > (fs[j].added + fs[j].removed)
+	})
+}
+
 // cmdInit scaffolds a project config for the current repo. Detects stack,
 // suggests verify commands + base branches. Refuses to overwrite an existing
 // file — tells you where it lives so you can open it yourself.
@@ -292,7 +666,7 @@ func cmdInit(repoRoot string) {
 		os.Exit(1)
 	}
 	home, _ := os.UserHomeDir()
-	repoName := filepath.Base(repoRoot)
+	repoName := originRepoName(repoRoot)
 	target := filepath.Join(home, ".config", "work", "projects", repoName+".yaml")
 
 	if _, err := os.Stat(target); err == nil {
@@ -694,7 +1068,7 @@ func checkActiveRepo(cfg config.Config, repoRoot string) doctorCheck {
 		return doctorCheck{name: "current dir: not in a git repo (skipping)"}
 	}
 	home, _ := os.UserHomeDir()
-	repoName := filepath.Base(repoRoot)
+	repoName := originRepoName(repoRoot)
 	p := filepath.Join(home, ".config", "work", "projects", repoName+".yaml")
 	if _, err := os.Stat(p); err != nil {
 		return doctorCheck{
@@ -821,7 +1195,7 @@ func cmdActivityTick(repoRoot string) {
 	if branch == "" {
 		return
 	}
-	repo := filepathBase(repoRoot)
+	repo := originRepoName(repoRoot)
 	id := state.MakeID(repo, branch)
 
 	store, err := state.Load()
@@ -849,8 +1223,12 @@ func cmdActivityTick(repoRoot string) {
 	_ = store.Save()
 }
 
-func cmdDashboard(cfg config.Config) {
-	dash := tui.NewDashboard(cfg)
+func cmdDashboard(cfg config.Config, repoRoot string) {
+	scope := ""
+	if repoRoot != "" {
+		scope = originRepoName(repoRoot)
+	}
+	dash := tui.NewDashboard(cfg, scope)
 	p := tea.NewProgram(dash, tea.WithAltScreen())
 	m, err := p.Run()
 	if err != nil {
@@ -877,7 +1255,7 @@ func currentBranch(repoRoot string) string {
 // upsertSession records a newly created worktree to the session store so the
 // dashboard sees it immediately, before any activity-tick fires.
 func upsertSession(repoRoot, kind, branch, wtPath, hint string) {
-	repo := filepathBase(repoRoot)
+	repo := originRepoName(repoRoot)
 	id := state.MakeID(repo, branch)
 	store, err := state.Load()
 	if err != nil {
@@ -925,7 +1303,7 @@ func cmdProjectConfig(cfg config.Config, repoRoot string) {
 		"config":    cfg,
 	}
 	if repoRoot != "" {
-		out["repo_name"] = filepathBase(repoRoot)
+		out["repo_name"] = originRepoName(repoRoot)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -934,6 +1312,28 @@ func cmdProjectConfig(cfg config.Config, repoRoot string) {
 
 func filepathBase(p string) string {
 	return filepath.Base(p)
+}
+
+// originRepoName returns the upstream repo basename for any directory inside
+// a git repo or worktree. Worktrees report the main repo's name, not the
+// worktree dir's basename — so per-project state + config stays stable.
+func originRepoName(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--git-common-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		return filepath.Base(dir)
+	}
+	common := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(dir, common)
+	}
+	if abs, err := filepath.EvalSymlinks(common); err == nil {
+		common = abs
+	}
+	return filepath.Base(filepath.Dir(common))
 }
 
 func cmdHelp() {
@@ -950,6 +1350,9 @@ Usage:
   work --project-config   Print resolved config as JSON
   work -d, --dashboard    Live TUI of all known sessions
                           (also opens by default when run outside any git repo)
+  work diff               TUI diff vs pr_base (warn if forked from wrong base)
+  work diff <pr#>         TUI diff of any open PR (yours or colleague's)
+  work diff --plain       Plain text diff for piping
   work init               Scaffold a project config for the current repo
   work doctor             Diagnose hooks, skills, configs, docs, state
   work --refresh-docs     git pull every doc repo referenced in any project config
