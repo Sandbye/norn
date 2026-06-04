@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -74,39 +75,51 @@ func CommonDir(dir string) (string, error) {
 func ListWorktrees(worktreeDir string, filterCommon string) ([]Worktree, error) {
 	var results []Worktree
 
-	for _, kind := range []string{"task", "review"} {
-		kindDir := filepath.Join(worktreeDir, kind)
-		entries, err := os.ReadDir(kindDir)
-		if err != nil {
+	kinds, err := os.ReadDir(worktreeDir)
+	if err != nil {
+		return results, nil
+	}
+
+	for _, kindEntry := range kinds {
+		if !kindEntry.IsDir() {
 			continue
 		}
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
+		kind := kindEntry.Name()
+		kindDir := filepath.Join(worktreeDir, kind)
+
+		// Walk inside kind dir. Branch may be `feat/CU-xxx/desc` so the worktree
+		// dir is nested two levels deep; also keep flat layout for legacy
+		// `task/foo-123` worktrees. Stop descending once a `.git` marker is hit.
+		_ = filepath.Walk(kindDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || !info.IsDir() || path == kindDir {
+				return nil
 			}
-			wtPath := filepath.Join(kindDir, e.Name())
+			if _, statErr := os.Stat(filepath.Join(path, ".git")); statErr != nil {
+				return nil
+			}
 
 			if filterCommon != "" {
-				wc, err := CommonDir(wtPath)
+				wc, err := CommonDir(path)
 				if err != nil || wc != filterCommon {
-					continue
+					return filepath.SkipDir
 				}
 			}
 
-			branch := branchAt(wtPath)
-			lastCommit, commitMsg := lastCommitInfo(wtPath)
+			branch := branchAt(path)
+			lastCommit, commitMsg := lastCommitInfo(path)
 
-			rel := filepath.Join(kind, e.Name())
+			rel, _ := filepath.Rel(worktreeDir, path)
 
 			results = append(results, Worktree{
-				Path:       wtPath,
+				Path:       path,
 				Branch:     branch,
 				RelPath:    rel,
 				Kind:       kind,
 				LastCommit: lastCommit,
 				CommitMsg:  commitMsg,
 			})
-		}
+			return filepath.SkipDir
+		})
 	}
 
 	return results, nil
@@ -219,21 +232,20 @@ func SymlinkEnvFiles(repoRoot, wtPath string) error {
 	})
 }
 
+// CleanEmptyDirs walks worktreeDir bottom-up and removes every empty directory.
+// `os.Remove` only succeeds on empty dirs, so non-empty trees stay untouched.
 func CleanEmptyDirs(worktreeDir string) {
-	for _, kind := range []string{"task", "review"} {
-		kindDir := filepath.Join(worktreeDir, kind)
-		entries, err := os.ReadDir(kindDir)
-		if err != nil {
-			continue
+	var dirs []string
+	_ = filepath.Walk(worktreeDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && info.IsDir() {
+			dirs = append(dirs, path)
 		}
-		for _, e := range entries {
-			p := filepath.Join(kindDir, e.Name())
-			// Remove if empty
-			os.Remove(p)
-		}
-		os.Remove(kindDir)
+		return nil
+	})
+	// Reverse so children removed before parents.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		os.Remove(dirs[i])
 	}
-	os.Remove(worktreeDir)
 }
 
 func Age(t time.Time) string {
@@ -251,13 +263,104 @@ func Age(t time.Time) string {
 	}
 }
 
+// MakeBranch produces a branch name from a hint.
+//
+//	kind == "review" → review/CU-<id>/<desc> (or review/<desc>, review/<ts>)
+//	kind == "task"   → <type>/CU-<id>/<desc> where <type> is inferred from the
+//	                    hint's first matching keyword (fix/chore/refactor/docs/
+//	                    test), defaulting to feat.
+//
+// CU id is parsed from either `CU-<id>` literals or clickup.com/t/<id> URLs.
+// Both the type keyword and CU id are stripped from the hint before slugging.
 func MakeBranch(kind, hint string) string {
-	ts := time.Now().Format("150405")
-	if hint == "" {
-		return fmt.Sprintf("%s/%s-%s", kind, time.Now().Format("20060102"), ts)
+	cuID, hintRest := extractCUID(hint)
+
+	var prefix string
+	if kind == "review" {
+		prefix = "review"
+	} else {
+		prefix, hintRest = inferType(hintRest)
 	}
-	slug := slugify(hint)
-	return fmt.Sprintf("%s/%s-%s", kind, slug, ts)
+
+	desc := slugify(hintRest)
+
+	parts := []string{prefix}
+	if cuID != "" {
+		parts = append(parts, "CU-"+cuID)
+	}
+	if desc != "" {
+		parts = append(parts, desc)
+	}
+	// Fallback if nothing distinguishing — use timestamp as desc.
+	if len(parts) == 1 {
+		parts = append(parts, time.Now().Format("20060102-150405"))
+	}
+	return strings.Join(parts, "/")
+}
+
+var cuRegex = regexp.MustCompile(`(?i)(?:\bCU-|\S*\bclickup\.com/t/)([a-z0-9]+)\S*`)
+
+// extractCUID returns the CU task id (lowercase, no prefix) and the hint with
+// the matched portion removed. Empty id means no match.
+func extractCUID(hint string) (string, string) {
+	m := cuRegex.FindStringSubmatchIndex(hint)
+	if m == nil {
+		return "", hint
+	}
+	id := strings.ToLower(hint[m[2]:m[3]])
+	rest := hint[:m[0]] + " " + hint[m[1]:]
+	return id, rest
+}
+
+// inferType picks a conventional-commit prefix from the first matching keyword
+// in the hint. Returns the prefix and the hint with that keyword stripped so it
+// doesn't pollute the slug. Default: feat.
+func inferType(hint string) (string, string) {
+	lower := strings.ToLower(hint)
+	keywords := []struct {
+		token string
+		kind  string
+	}{
+		{"refactor", "refactor"},
+		{"cleanup", "chore"},
+		{"chore", "chore"},
+		{"tidy", "chore"},
+		{"docs", "docs"},
+		{"documentation", "docs"},
+		{"doc", "docs"},
+		{"tests", "test"},
+		{"test", "test"},
+		{"fix", "fix"},
+		{"bug", "fix"},
+		{"broken", "fix"},
+		{"error", "fix"},
+		{"feat", "feat"},
+		{"feature", "feat"},
+		{"add", "feat"},
+		{"new", "feat"},
+		{"implement", "feat"},
+		{"create", "feat"},
+	}
+	for _, k := range keywords {
+		idx := strings.Index(lower, k.token)
+		if idx < 0 {
+			continue
+		}
+		// Word boundary check — avoid matching inside another word.
+		if idx > 0 && isWordChar(lower[idx-1]) {
+			continue
+		}
+		end := idx + len(k.token)
+		if end < len(lower) && isWordChar(lower[end]) {
+			continue
+		}
+		return k.kind, hint[:idx] + hint[end:]
+	}
+	return "feat", hint
+}
+
+func isWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
 func slugify(s string) string {

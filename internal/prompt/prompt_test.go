@@ -15,7 +15,7 @@ func TestRenderTask(t *testing.T) {
 		Setup:   "pnpm cleanup",
 	}
 
-	out, err := Render(cfg, "task", "fix the export bug")
+	out, err := Render(cfg, "task", "fix the export bug", "master")
 	if err != nil {
 		t.Fatalf("Render task: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestRenderReview(t *testing.T) {
 		User: config.User{Name: "Test User", Email: "test@example.com"},
 	}
 
-	out, err := Render(cfg, "review", "CU-86c98r0j6")
+	out, err := Render(cfg, "review", "CU-86c98r0j6", "master")
 	if err != nil {
 		t.Fatalf("Render review: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestRenderNoHint(t *testing.T) {
 		User: config.User{Name: "Test"},
 	}
 
-	out, err := Render(cfg, "task", "")
+	out, err := Render(cfg, "task", "", "master")
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}

@@ -97,7 +97,16 @@ Doesn't fit the above. Follow standard project conventions. Ask more questions t
 ## Git & PR Workflow
 
 ### Base branch
-The base branch was chosen at worktree creation time. Default is `master`. Check the current branch's upstream if unsure.
+
+This worktree was forked from `{{.Base}}`. **All diffs, comparisons, and "what changed?" lookups MUST use `{{.Base}}` as the baseline.**
+
+- `git diff {{.Base}}...HEAD`
+- `git log {{.Base}}..HEAD`
+- `git diff origin/{{.Base}}...HEAD` (when comparing against the remote)
+
+Do NOT default to `master` or `main` when `{{.Base}}` is something else. Common failure mode: agents assume `master` for every diff and miss commits that landed in a staging branch like `user_test`. If `{{.Base}}` is `user_test`, only `user_test` matters — ignore `master` entirely. If `{{.Base}}` is `master`, both `master` and `user_test` may be relevant for understanding the change's path to production, but the diff baseline is still `master`.
+{{if and .PRBase (ne .PRBase .Base)}}
+**Dual-base flow:** this repo branches from `{{.Base}}` but PRs target `{{.PRBase}}`. The PR target is separate from the diff baseline — for any local comparison stick with `{{.Base}}`.{{end}}
 
 ### Commits
 Use conventional commits. Format: `type(scope): description`
@@ -128,7 +137,7 @@ When the task is complete:
 1. Push the branch to origin.
 2. Create a **draft** PR using `gh pr create --draft --assignee {{.User.Name | printf "%s"}}`.
 3. **Include the ClickUp task ID** in the PR title or body using `CU-{task_id}` format — ClickUp auto-links it. Omit if no ClickUp task.
-4. Set the PR base to the correct branch (`master` or `user_test`).
+4. Set the PR base to `{{if .PRBase}}{{.PRBase}}{{else}}{{.Base}}{{end}}` (`gh pr create --base {{if .PRBase}}{{.PRBase}}{{else}}{{.Base}}{{end}}`).
 5. Do NOT update ClickUp status yet — the PR is still a draft.
 6. Open the PR in the browser: `gh pr view --web`.
 7. **Never** add `Co-Authored-By` lines to commits.

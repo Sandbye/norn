@@ -36,12 +36,24 @@ type Config struct {
 	Setup        string       `yaml:"setup,omitempty" json:"setup,omitempty"`
 	BaseBranches []string     `yaml:"base_branches" json:"base_branches"`
 
-	// PRBase is the default branch new worktrees fork from and that PRs target.
-	// Keeps "branch base" and "PR base" identical → diff contains only your
-	// commits. If unset, falls back to BaseBranches[0].
-	//
-	// Hotfix workflow can override per-invocation (future: `work --from master`).
+	// PRBase is the default PR target — where finished branches merge back to.
+	// e.g. user_test for staging-first workflows. Override per-PR with the
+	// HotfixTarget rule below.
 	PRBase string `yaml:"pr_base,omitempty" json:"pr_base,omitempty"`
+
+	// BranchBase is the source branch new worktrees fork from. Often the
+	// production branch (master) even when PRs target a staging branch. If
+	// unset, falls back to PRBase, then git's detected default.
+	BranchBase string `yaml:"branch_base,omitempty" json:"branch_base,omitempty"`
+
+	// HotfixTarget is the PR target for branches whose name starts with
+	// HotfixPrefix (default "hotfix/"). When set, /open-pr and `work diff`
+	// route hotfix branches to this branch instead of PRBase.
+	HotfixTarget string `yaml:"hotfix_target,omitempty" json:"hotfix_target,omitempty"`
+
+	// HotfixPrefix is the branch-name prefix that triggers the hotfix routing.
+	// Defaults to "hotfix/" if unset.
+	HotfixPrefix string `yaml:"hotfix_prefix,omitempty" json:"hotfix_prefix,omitempty"`
 	User         User         `yaml:"user" json:"user"`
 	Templates    TemplatesDir `yaml:"templates,omitempty" json:"templates,omitempty"`
 
