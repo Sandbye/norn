@@ -17,17 +17,21 @@ var embedded embed.FS
 
 // Data holds all values available to templates.
 type Data struct {
-	Kind       string // "task" or "review"
-	HintBlock  string
-	User       config.User
-	ClickUp    *config.ClickUp
-	Verify     []string
-	Setup      string
-	Generated  string
+	Kind      string // "task" or "review"
+	HintBlock string
+	User      config.User
+	ClickUp   *config.ClickUp
+	Verify    []string
+	Setup     string
+	Base      string // branch this worktree was forked from (diff baseline)
+	PRBase    string // default PR target (cfg.pr_base — may equal Base or differ)
+	Generated string
 }
 
 // Render loads the template for the given kind and renders it with cfg + hint.
-func Render(cfg config.Config, kind, hint string) (string, error) {
+// `base` is the branch the worktree was forked from — agents must diff against
+// it, not assume `master`.
+func Render(cfg config.Config, kind, hint, base string) (string, error) {
 	tmplName := kind + ".md.tmpl"
 
 	data := Data{
@@ -37,6 +41,8 @@ func Render(cfg config.Config, kind, hint string) (string, error) {
 		ClickUp:   cfg.ClickUp,
 		Verify:    cfg.Verify,
 		Setup:     cfg.Setup,
+		Base:      base,
+		PRBase:    cfg.PRBase,
 		Generated: time.Now().Format("2006-01-02 15:04"),
 	}
 

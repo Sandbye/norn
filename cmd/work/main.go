@@ -105,13 +105,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: not inside a git repository")
 			os.Exit(1)
 		}
+		// Extract `--from <branch>` / `-b <branch>` if present, so the rest
+		// can flow into the hint without polluting it.
+		baseOverride, rest := extractFromFlag(args)
 		kind := "task"
-		hint := strings.Join(args, " ")
-		if args[0] == "--review" {
+		hint := strings.Join(rest, " ")
+		if len(rest) > 0 && rest[0] == "--review" {
 			kind = "review"
-			hint = strings.Join(args[1:], " ")
+			hint = strings.Join(rest[1:], " ")
 		}
-		directCreate(cfg, repoRoot, kind, hint)
+		directCreate(cfg, repoRoot, kind, hint, baseOverride)
 		return
 	}
 
@@ -140,13 +143,16 @@ func main() {
 	switch result.Action {
 	case tui.ResultLaunch:
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
+		writeCdTarget(result.Path)
 		clearScreen()
 		tui.LaunchClaude(result.Path, false)
 	case tui.ResultResume:
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
+		writeCdTarget(result.Path)
 		clearScreen()
 		tui.LaunchClaude(result.Path, true)
 	case tui.ResultCd:
+		writeCdTarget(result.Path)
 		clearScreen()
 		launchShell(result.Path)
 	}
@@ -243,16 +249,14 @@ func reapStale(cfg config.Config, repoRoot string) {
 	git.CleanEmptyDirs(cfg.WorktreeDir)
 }
 
-func directCreate(cfg config.Config, repoRoot, kind, hint string) {
-	// Default base: pr_base (single source of truth for branch + PR target).
-	// Falls back to first base_branches entry, then "master".
-	base := "master"
-	switch {
-	case cfg.PRBase != "":
-		base = cfg.PRBase
-	case len(cfg.BaseBranches) > 0:
-		base = cfg.BaseBranches[0]
-	}
+func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride string) {
+	// Resolve the *branch base* (source to fork from) by priority:
+	//   1. explicit --from override
+	//   2. branch_base from project config (production-line, may differ from PR target)
+	//   3. pr_base from project config (when single-base workflow)
+	//   4. git's detected default (origin/HEAD) — works in any repo
+	//   5. "main" as last-resort guess
+	base := resolveBranchBase(cfg, repoRoot, baseOverride)
 
 	branch := git.MakeBranch(kind, hint)
 	fmt.Printf("Creating worktree: %s (base: %s)\n", branch, base)
@@ -266,7 +270,7 @@ func directCreate(cfg config.Config, repoRoot, kind, hint string) {
 	_ = git.SymlinkEnvFiles(repoRoot, wtPath)
 
 	// Generate prompt
-	promptText, err := prompt.Render(cfg, kind, hint)
+	promptText, err := prompt.Render(cfg, kind, hint, base)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not render prompt: %v\n", err)
 	}
@@ -275,9 +279,25 @@ func directCreate(cfg config.Config, repoRoot, kind, hint string) {
 	}
 
 	upsertSession(repoRoot, kind, branch, wtPath, hint)
+	writeCdTarget(wtPath)
 
 	clearScreen()
 	tui.LaunchClaude(wtPath, false)
+}
+
+// writeCdTarget records the path the shell wrapper should `cd` into after the
+// work binary exits. Scoped per-shell via the parent PID so concurrent `work`
+// invocations in other terminals can't bleed into each other. Read by the
+// `work()` shell function (in .zshrc/.bashrc) then deleted by it.
+func writeCdTarget(path string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home, ".cache", "work")
+	_ = os.MkdirAll(dir, 0o755)
+	target := filepath.Join(dir, fmt.Sprintf("cd-target-%d", os.Getppid()))
+	_ = os.WriteFile(target, []byte(path), 0o644)
 }
 
 func cmdList(repoRoot string) {
@@ -315,6 +335,26 @@ func cmdStatus(cfg config.Config, repoRoot string) {
 // cmdActivityTick bumps last_activity_at for the session matching the current
 // repo + branch. Called by the activity-log.py hook on every Claude tool use.
 // Silent on no-op; never fails the caller.
+// extractFromFlag pulls `--from <branch>` or `-b <branch>` out of args. Returns
+// the chosen base (or "" if absent) and the remaining args in original order.
+func extractFromFlag(args []string) (string, []string) {
+	out := make([]string, 0, len(args))
+	base := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case (a == "--from" || a == "-b") && i+1 < len(args):
+			base = args[i+1]
+			i++ // skip the value
+		case strings.HasPrefix(a, "--from="):
+			base = strings.TrimPrefix(a, "--from=")
+		default:
+			out = append(out, a)
+		}
+	}
+	return base, out
+}
+
 // isAllDigits returns true if s consists solely of ASCII digits and is non-empty.
 func isAllDigits(s string) bool {
 	if s == "" {
@@ -437,18 +477,41 @@ func fetchPRMeta(repoRoot, prNum string) (tui.PRMeta, error) {
 		Author      struct{ Login string } `json:"author"`
 		BaseRefName string `json:"baseRefName"`
 		HeadRefName string `json:"headRefName"`
-		Commits     []any  `json:"commits"`
+		Commits     []struct {
+			OID        string `json:"oid"`
+			MessageHeadline string `json:"messageHeadline"`
+			Authors    []struct {
+				Login string `json:"login"`
+				Name  string `json:"name"`
+			} `json:"authors"`
+		} `json:"commits"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return tui.PRMeta{}, fmt.Errorf("parse pr view: %w", err)
 	}
+	commits := make([]tui.PRCommit, 0, len(raw.Commits))
+	for _, c := range raw.Commits {
+		author := ""
+		if len(c.Authors) > 0 {
+			author = c.Authors[0].Login
+			if author == "" {
+				author = c.Authors[0].Name
+			}
+		}
+		commits = append(commits, tui.PRCommit{
+			SHA:     c.OID,
+			Subject: c.MessageHeadline,
+			Author:  author,
+		})
+	}
 	return tui.PRMeta{
-		Number:  raw.Number,
-		Title:   raw.Title,
-		Author:  raw.Author.Login,
-		BaseRef: raw.BaseRefName,
-		HeadRef: raw.HeadRefName,
-		Commits: len(raw.Commits),
+		Number:     raw.Number,
+		Title:      raw.Title,
+		Author:     raw.Author.Login,
+		BaseRef:    raw.BaseRefName,
+		HeadRef:    raw.HeadRefName,
+		Commits:    len(raw.Commits),
+		CommitList: commits,
 	}, nil
 }
 
@@ -506,15 +569,16 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool) {
 		fmt.Fprintln(os.Stderr, "error: not inside a git repository")
 		os.Exit(1)
 	}
-	target := resolvePRBase(cfg)
-	if target == "" {
-		fmt.Fprintln(os.Stderr, "error: no pr_base or base_branches configured")
-		os.Exit(1)
-	}
-
 	branch := strings.TrimSpace(currentBranch(repoRoot))
 	if branch == "" {
 		fmt.Fprintln(os.Stderr, "error: could not determine current branch")
+		os.Exit(1)
+	}
+
+	// PR target depends on branch name: hotfix/* may route differently.
+	target := resolvePRTarget(cfg, branch)
+	if target == "" {
+		fmt.Fprintln(os.Stderr, "error: no pr_base or base_branches configured")
 		os.Exit(1)
 	}
 	if branch == target {
@@ -523,17 +587,10 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool) {
 	}
 
 	ref := "origin/" + target
-	ancestorErr := exec.Command("git", "-C", repoRoot, "merge-base", "--is-ancestor", ref, "HEAD").Run()
-	mergeBase, _ := gitOutput(repoRoot, "git", "merge-base", ref, "HEAD")
-	mergeBase = strings.TrimSpace(mergeBase)
-
+	// In dual-base workflows (branch from master, PR to user_test) the branch
+	// will never be a descendant of the PR target — that's expected, not a
+	// pollution warning. Skip the ancestor check.
 	warn := ""
-	if ancestorErr != nil {
-		warn = fmt.Sprintf(
-			"⚠ branch not forked from %s · actual fork: %s · diff includes commits not in %s · fix: `git rebase --onto %s <actual-base> HEAD`",
-			target, shortSha(mergeBase), ref, ref,
-		)
-	}
 
 	commitCountRaw, _ := gitOutput(repoRoot, "git", "rev-list", "--count", ref+"..HEAD")
 	commitCount, _ := strconv.Atoi(strings.TrimSpace(commitCountRaw))
@@ -625,6 +682,38 @@ func resolvePRBase(cfg config.Config) string {
 		return cfg.BaseBranches[0]
 	}
 	return ""
+}
+
+// resolveBranchBase picks the branch new worktrees fork from. Distinct from
+// resolvePRBase — many teams branch from production (master) but merge to
+// staging (user_test).
+func resolveBranchBase(cfg config.Config, repoRoot, override string) string {
+	switch {
+	case override != "":
+		return override
+	case cfg.BranchBase != "":
+		return cfg.BranchBase
+	case cfg.PRBase != "":
+		return cfg.PRBase
+	}
+	if d := detectDefaultBranch(repoRoot); d != "" {
+		return d
+	}
+	return "main"
+}
+
+// resolvePRTarget picks the PR target for a given branch name. Hotfix branches
+// (prefix configurable, default "hotfix/") route to HotfixTarget when set;
+// everything else uses PRBase.
+func resolvePRTarget(cfg config.Config, branchName string) string {
+	prefix := cfg.HotfixPrefix
+	if prefix == "" {
+		prefix = "hotfix/"
+	}
+	if cfg.HotfixTarget != "" && strings.HasPrefix(branchName, prefix) {
+		return cfg.HotfixTarget
+	}
+	return resolvePRBase(cfg)
 }
 
 func gitOutput(dir string, name string, args ...string) (string, error) {
@@ -1407,7 +1496,8 @@ func cmdHelp() {
 
 Usage:
   work                    Interactive TUI
-  work "hint"             Create task worktree with hint
+  work "hint"             Create task worktree with hint (base: pr_base default)
+  work "hint" --from <b>  Override base branch for this worktree
   work --review "hint"    Create review worktree
   work --cd               Jump into a worktree shell
   work --clean            Jump to clean view

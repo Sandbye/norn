@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -12,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // DiffFile is one file in the change set, exposed so callers can construct
@@ -30,6 +32,16 @@ type PRMeta struct {
 	BaseRef string
 	HeadRef string
 	Commits int
+	// CommitList is the PR's individual commits. Populated when the caller
+	// also fetches them — enables scope-by-commit drilling.
+	CommitList []PRCommit
+}
+
+// PRCommit is one commit on a PR.
+type PRCommit struct {
+	SHA     string
+	Subject string
+	Author  string
 }
 
 // DiffView is the standalone file-diff TUI. Two construction modes:
@@ -71,15 +83,21 @@ type DiffView struct {
 	statusMsg   string // shown briefly after submit / errors
 	submitting  bool   // true while a review POST is in flight
 	spinner     spinner.Model
+
+	// Commit-scope state. scopeSHA == "" means full PR diff (default).
+	scopeSHA       string
+	commitCursor   int // cursor within the commit picker overlay
+	loadingScope   bool
 }
 
 type diffMode int
 
 const (
-	modeList diffMode = iota
+	modeList         diffMode = iota
 	modeFile
-	modeComment // overlay: writing a comment on the focused line
-	modeReview  // overlay: composing the review submission
+	modeComment                // overlay: writing a comment on the focused line
+	modeReview                 // overlay: composing the review submission
+	modeCommitPicker           // overlay: choose scope (full PR / specific commit)
 )
 
 // PendingComment is one comment buffered before submitting a review.
@@ -123,11 +141,13 @@ type fileLoadedMsg struct {
 
 func NewDiffView(repoRoot, target string, commits int, files []DiffFile, warn string) DiffView {
 	return DiffView{
-		repoRoot: repoRoot,
-		target:   target,
-		commits:  commits,
-		files:    files,
-		warn:     warn,
+		repoRoot:    repoRoot,
+		target:      target,
+		commits:     commits,
+		files:       files,
+		warn:        warn,
+		visualStart: -1,
+		editingIdx:  -1,
 	}
 }
 
@@ -172,6 +192,8 @@ func (d DiffView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d.updateCommentMode(msg)
 		case modeReview:
 			return d.updateReviewMode(msg)
+		case modeCommitPicker:
+			return d.updateCommitPicker(msg)
 		}
 	case reviewSubmittedMsg:
 		d.submitting = false
@@ -186,11 +208,32 @@ func (d DiffView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return d, nil
 
 	case spinner.TickMsg:
-		if d.submitting {
+		if d.submitting || d.loadingScope {
 			var cmd tea.Cmd
 			d.spinner, cmd = d.spinner.Update(msg)
 			return d, cmd
 		}
+
+	case scopeLoadedMsg:
+		d.loadingScope = false
+		if msg.err != nil {
+			d.statusMsg = "✗ scope load failed: " + msg.err.Error()
+			d.mode = modeFile
+			return d, nil
+		}
+		d.scopeSHA = msg.sha
+		d.files = msg.files
+		d.prFileDiffs = msg.perFileDiff
+		d.cursor = 0
+		d.parsed = nil
+		d.fileScroll = 0
+		d.fileCursor = 0
+		d.pending = nil // comments don't carry across scope switches
+		d.mode = modeFile
+		if len(d.files) > 0 {
+			return d, d.loadCurrentFileCmd()
+		}
+		return d, nil
 	}
 
 	// Forward unhandled events to the active text area so cursors blink, etc.
@@ -246,6 +289,188 @@ func (d *DiffView) adjustFileScroll() {
 	if d.fileCursor >= d.fileScroll+vh {
 		d.fileScroll = d.fileCursor - vh + 1
 	}
+}
+
+// --- commit picker (scope: full PR or specific commit) -------------------
+
+// scopeLoadedMsg arrives after fetching a commit-scoped diff. Replaces the
+// file list + per-file diff map atomically.
+type scopeLoadedMsg struct {
+	sha         string // "" = full PR
+	files       []DiffFile
+	perFileDiff map[string]string
+	err         error
+}
+
+func (d DiffView) updateCommitPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if d.loadingScope {
+		// Lock keys during fetch.
+		if msg.String() == "ctrl+c" {
+			return d, tea.Quit
+		}
+		return d, nil
+	}
+	// Picker rows: row 0 = "full PR", rows 1..N = each commit.
+	totalRows := 1 + len(d.prMeta.CommitList)
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return d, tea.Quit
+	case "esc", "m":
+		d.mode = modeFile
+		return d, nil
+	case "j", "down":
+		if d.commitCursor < totalRows-1 {
+			d.commitCursor++
+		}
+	case "k", "up":
+		if d.commitCursor > 0 {
+			d.commitCursor--
+		}
+	case "g":
+		d.commitCursor = 0
+	case "G":
+		d.commitCursor = totalRows - 1
+	case "enter":
+		sha := ""
+		if d.commitCursor > 0 {
+			sha = d.prMeta.CommitList[d.commitCursor-1].SHA
+		}
+		if sha == d.scopeSHA {
+			d.mode = modeFile
+			return d, nil
+		}
+		d.loadingScope = true
+		sp := spinner.New()
+		sp.Spinner = spinner.Dot
+		sp.Style = lipgloss.NewStyle().Foreground(colorBlue)
+		d.spinner = sp
+		return d, tea.Batch(d.spinner.Tick, loadScopeCmd(d.prMeta.Number, sha))
+	}
+	return d, nil
+}
+
+func (d DiffView) renderCommitPicker() string {
+	var b strings.Builder
+	b.WriteString("\n" + titleStyle.Render("work") + " " + subtitleStyle.Render("commit scope"))
+	b.WriteString(dimStyle.Render(fmt.Sprintf("   PR #%d · %d commits", d.prMeta.Number, len(d.prMeta.CommitList))))
+	b.WriteString("\n\n")
+
+	rows := []struct {
+		label string
+		sub   string
+		sha   string
+	}{
+		{label: "Full PR diff", sub: fmt.Sprintf("all %d commit(s) combined", len(d.prMeta.CommitList)), sha: ""},
+	}
+	for _, c := range d.prMeta.CommitList {
+		sha := c.SHA
+		if len(sha) > 7 {
+			sha = sha[:7]
+		}
+		rows = append(rows, struct {
+			label string
+			sub   string
+			sha   string
+		}{label: sha + "  " + c.Subject, sub: "by @" + c.Author, sha: c.SHA})
+	}
+
+	for i, r := range rows {
+		marker := "  "
+		if i == d.commitCursor {
+			marker = cursorStyle.Render("› ")
+		}
+		current := ""
+		if r.sha == d.scopeSHA {
+			current = activeStyle.Render("  (current)")
+		}
+		var line string
+		if i == d.commitCursor {
+			line = marker + selectedStyle.Render(r.label) + current + "\n" +
+				"    " + dimStyle.Render(r.sub)
+		} else {
+			line = marker + lipgloss.NewStyle().Foreground(colorText).Render(r.label) + current + "\n" +
+				"    " + dimStyle.Render(r.sub)
+		}
+		b.WriteString(line + "\n")
+	}
+
+	b.WriteString("\n")
+	if d.loadingScope {
+		b.WriteString(lipgloss.NewStyle().Foreground(colorBlue).Bold(true).PaddingLeft(1).
+			Render(d.spinner.View()+" fetching diff…") + "\n")
+	}
+	b.WriteString(helpStyle.Render("j/k move · enter select · m/esc back · q quit"))
+	return b.String()
+}
+
+// loadScopeCmd fetches the diff for either the whole PR (sha == "") or one
+// specific commit, then ships a scopeLoadedMsg to swap files + perFileDiffs.
+func loadScopeCmd(prNum int, sha string) tea.Cmd {
+	return func() tea.Msg {
+		var (
+			diffOut []byte
+			err     error
+		)
+		if sha == "" {
+			diffOut, err = exec.Command("gh", "pr", "diff", fmt.Sprintf("%d", prNum)).Output()
+		} else {
+			// `gh api` with the diff Accept header returns a plain unified diff
+			// — same shape as `gh pr diff`, parseable by splitDiffByFile.
+			diffOut, err = exec.Command("gh", "api",
+				"-H", "Accept: application/vnd.github.diff",
+				fmt.Sprintf("repos/{owner}/{repo}/commits/%s", sha)).Output()
+		}
+		if err != nil {
+			return scopeLoadedMsg{err: err, sha: sha}
+		}
+		files, perFile := splitDiffByFileInternal(string(diffOut))
+		return scopeLoadedMsg{sha: sha, files: files, perFileDiff: perFile}
+	}
+}
+
+// splitDiffByFileInternal mirrors main.go's splitDiffByFile but lives here so
+// the tui package can rebuild file lists without a back-call to main.
+func splitDiffByFileInternal(diff string) ([]DiffFile, map[string]string) {
+	files := []DiffFile{}
+	perFile := map[string]string{}
+
+	lines := strings.Split(diff, "\n")
+	var (
+		cur     strings.Builder
+		curPath string
+		added   int
+		removed int
+	)
+	flush := func() {
+		if curPath == "" {
+			return
+		}
+		files = append(files, DiffFile{Path: curPath, Added: added, Removed: removed})
+		perFile[curPath] = cur.String()
+		cur.Reset()
+		added, removed = 0, 0
+	}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "diff --git ") {
+			flush()
+			parts := strings.Fields(line)
+			if len(parts) >= 4 {
+				curPath = strings.TrimPrefix(parts[3], "b/")
+			}
+		}
+		if curPath != "" {
+			cur.WriteString(line)
+			cur.WriteByte('\n')
+			switch {
+			case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+				added++
+			case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+				removed++
+			}
+		}
+	}
+	flush()
+	return files, perFile
 }
 
 // --- review / comment overlays --------------------------------------------
@@ -481,6 +706,26 @@ func (d DiffView) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			d.fileScroll = 0
 			return d, d.loadCurrentFileCmd()
 		}
+	case "m":
+		// Scope picker available from the file list too — before drilling in.
+		if d.prMeta != nil && len(d.prMeta.CommitList) > 0 {
+			d.mode = modeCommitPicker
+			d.commitCursor = 0
+			for i, c := range d.prMeta.CommitList {
+				if c.SHA == d.scopeSHA {
+					d.commitCursor = i + 1
+					break
+				}
+			}
+		}
+	case "R":
+		// Submit a review from the list view too — useful when there are
+		// pending comments and you don't need to re-open any file.
+		if d.prMeta != nil {
+			d.mode = modeReview
+			d.reviewArea = newReviewArea(d.width)
+			return d, textarea.Blink
+		}
 	}
 	return d, nil
 }
@@ -565,6 +810,19 @@ func (d DiffView) updateFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return d, textarea.Blink
 		}
 		return d, nil
+	case "m":
+		if d.prMeta != nil && len(d.prMeta.CommitList) > 0 {
+			d.mode = modeCommitPicker
+			// Place cursor on the currently-scoped commit, or 0 (= full PR).
+			d.commitCursor = 0
+			for i, c := range d.prMeta.CommitList {
+				if c.SHA == d.scopeSHA {
+					d.commitCursor = i + 1 // +1 because "full PR" is row 0
+					break
+				}
+			}
+		}
+		return d, nil
 	case "esc", "h", "left":
 		d.mode = modeList
 	case "j", "down":
@@ -624,6 +882,8 @@ func (d DiffView) View() string {
 		return d.renderCommentOverlay()
 	case modeReview:
 		return d.renderReviewOverlay()
+	case modeCommitPicker:
+		return d.renderCommitPicker()
 	}
 	return ""
 }
@@ -749,9 +1009,16 @@ func (d DiffView) renderList() string {
 
 	hdr := titleStyle.Render("work") + " " + subtitleStyle.Render("diff")
 	if d.prMeta != nil {
-		// PR mode header: #N · title · author · base ← head
-		hdr += dimStyle.Render(fmt.Sprintf("   PR #%d · %s ← %s · @%s · %d commit(s) · %d file(s)",
-			d.prMeta.Number, d.prMeta.BaseRef, d.prMeta.HeadRef, d.prMeta.Author, d.commits, len(d.files)))
+		scope := fmt.Sprintf("%d commit(s)", d.commits)
+		if d.scopeSHA != "" {
+			short := d.scopeSHA
+			if len(short) > 7 {
+				short = short[:7]
+			}
+			scope = "commit " + short
+		}
+		hdr += dimStyle.Render(fmt.Sprintf("   PR #%d · %s ← %s · @%s · %s · %d file(s)",
+			d.prMeta.Number, d.prMeta.BaseRef, d.prMeta.HeadRef, d.prMeta.Author, scope, len(d.files)))
 		b.WriteString("\n" + hdr + "\n")
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(colorText).Bold(true).PaddingLeft(1).Render(d.prMeta.Title) + "\n")
 	} else {
@@ -796,7 +1063,11 @@ func (d DiffView) renderList() string {
 		}
 		b.WriteString(line + "\n")
 	}
-	b.WriteString("\n" + helpStyle.Render("j/k move · enter/l view file · q quit") + "\n")
+	listHelp := "j/k move · enter/l view file · q quit"
+	if d.prMeta != nil {
+		listHelp = "j/k move · enter/l view file · m scope · R review · q quit"
+	}
+	b.WriteString("\n" + helpStyle.Render(listHelp) + "\n")
 	return b.String()
 }
 
@@ -857,26 +1128,28 @@ func (d DiffView) renderFile() string {
 	}
 
 	if len(d.parsed) > 0 {
-		pages := (len(d.parsed) + vh - 1) / vh
-		page := (d.fileScroll / vh) + 1
-		if page > pages {
-			page = pages
-		}
-		pct := (d.fileScroll + vh) * 100 / len(d.parsed)
+		// Cursor-position indicator. Tracks d/u jumps directly — pressing d
+		// moves the cursor down, the percentage grows; 100% = at last row.
+		pos := d.fileCursor + 1
+		total := len(d.parsed)
+		pct := pos * 100 / total
 		if pct > 100 {
 			pct = 100
 		}
-		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("[page %d/%d · %d%%]", page, pages, pct)))
+		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("[line %d/%d · %d%%]", pos, total, pct)))
 	}
 	help := "j/k line · d/u page · g/G top/bottom · n/p next/prev file · esc back · q quit"
 	if d.prMeta != nil {
-		vmark := ""
 		if d.visualStart >= 0 {
-			vmark = " · VISUAL"
+			// In visual mode, surface that prominently and show the relevant keys.
+			help = fmt.Sprintf(
+				"-- VISUAL --  j/k extend · c comment range · v cancel · q quit",
+			)
+		} else {
+			help = fmt.Sprintf(
+				"j/k · d/u · n/p file · m scope · v range · c comment · C file · D delete · R review (%d) · esc · q",
+				len(d.pending))
 		}
-		help = fmt.Sprintf(
-			"j/k · d/u · n/p · v select%s · c comment · C file · D delete · R review (%d) · esc · q",
-			vmark, len(d.pending))
 	}
 	b.WriteString("\n" + helpStyle.Render(help))
 	if d.statusMsg != "" {
@@ -992,10 +1265,93 @@ func (d DiffView) renderRow(p parsedDiffLine, mask []bool, lexer chroma.Lexer, f
 		gutterStyle = gutterStyle.Foreground(colorPeach).Bold(true)
 	}
 
-	body := renderCodeLine(p.content, lexer, rowBG, tokenHiBG, mask)
+	// Wrap content to terminal width so very long code lines (URLs, base64,
+	// minified output) flow onto continuation rows instead of disappearing
+	// off-screen. Gutter and prefix stay on the first row only; continuation
+	// rows show ↪ in the prefix and a blank gutter, all on the same row bg.
+	const gutterCols = 11 // " %4d %4d " — keep in sync with formatGutter
+	const prefixCols = 3  // " X "
+	contentWidth := d.width - gutterCols - prefixCols
+	segments := wrapContent(p.content, mask, contentWidth)
 
-	line := gutterStyle.Render(gutter) + prefixStyle.Render(" "+prefix+" ") + body
-	return padToWidth(line, d.width, rowBG)
+	var rows []string
+	blankGutter := strings.Repeat(" ", gutterCols)
+	contPrefix := " ↪ "
+	for i, seg := range segments {
+		body := renderCodeLine(seg.text, lexer, rowBG, tokenHiBG, seg.mask)
+		var g, pr string
+		if i == 0 {
+			g = gutterStyle.Render(gutter)
+			pr = prefixStyle.Render(" " + prefix + " ")
+		} else {
+			g = gutterStyle.Render(blankGutter)
+			pr = prefixStyle.Render(contPrefix)
+		}
+		rows = append(rows, padToWidth(g+pr+body, d.width, rowBG))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// wrapContent splits content into segments fitting within width visual columns,
+// carrying the byte-indexed change mask along for each segment. When width is
+// non-positive or content already fits, a single segment is returned and the
+// caller renders it as before (no extra newlines emitted).
+type contentSegment struct {
+	text string
+	mask []bool
+}
+
+func wrapContent(content string, mask []bool, width int) []contentSegment {
+	if width <= 0 || runewidth.StringWidth(content) <= width {
+		return []contentSegment{{text: content, mask: mask}}
+	}
+
+	var segments []contentSegment
+	var curText strings.Builder
+	var curMask []bool
+	curWidth := 0
+	bytePos := 0
+
+	flush := func() {
+		segments = append(segments, contentSegment{text: curText.String(), mask: curMask})
+		curText.Reset()
+		curMask = nil
+		curWidth = 0
+	}
+
+	for _, r := range content {
+		rw := runewidth.RuneWidth(r)
+		if rw == 0 {
+			rw = 1
+		}
+		// Wrap when adding this rune would overflow — but always allow at least
+		// one rune per segment to make progress on widths smaller than a wide char.
+		if curWidth > 0 && curWidth+rw > width {
+			flush()
+		}
+		sz := utf8.RuneLen(r)
+		if sz <= 0 {
+			sz = 1
+		}
+		curText.WriteRune(r)
+		for i := 0; i < sz; i++ {
+			if bytePos+i < len(mask) {
+				curMask = append(curMask, mask[bytePos+i])
+			} else {
+				curMask = append(curMask, false)
+			}
+		}
+		bytePos += sz
+		curWidth += rw
+	}
+	if curText.Len() > 0 {
+		flush()
+	}
+	if len(segments) == 0 {
+		// Empty content — preserve one empty segment so the row still renders.
+		segments = []contentSegment{{text: "", mask: nil}}
+	}
+	return segments
 }
 
 // padToWidth fills the rest of the row with `bg`-coloured spaces so the
