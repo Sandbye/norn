@@ -127,6 +127,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case remoteCheckedMsg:
 		a.clean.worktrees = msg.worktrees
 		a.clean.remoteChecked = true
+		a.clean.autoSelectGone()
 
 	case worktreeCreatedMsg:
 		a.quit = true

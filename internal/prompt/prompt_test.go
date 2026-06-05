@@ -60,6 +60,25 @@ func TestRenderReview(t *testing.T) {
 	}
 }
 
+func TestExtractHint(t *testing.T) {
+	cases := []struct {
+		name, content, want string
+	}{
+		{"task with hint", "blah\n2. **Load context.** Hint: \"fix the export bug\"\nmore\n", "fix the export bug"},
+		{"review with hint", "1. **Load the task.** Review hint: \"CU-86c98r0j6\"\n", "CU-86c98r0j6"},
+		{"no hint provided", "2. **Load context.** No hint provided. Ask the user what to work on.\n", ""},
+		{"empty file", "", ""},
+		{"unrelated text", "no markers anywhere here", ""},
+		{"hint with quotes inside breaks gracefully", `Hint: "fix " bug"`, "fix "}, // matches first balanced pair
+	}
+	for _, c := range cases {
+		got := ExtractHint(c.content)
+		if got != c.want {
+			t.Errorf("%s: ExtractHint = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestRenderNoHint(t *testing.T) {
 	cfg := config.Config{
 		User: config.User{Name: "Test"},

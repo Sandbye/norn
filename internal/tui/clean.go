@@ -27,6 +27,26 @@ func newCleanModel() cleanModel {
 	}
 }
 
+// autoSelectGone pre-selects rows whose remote branch is gone (PR merged or
+// branch deleted) and moves the cursor to the first such row. Called once
+// when the remote check completes so opening Clean is a one-keystroke flow
+// (d → y) instead of "press g, then d, then y".
+func (m *cleanModel) autoSelectGone() {
+	sorted := m.sorted()
+	firstGone := -1
+	for i, wt := range sorted {
+		if wt.RemoteGone {
+			m.selected[i] = true
+			if firstGone < 0 {
+				firstGone = i
+			}
+		}
+	}
+	if firstGone >= 0 {
+		m.cursor = firstGone
+	}
+}
+
 func (m cleanModel) sorted() []git.Worktree {
 	wts := make([]git.Worktree, len(m.worktrees))
 	copy(wts, m.worktrees)
