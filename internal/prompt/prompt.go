@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"text/template"
 	"time"
 
@@ -74,6 +75,25 @@ func render(tmplStr, name string, data Data) (string, error) {
 		return "", fmt.Errorf("execute template %q: %w", name, err)
 	}
 	return buf.String(), nil
+}
+
+// hintMarkerRegex matches the two markers `hintBlock` emits:
+//
+//	Hint: "..."
+//	Review hint: "..."
+//
+// Used by ExtractHint to recover the original short string from a rendered
+// .worktree.md so session state stores the hint, not the whole prompt file.
+var hintMarkerRegex = regexp.MustCompile(`(?:Review hint|Hint):\s*"([^"]*)"`)
+
+// ExtractHint pulls the original hint out of a rendered .worktree.md body.
+// Returns "" if no hint marker is present (e.g. "No hint provided" fallback).
+func ExtractHint(content string) string {
+	m := hintMarkerRegex.FindStringSubmatch(content)
+	if m == nil {
+		return ""
+	}
+	return m[1]
 }
 
 func hintBlock(kind, hint string) string {

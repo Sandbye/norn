@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -129,7 +127,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	reapStale(cfg, repoRoot)
+	reapStale(repoRoot)
 
 	app := tui.NewApp(cfg, repoRoot, initialView)
 	p := tea.NewProgram(app, tea.WithAltScreen())
@@ -185,68 +183,18 @@ func readHintFromWorktreeMD(wtPath string) string {
 	if err != nil {
 		return ""
 	}
-	return string(data)
+	return prompt.ExtractHint(string(data))
 }
 
-// reapStale prompts to remove worktrees whose remote branch is gone (PR merged
-// or branch deleted). Prevents GitHub Desktop / other clients from looping on
-// "can't delete branch — worktree using it".
-func reapStale(cfg config.Config, repoRoot string) {
+// reapStale silently prunes ghost `.git/worktrees/` entries so branches whose
+// worktree dir is gone don't keep their refs locked. Actual stale-worktree
+// cleanup is surfaced inside the TUI Clean view (gone-from-remote rows are
+// pre-selected on entry).
+func reapStale(repoRoot string) {
 	if repoRoot == "" {
 		return
 	}
-	// Parallel: fetch + prune remote refs while we list local worktrees.
-	var wts []git.Worktree
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_ = git.FetchPrune(repoRoot)
-	}()
-	go func() {
-		defer wg.Done()
-		common, _ := git.CommonDir(repoRoot)
-		wts, _ = git.ListWorktrees(cfg.WorktreeDir, common)
-	}()
-	wg.Wait()
-
-	if len(wts) == 0 {
-		_ = git.PruneWorktrees(repoRoot)
-		return
-	}
-	wts = git.CheckRemoteGone(repoRoot, wts)
-
-	var stale []git.Worktree
-	for _, wt := range wts {
-		if wt.RemoteGone {
-			stale = append(stale, wt)
-		}
-	}
-	if len(stale) == 0 {
-		_ = git.PruneWorktrees(repoRoot)
-		return
-	}
-
-	fmt.Printf("\n%d worktree(s) with deleted remote branches:\n", len(stale))
-	for _, wt := range stale {
-		fmt.Printf("  %s  (%s)\n", wt.Branch, git.Age(wt.LastCommit))
-	}
-	fmt.Print("Clean these? [y/N] ")
-
-	reader := bufio.NewReader(os.Stdin)
-	ans, _ := reader.ReadString('\n')
-	if strings.ToLower(strings.TrimSpace(ans)) != "y" {
-		return
-	}
-
-	for _, wt := range stale {
-		if err := git.RemoveWorktree(repoRoot, wt.Path, wt.Branch); err != nil {
-			fmt.Fprintf(os.Stderr, "  failed %s: %v\n", wt.Branch, err)
-		} else {
-			fmt.Printf("  removed %s\n", wt.Branch)
-		}
-	}
-	git.CleanEmptyDirs(cfg.WorktreeDir)
+	_ = git.PruneWorktrees(repoRoot)
 }
 
 func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride string) {

@@ -128,23 +128,28 @@ Format: `<type>/CU-<task_id>_<slug>` — or `<type>/<slug>` if no ClickUp task.
 - Refactoring: `refac/CU-86c94nwgn_combined-uid-hubs`
 
 Rules:
-- `CU-<id>` uses the ClickUp task ID — this is how ClickUp auto-links branches.
+- `CU-<id>` uses the ClickUp task ID. Kept in branch + PR for human readability and grep, **not** for auto-linking.
 - Slug is a short kebab-case summary of the task (3-5 words max).
 - Pick `fix/` for straightforward bug fixes, `bugfix/` for more complex multi-file bug fixes.
 
 ### Pull Requests
+
+> **ClickUp ↔ GitHub auto-linking is disabled** (team policy). ClickUp's GitHub integration ties every linked event to one personal GitHub account — the colleague who originally connected it — which spammed his identity onto unrelated tasks and broke attribution. Linking is now manual: after creating the PR, post a comment on the ClickUp task with the PR URL.
+
 When the task is complete:
 1. Push the branch to origin.
-2. Create a **draft** PR using `gh pr create --draft --assignee {{.User.Name | printf "%s"}}`.
-3. **Include the ClickUp task ID** in the PR title or body using `CU-{task_id}` format — ClickUp auto-links it. Omit if no ClickUp task.
-4. Set the PR base to `{{if .PRBase}}{{.PRBase}}{{else}}{{.Base}}{{end}}` (`gh pr create --base {{if .PRBase}}{{.PRBase}}{{else}}{{.Base}}{{end}}`).
-5. Do NOT update ClickUp status yet — the PR is still a draft.
+2. Create the PR using `gh pr create --assignee {{.User.Name | printf "%s"}} --base {{if .PRBase}}{{.PRBase}}{{else}}{{.Base}}{{end}}`. **Default is ready-for-review.** Add `--draft` only when unsure the change is actually ready (incomplete work, unverified, WIP, awaiting input). If draft, say why.
+3. **Include the ClickUp task ID** in the PR title or body using `CU-{task_id}` format — for human readability only; ClickUp will NOT auto-link. Omit if no ClickUp task.
+4. **Post the PR URL as a comment on the ClickUp task** (only if a ClickUp task exists). Use the ClickUp MCP `clickup_create_task_comment` with the task id and a body like `PR: <url>`. This replaces the auto-link.
+5. ClickUp status:
+   - Ready PR → set status to `code review` immediately.
+   - Draft PR → leave status as-is; flip to `code review` only when the PR is undrafted.
 6. Open the PR in the browser: `gh pr view --web`.
 7. **Never** add `Co-Authored-By` lines to commits.
 8. **Never** add a test plan section to the PR body unless the user explicitly asks for one. Keep PR descriptions concise — summary + CU link is enough.
 
-### Marking PR as Ready
-When the user says the PR is ready (or asks to undraft/open it):
+### Marking a Draft PR as Ready
+Only relevant if the PR was created with `--draft`. When the user says the PR is ready (or asks to undraft/open it):
 1. Mark PR as ready: `gh pr ready`
 2. Update the ClickUp task status to `code review` — if there is a ClickUp task.
 
