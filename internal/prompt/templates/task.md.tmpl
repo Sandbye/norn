@@ -109,28 +109,38 @@ Do NOT default to `master` or `main` when `{{.Base}}` is something else. Common 
 **Dual-base flow:** this repo branches from `{{.Base}}` but PRs target `{{.PRBase}}`. The PR target is separate from the diff baseline — for any local comparison stick with `{{.Base}}`.{{end}}
 
 ### Commits
-Use conventional commits. Format: `type(scope): description`
+Use Conventional Commits. Format: `type(scope): description`
 - `fix(billing): resolve payout calculation error`
 - `feat(search): add location filtering`
 - `chore(deps): update firebase-admin`
 - `refactor(export): simplify CSV generation`
-- Types: `fix`, `feat`, `chore`, `refactor`, `docs`, `test`
+- Types: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `chore`, `build`, `ci`, `revert`
 - Scope is optional but preferred — use the package/service name (e.g. `billing`, `export`, `frontend`, `search`, `common`).
 
 ### Branch naming
-After confirming the task, **rename the branch** to follow conventions. The worktree directory path doesn't matter — only the branch name matters.
+After confirming the task, **rename the branch** to follow team conventions (per `how-we-build/coding-guidelines/git-strategy.md` — Conventional Branch). The worktree directory path doesn't matter — only the branch name matters.
 
 Use `git branch -m <new-name>` to rename.
 
-Format: `<type>/CU-<task_id>_<slug>` — or `<type>/<slug>` if no ClickUp task.
-- Operations (bugs/fixes): `fix/CU-86c94jkk6_dashboard-refund-crash` or `bugfix/CU-86c94jkk6_dashboard-refund-crash`
-- Features: `feat/CU-86c98r0j6_fixing-stripe-balances`
-- Refactoring: `refac/CU-86c94nwgn_combined-uid-hubs`
+Format: `<prefix>/#<task_id>/<task-title>` — or `<prefix>/<task-title>` if no ClickUp task.
+
+Branch prefixes describe the **task**, not the commits inside it:
+- `feature` — new feature
+- `fix` — production bug fix
+- `hotfix` — urgent production fix that bypasses normal release cadence
+- `epic` — larger task consisting of smaller tasks
+- `chore` — everything else: refactor, documentation, dependency updates, tooling, internal cleanup
+
+Examples:
+- `feature/#86c41xu8m/social-login`
+- `fix/#86c94jkk6/dashboard-refund-crash`
+- `chore/update-firebase-dependency` (no task id)
+- `chore/#86c41xu9p/migrate-architecture-docs-to-wiki`
 
 Rules:
-- `CU-<id>` uses the ClickUp task ID. Kept in branch + PR for human readability and grep, **not** for auto-linking.
-- Slug is a short kebab-case summary of the task (3-5 words max).
-- Pick `fix/` for straightforward bug fixes, `bugfix/` for more complex multi-file bug fixes.
+- Task ID is written as `#<id>` — no `CU-` prefix. Kept in branch + PR for human readability and grep, **not** for auto-linking.
+- Title is lowercase kebab-case, short summary of the task (3-5 words max).
+- Branch prefix set is narrower than commit-type set. Refactors/docs/tests are commits but their branches are `chore` (or `feature` if part of a larger feature).
 
 ### Pull Requests
 

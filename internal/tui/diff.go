@@ -201,6 +201,28 @@ func (d DiffView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modeCommitPicker:
 			return d.updateCommitPicker(msg)
 		}
+	case tea.MouseMsg:
+		// Mouse reporting is enabled at the program level (WithMouseCellMotion)
+		// so the terminal stops translating wheel events into stray arrow keys,
+		// which on large files flooded the input queue and looked like a freeze.
+		// Wheel up/down moves the file cursor by a small step in modeFile;
+		// other modes ignore mouse entirely.
+		if d.mode == modeFile && msg.Action == tea.MouseActionPress {
+			const wheelStep = 3
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				for i := 0; i < wheelStep; i++ {
+					d.fileCursor = nextCodeRow(d.parsed, d.fileCursor, -1)
+				}
+				d.adjustFileScroll()
+			case tea.MouseButtonWheelDown:
+				for i := 0; i < wheelStep; i++ {
+					d.fileCursor = nextCodeRow(d.parsed, d.fileCursor, +1)
+				}
+				d.adjustFileScroll()
+			}
+		}
+		return d, nil
 	case reviewSubmittedMsg:
 		d.submitting = false
 		if msg.err != nil {
