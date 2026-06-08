@@ -34,10 +34,6 @@ var (
 			PaddingLeft(1).
 			PaddingBottom(1)
 
-	itemStyle = lipgloss.NewStyle().
-			Foreground(colorText).
-			PaddingLeft(3)
-
 	selectedStyle = lipgloss.NewStyle().
 			Foreground(colorBlue).
 			Bold(true).
@@ -79,11 +75,6 @@ var (
 
 	confirmStyle = lipgloss.NewStyle().
 			Foreground(colorPeach).
-			Bold(true).
-			PaddingLeft(1)
-
-	successStyle = lipgloss.NewStyle().
-			Foreground(colorGreen).
 			Bold(true).
 			PaddingLeft(1)
 

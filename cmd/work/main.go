@@ -671,13 +671,6 @@ func gitOutput(dir string, name string, args ...string) (string, error) {
 	return string(out), err
 }
 
-func shortSha(s string) string {
-	if len(s) > 7 {
-		return s[:7]
-	}
-	return s
-}
-
 func warnStyle(s string) string {
 	// Yellow ANSI in case terminal supports color; falls back to plain text fine.
 	return "\033[33m" + s + "\033[0m"
@@ -694,42 +687,6 @@ type diffGroup struct {
 	files   []diffFile
 	added   int
 	removed int
-}
-
-// groupByDir parses git diff --numstat output and groups by top two path
-// components, falling back to top-1 if shallow.
-func groupByDir(numstat string) []diffGroup {
-	byDir := map[string]*diffGroup{}
-	var order []string
-
-	for _, line := range strings.Split(numstat, "\n") {
-		parts := strings.Fields(line)
-		if len(parts) < 3 {
-			continue
-		}
-		added, _ := strconv.Atoi(parts[0])
-		removed, _ := strconv.Atoi(parts[1])
-		path := parts[2]
-		// "-" means binary file
-		dir := topTwoDirs(path)
-		if _, ok := byDir[dir]; !ok {
-			byDir[dir] = &diffGroup{dir: dir}
-			order = append(order, dir)
-		}
-		g := byDir[dir]
-		g.files = append(g.files, diffFile{relPath: relTo(path, dir), added: added, removed: removed})
-		g.added += added
-		g.removed += removed
-	}
-
-	out := make([]diffGroup, 0, len(order))
-	for _, d := range order {
-		g := byDir[d]
-		// Sort files largest first within group
-		sortFilesByChurn(g.files)
-		out = append(out, *g)
-	}
-	return out
 }
 
 func topTwoDirs(p string) string {
@@ -1411,10 +1368,6 @@ func cmdProjectConfig(cfg config.Config, repoRoot string) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
-}
-
-func filepathBase(p string) string {
-	return filepath.Base(p)
 }
 
 // originRepoName returns the upstream repo basename for any directory inside
