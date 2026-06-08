@@ -84,6 +84,12 @@ type DiffView struct {
 	submitting  bool   // true while a review POST is in flight
 	spinner     spinner.Model
 
+	// Line-jump prompt state. When jumping > 0 the bottom shows a `:` prompt
+	// capturing digits; enter applies, esc cancels. Lets the user jump to a
+	// specific file line in big diffs instead of holding j/d.
+	jumping   bool
+	jumpInput string
+
 	// Commit-scope state. scopeSHA == "" means full PR diff (default).
 	scopeSHA       string
 	commitCursor   int // cursor within the commit picker overlay
@@ -278,6 +284,73 @@ func nextCodeRow(p []parsedDiffLine, from, step int) int {
 		i += step
 	}
 	return from
+}
+
+// applyLineJump parses jumpInput as a file line number and moves the cursor
+// to the parsed row whose newNum matches (post-diff line). Falls back to
+// oldNum (pre-diff) for removed-only files. Out-of-range or non-numeric input
+// is a no-op. Always clears the jump state.
+func (d DiffView) applyLineJump() DiffView {
+	defer func() {
+		d.jumping = false
+		d.jumpInput = ""
+	}()
+	if d.jumpInput == "" || len(d.parsed) == 0 {
+		d.jumping = false
+		d.jumpInput = ""
+		return d
+	}
+	n := 0
+	for _, c := range d.jumpInput {
+		if c < '0' || c > '9' {
+			d.jumping = false
+			d.jumpInput = ""
+			return d
+		}
+		n = n*10 + int(c-'0')
+	}
+	// Find the parsed row with newNum == n; fall back to oldNum (handles files
+	// whose only changes are removals, where most rows lack a newNum).
+	target := -1
+	for i, p := range d.parsed {
+		if p.newNum == n {
+			target = i
+			break
+		}
+	}
+	if target < 0 {
+		for i, p := range d.parsed {
+			if p.oldNum == n {
+				target = i
+				break
+			}
+		}
+	}
+	if target < 0 {
+		// Nothing matched — pick the closest row by newNum to give the user
+		// *something* to land on instead of staying put.
+		bestDiff := -1
+		for i, p := range d.parsed {
+			if p.newNum == 0 {
+				continue
+			}
+			diff := p.newNum - n
+			if diff < 0 {
+				diff = -diff
+			}
+			if bestDiff < 0 || diff < bestDiff {
+				bestDiff = diff
+				target = i
+			}
+		}
+	}
+	if target >= 0 {
+		d.fileCursor = target
+		d.adjustFileScroll()
+	}
+	d.jumping = false
+	d.jumpInput = ""
+	return d
 }
 
 // adjustFileScroll keeps the cursor inside the viewport.
@@ -743,9 +816,36 @@ func (d DiffView) loadCurrentFileCmd() tea.Cmd {
 }
 
 func (d DiffView) updateFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Line-jump input prompt (`:1234<enter>`). When active, digits go to the
+	// buffer; enter applies, esc/q cancels. Everything else swallowed so the
+	// underlying viewport doesn't accidentally scroll mid-typing.
+	if d.jumping {
+		s := msg.String()
+		switch s {
+		case "enter":
+			d = d.applyLineJump()
+		case "esc", "ctrl+c":
+			d.jumping = false
+			d.jumpInput = ""
+		case "backspace":
+			if n := len(d.jumpInput); n > 0 {
+				d.jumpInput = d.jumpInput[:n-1]
+			}
+		default:
+			if len(s) == 1 && s[0] >= '0' && s[0] <= '9' {
+				d.jumpInput += s
+			}
+		}
+		return d, nil
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return d, tea.Quit
+	case ":":
+		d.jumping = true
+		d.jumpInput = ""
+		return d, nil
 	case "c":
 		// Line- or range-level comment. If a pending comment already exists on
 		// this line/range, open the overlay pre-filled to edit. If visualStart
@@ -1108,10 +1208,6 @@ func (d DiffView) renderFile() string {
 	}
 
 	vh := d.viewportHeight()
-	end := d.fileScroll + vh
-	if end > len(d.parsed) {
-		end = len(d.parsed)
-	}
 	// Visual-mode range
 	vLo, vHi := -1, -1
 	if d.visualStart >= 0 {
@@ -1121,10 +1217,35 @@ func (d DiffView) renderFile() string {
 		}
 	}
 
-	for i := d.fileScroll; i < end; i++ {
+	// Render rows but count VISUAL lines emitted — long content lines wrap into
+	// multiple terminal rows via renderRow, so a naive `fileScroll + vh` index
+	// range overshoots the viewport and pushes the help footer off-screen.
+	// Stop once we've filled vh visual rows.
+	emitted := 0
+	for i := d.fileScroll; i < len(d.parsed) && emitted < vh; i++ {
+		// Bounds-guard hiMasks (computed from d.parsed, same length, but cheap to be safe).
+		var mask []bool
+		if i < len(hiMasks) {
+			mask = hiMasks[i]
+		}
 		hasComment := d.lineHasPending(i)
 		focused := i == d.fileCursor || (vLo >= 0 && i >= vLo && i <= vHi)
-		b.WriteString(d.renderRow(d.parsed[i], hiMasks[i], lexer, focused, hasComment) + "\n")
+		row := d.renderRow(d.parsed[i], mask, lexer, focused, hasComment)
+		// renderRow returns its segments joined by "\n" (no trailing newline),
+		// so visual rows == newlines + 1.
+		rowLines := strings.Count(row, "\n") + 1
+		// If this row would overflow, truncate it to whatever space remains.
+		// Better a partial last row than overrunning the help footer.
+		if emitted+rowLines > vh {
+			lines := strings.SplitN(row, "\n", rowLines)
+			lines = lines[:vh-emitted]
+			b.WriteString(strings.Join(lines, "\n"))
+			b.WriteString("\n")
+			emitted = vh
+			break
+		}
+		b.WriteString(row + "\n")
+		emitted += rowLines
 	}
 
 	if len(d.parsed) > 0 {
@@ -1138,18 +1259,19 @@ func (d DiffView) renderFile() string {
 		}
 		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("[line %d/%d · %d%%]", pos, total, pct)))
 	}
-	help := "j/k line · d/u page · g/G top/bottom · n/p next/prev file · esc back · q quit"
-	if d.prMeta != nil {
-		if d.visualStart >= 0 {
-			// In visual mode, surface that prominently and show the relevant keys.
-			help = fmt.Sprintf(
-				"-- VISUAL --  j/k extend · c comment range · v cancel · q quit",
-			)
-		} else {
-			help = fmt.Sprintf(
-				"j/k · d/u · n/p file · m scope · v range · c comment · C file · D delete · R review (%d) · esc · q",
-				len(d.pending))
-		}
+	var help string
+	switch {
+	case d.jumping:
+		help = fmt.Sprintf(":%s    (enter jump · esc cancel)", d.jumpInput)
+	case d.prMeta != nil && d.visualStart >= 0:
+		// In visual mode, surface that prominently and show the relevant keys.
+		help = "-- VISUAL --  j/k extend · c comment range · v cancel · q quit"
+	case d.prMeta != nil:
+		help = fmt.Sprintf(
+			"j/k · d/u · :<line> · n/p file · m scope · v range · c comment · C file · D delete · R review (%d) · esc · q",
+			len(d.pending))
+	default:
+		help = "j/k line · d/u page · :<line> jump · g/G top/bottom · n/p next/prev file · esc back · q quit"
 	}
 	b.WriteString("\n" + helpStyle.Render(help))
 	if d.statusMsg != "" {
