@@ -405,7 +405,7 @@ func cmdDiffPR(cfg config.Config, repoRoot, prNum string, plain bool) {
 	}
 
 	dv := tui.NewPRDiffView(repoRoot, meta, files, perFileDiff)
-	p := tea.NewProgram(dv, tea.WithAltScreen())
+	p := tea.NewProgram(dv, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "diff TUI error: %v\n", err)
 		os.Exit(1)
@@ -552,7 +552,7 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool) {
 	}
 
 	dv := tui.NewDiffView(repoRoot, ref, commitCount, files, warn)
-	p := tea.NewProgram(dv, tea.WithAltScreen())
+	p := tea.NewProgram(dv, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "diff TUI error: %v\n", err)
 		os.Exit(1)

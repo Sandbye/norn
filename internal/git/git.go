@@ -263,15 +263,21 @@ func Age(t time.Time) string {
 	}
 }
 
-// MakeBranch produces a branch name from a hint.
+// MakeBranch produces a branch name from a hint, following the team SOP at
+// how-we-build/coding-guidelines/git-strategy.md (Conventional Branch).
 //
-//	kind == "review" → review/CU-<id>/<desc> (or review/<desc>, review/<ts>)
-//	kind == "task"   → <type>/CU-<id>/<desc> where <type> is inferred from the
-//	                    hint's first matching keyword (fix/chore/refactor/docs/
-//	                    test), defaulting to feat.
+//	Format: <prefix>/#<taskId>/<desc>  or  <prefix>/<desc>  (no id case)
+//	Prefixes:
+//	  feature — new feature (default)
+//	  fix     — production bug fix
+//	  hotfix  — urgent prod fix
+//	  epic    — multi-task umbrella
+//	  chore   — everything else (refactor, docs, deps, tooling, internal)
+//	  review  — work-only kind for review worktrees; not a real PR prefix
 //
-// CU id is parsed from either `CU-<id>` literals or clickup.com/t/<id> URLs.
-// Both the type keyword and CU id are stripped from the hint before slugging.
+// CU id is parsed from `CU-<id>` literals or `clickup.com/t/<id>` URLs and
+// emitted as `#<id>` (no `CU-` prefix, per SOP). Both the type keyword and the
+// id are stripped from the hint before slugging.
 func MakeBranch(kind, hint string) string {
 	cuID, hintRest := extractCUID(hint)
 
@@ -286,7 +292,7 @@ func MakeBranch(kind, hint string) string {
 
 	parts := []string{prefix}
 	if cuID != "" {
-		parts = append(parts, "CU-"+cuID)
+		parts = append(parts, "#"+cuID)
 	}
 	if desc != "" {
 		parts = append(parts, desc)
@@ -312,34 +318,51 @@ func extractCUID(hint string) (string, string) {
 	return id, rest
 }
 
-// inferType picks a conventional-commit prefix from the first matching keyword
-// in the hint. Returns the prefix and the hint with that keyword stripped so it
-// doesn't pollute the slug. Default: feat.
+// inferType picks a Conventional Branch prefix from the first matching keyword
+// in the hint. Returns the prefix and the hint with that keyword stripped so
+// it doesn't pollute the slug. Default: feature.
+//
+// Prefixes (per how-we-build/coding-guidelines/git-strategy.md):
+// feature | fix | hotfix | epic | chore. `chore` is the catch-all for refactor,
+// docs, deps, tooling, internal cleanup — those don't get their own branch
+// prefix even though they DO have their own commit-type.
 func inferType(hint string) (string, string) {
 	lower := strings.ToLower(hint)
 	keywords := []struct {
-		token string
-		kind  string
+		token  string
+		prefix string
 	}{
-		{"refactor", "refactor"},
-		{"cleanup", "chore"},
-		{"chore", "chore"},
-		{"tidy", "chore"},
-		{"docs", "docs"},
-		{"documentation", "docs"},
-		{"doc", "docs"},
-		{"tests", "test"},
-		{"test", "test"},
+		// hotfix before fix so `hotfix` doesn't get eaten by the `fix` rule.
+		{"hotfix", "hotfix"},
+		{"bugfix", "fix"},
 		{"fix", "fix"},
 		{"bug", "fix"},
 		{"broken", "fix"},
 		{"error", "fix"},
-		{"feat", "feat"},
-		{"feature", "feat"},
-		{"add", "feat"},
-		{"new", "feat"},
-		{"implement", "feat"},
-		{"create", "feat"},
+		{"epic", "epic"},
+		// chore catch-all bucket
+		{"chore", "chore"},
+		{"refactor", "chore"},
+		{"refac", "chore"},
+		{"docs", "chore"},
+		{"doc", "chore"},
+		{"documentation", "chore"},
+		{"deps", "chore"},
+		{"dependency", "chore"},
+		{"dependencies", "chore"},
+		{"tooling", "chore"},
+		{"internal", "chore"},
+		{"cleanup", "chore"},
+		{"tidy", "chore"},
+		{"test", "chore"},
+		{"tests", "chore"},
+		// feature triggers
+		{"feature", "feature"},
+		{"feat", "feature"},
+		{"add", "feature"},
+		{"new", "feature"},
+		{"implement", "feature"},
+		{"create", "feature"},
 	}
 	for _, k := range keywords {
 		idx := strings.Index(lower, k.token)
@@ -354,9 +377,9 @@ func inferType(hint string) (string, string) {
 		if end < len(lower) && isWordChar(lower[end]) {
 			continue
 		}
-		return k.kind, hint[:idx] + hint[end:]
+		return k.prefix, hint[:idx] + hint[end:]
 	}
-	return "feat", hint
+	return "feature", hint
 }
 
 func isWordChar(b byte) bool {
