@@ -144,19 +144,16 @@ Rules:
 
 ### Pull Requests
 
-> **ClickUp ↔ GitHub auto-linking is disabled** (team policy). ClickUp's GitHub integration ties every linked event to one personal GitHub account — the colleague who originally connected it — which spammed his identity onto unrelated tasks and broke attribution. Linking is now manual: after creating the PR, post a comment on the ClickUp task with the PR URL.
-
 When the task is complete:
 1. Push the branch to origin.
 2. Create the PR using `gh pr create --assignee {{.User.Name | printf "%s"}} --base {{if .PRBase}}{{.PRBase}}{{else}}{{.Base}}{{end}}`. **Default is ready-for-review.** Add `--draft` only when unsure the change is actually ready (incomplete work, unverified, WIP, awaiting input). If draft, say why.
-3. **Include the ClickUp task ID** in the PR title or body using `CU-{task_id}` format — for human readability only; ClickUp will NOT auto-link. Omit if no ClickUp task.
-4. **Post the PR URL as a comment on the ClickUp task** (only if a ClickUp task exists). Use the ClickUp MCP `clickup_create_task_comment` with the task id and a body like `PR: <url>`. This replaces the auto-link.
-5. ClickUp status:
+3. **Include the ClickUp task ID** in the PR title or body using `#{task_id}` format — for human readability and grep. Omit if no ClickUp task.
+4. ClickUp status:
    - Ready PR → set status to `code review` immediately.
    - Draft PR → leave status as-is; flip to `code review` only when the PR is undrafted.
-6. Open the PR in the browser: `gh pr view --web`.
-7. **Never** add `Co-Authored-By` lines to commits.
-8. **Never** add a test plan section to the PR body unless the user explicitly asks for one. Keep PR descriptions concise — summary + CU link is enough.
+5. Open the PR in the browser: `gh pr view --web`.
+6. **Never** add `Co-Authored-By` lines to commits.
+7. **Never** add a test plan section to the PR body unless the user explicitly asks for one. Keep PR descriptions concise.
 
 ### Marking a Draft PR as Ready
 Only relevant if the PR was created with `--draft`. When the user says the PR is ready (or asks to undraft/open it):
