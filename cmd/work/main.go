@@ -54,12 +54,25 @@ func main() {
 			plain := false
 			list := false
 			prNum := ""
-			for _, a := range args[1:] {
+			baseOverride := ""
+			diffArgs := args[1:]
+			for i := 0; i < len(diffArgs); i++ {
+				a := diffArgs[i]
 				switch {
 				case a == "--plain" || a == "-p":
 					plain = true
 				case a == "--list" || a == "-l":
 					list = true
+				case a == "--base" || a == "-b":
+					// `--base <ref>` — peek next arg.
+					if i+1 < len(diffArgs) {
+						baseOverride = diffArgs[i+1]
+						i++
+					}
+				case strings.HasPrefix(a, "--base="):
+					baseOverride = strings.TrimPrefix(a, "--base=")
+				case strings.HasPrefix(a, "-b="):
+					baseOverride = strings.TrimPrefix(a, "-b=")
 				case strings.HasPrefix(a, "#"):
 					prNum = strings.TrimPrefix(a, "#")
 				case isAllDigits(a):
@@ -74,7 +87,7 @@ func main() {
 				cmdDiffPR(cfg, repoRoot, prNum, plain)
 				return
 			}
-			cmdDiff(cfg, repoRoot, plain)
+			cmdDiff(cfg, repoRoot, plain, baseOverride)
 			return
 		case "init":
 			cmdInit(repoRoot)
@@ -512,7 +525,7 @@ func splitDiffByFile(diff string) ([]tui.DiffFile, map[string]string) {
 
 // cmdDiff shows what's about to be shipped: current branch vs pr_base.
 // TUI by default; plain text mode behind --plain for piping / scripts.
-func cmdDiff(cfg config.Config, repoRoot string, plain bool) {
+func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string) {
 	if repoRoot == "" {
 		fmt.Fprintln(os.Stderr, "error: not inside a git repository")
 		os.Exit(1)
@@ -523,18 +536,27 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool) {
 		os.Exit(1)
 	}
 
-	// PR target depends on branch name: hotfix/* may route differently.
-	target := resolvePRTarget(cfg, branch)
-	if target == "" {
-		fmt.Fprintln(os.Stderr, "error: no pr_base or base_branches configured")
-		os.Exit(1)
+	// Resolve the diff base. `--base <ref>` wins outright (lets the user point
+	// at any local or remote ref — `master`, `origin/HEAD`, `feature/foo`,
+	// `@{u}`, etc.). Otherwise fall back to the PR target from config.
+	var ref, target string
+	if baseOverride != "" {
+		ref = baseOverride
+		// For display purposes, strip a leading `origin/` so the header shows
+		// just the branch name.
+		target = strings.TrimPrefix(baseOverride, "origin/")
+	} else {
+		target = resolvePRTarget(cfg, branch)
+		if target == "" {
+			fmt.Fprintln(os.Stderr, "error: no pr_base or base_branches configured (use --base <ref> to override)")
+			os.Exit(1)
+		}
+		ref = "origin/" + target
 	}
 	if branch == target {
 		fmt.Printf("On %s — nothing to compare.\n", target)
 		return
 	}
-
-	ref := "origin/" + target
 	// In dual-base workflows (branch from master, PR to user_test) the branch
 	// will never be a descendant of the PR target — that's expected, not a
 	// pollution warning. Skip the ancestor check.
@@ -1410,6 +1432,7 @@ Usage:
   work diff               TUI diff vs pr_base (warn if forked from wrong base)
   work diff <pr#>         TUI diff of any open PR (yours or colleague's)
   work diff --list, -l    Pick an open PR from a list, then view its diff
+  work diff --base <ref>  Diff against any local/remote ref (origin/HEAD, master, @{u}, …)
   work diff --plain, -p   Plain text diff for piping
   work init               Scaffold a project config for the current repo
   work doctor             Diagnose hooks, skills, configs, docs, state
