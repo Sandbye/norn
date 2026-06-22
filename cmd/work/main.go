@@ -135,10 +135,11 @@ func main() {
 		return
 	}
 
-	// Outside any git repo with no other intent → open the cross-session
-	// dashboard. Lets you `work` from any random terminal pane.
-	if repoRoot == "" && initialView == tui.ViewMenu {
-		cmdDashboard(cfg, "")
+	// Bare `work` → the cross-session dashboard (the default view). Scoped to
+	// the current repo when inside one, global otherwise. The resume/new/clean
+	// menu is reached explicitly: `work -d` (cd-mode), `work --clean`.
+	if initialView == tui.ViewMenu && !cdMode {
+		cmdDashboard(cfg, repoRoot)
 		return
 	}
 	if repoRoot == "" && initialView != tui.ViewClean {
@@ -1325,9 +1326,16 @@ func cmdDashboard(cfg config.Config, repoRoot string) {
 		os.Exit(1)
 	}
 	result := m.(tui.Dashboard).Result()
-	if result.Action == tui.ResultResume && result.Path != "" {
+	switch result.Action {
+	case tui.ResultCd:
+		// Parent-shell cd via the work() wrapper — no nested subshell.
+		writeCdTarget(result.Path)
 		clearScreen()
-		tui.LaunchClaude(result.Path, true)
+	case tui.ResultResume:
+		if result.Path != "" {
+			clearScreen()
+			tui.LaunchClaude(result.Path, true)
+		}
 	}
 }
 
@@ -1425,7 +1433,7 @@ func cmdHelp() {
 	fmt.Println(`work — worktree manager
 
 Usage:
-  work                    Interactive TUI
+  work                    Cross-session dashboard (default view)
   work "hint"             Create task worktree with hint (base: pr_base default)
   work "hint" --from <b>  Override base branch for this worktree
   work --review "hint"    Create review worktree
@@ -1436,8 +1444,7 @@ Usage:
   work --list             List worktrees (git)
   work --status           Show worktrees with details
   work --project-config   Print resolved config as JSON
-  work --dashboard        Live TUI of all known sessions
-                          (also opens by default when run outside any git repo)
+  work --dashboard        Same as bare work — live TUI of all known sessions
   work diff               TUI diff vs pr_base (warn if forked from wrong base)
   work diff <pr#>         TUI diff of any open PR (yours or colleague's)
   work diff --list, -l    Pick an open PR from a list, then view its diff
