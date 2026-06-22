@@ -124,7 +124,18 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.scopeRepo = ""
 				return d, d.loadCmd()
 			}
-		case "enter", "c":
+		case "enter":
+			// cd into the worktree dir (via the shell wrapper). Default action.
+			if d.cursor < len(d.rows) {
+				row := d.rows[d.cursor]
+				if row.WorktreeAlive {
+					d.quit = true
+					d.result = Result{Action: ResultCd, Path: row.Path}
+					return d, tea.Quit
+				}
+			}
+		case "l", "c":
+			// Launch/resume Claude in the worktree.
 			if d.cursor < len(d.rows) {
 				row := d.rows[d.cursor]
 				if row.WorktreeAlive {
@@ -304,7 +315,7 @@ func (d Dashboard) dashKeyHelp() string {
 	if d.cursor < len(d.rows) {
 		row := d.rows[d.cursor]
 		if row.WorktreeAlive {
-			parts = append(parts, "c/⏎ claude")
+			parts = append(parts, "⏎ cd", "l claude")
 		}
 		if row.PRNumber > 0 {
 			parts = append(parts, "p pr")
