@@ -2,6 +2,17 @@
 
 Go TUI for managing git worktrees with Claude Code sessions. Replaces the previous bash script at `~/.local/bin/work`.
 
+## Conventions
+
+This repo defers to the global profile (`~/.claude/CLAUDE.md`, which imports `~/Documents/GitHub/profile/*`). Don't restate those rules here — follow them:
+
+- **Commits** — Conventional Commits in sandbye's voice: title-only by default, concise, one change per title, body only when the *why* is non-obvious. Spec: `profile/dev/preferences.md` "Commits" + `profile/voice.md` §6.
+- **Branches** — Conventional Branch `<type>/#<clickup-id>/<title>`.
+- **PRs** — `gh pr create --assignee @me`, ready-for-review by default.
+- **Style** — direct, terse; match surrounding Go; simple over clever.
+
+This file documents the *codebase* (architecture, design decisions, roadmap), not collaboration rules.
+
 ## Architecture
 
 ```
