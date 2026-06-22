@@ -16,6 +16,7 @@ const (
 	actionNewReview
 	actionClean
 	actionQuit
+	actionCd // cd into the worktree dir (no Claude launch)
 )
 
 type menuChoice struct {
@@ -34,6 +35,10 @@ type menuModel struct {
 	items     []menuItem
 	cursor    int
 	chosen    *menuChoice
+	// cdMode flips the default action on a worktree row: enter = cd into its
+	// dir, `l` = launch/resume Claude. Set by `work -d`. Off = normal: enter
+	// launches/resumes.
+	cdMode bool
 }
 
 func newMenuModel() menuModel {
@@ -136,9 +141,24 @@ func (m menuModel) Update(msg tea.Msg) (menuModel, tea.Cmd) {
 				if item.label == "---" {
 					break
 				}
+				action := item.action
+				// In cd-mode, enter on a worktree row jumps to its dir instead
+				// of launching Claude. Non-worktree rows keep their action.
+				if m.cdMode && item.worktree != nil && action == actionResume {
+					action = actionCd
+				}
 				m.chosen = &menuChoice{
-					action:   item.action,
+					action:   action,
 					worktree: item.worktree,
+				}
+			}
+		case "l":
+			// Launch/resume Claude for the row under the cursor. Primary use is
+			// cd-mode (where enter cd's), but harmless in normal mode too.
+			if m.cursor < len(m.items) {
+				item := m.items[m.cursor]
+				if item.worktree != nil {
+					m.chosen = &menuChoice{action: actionResume, worktree: item.worktree}
 				}
 			}
 		case "q", "esc":
@@ -154,7 +174,11 @@ func (m menuModel) View() string {
 	var b strings.Builder
 
 	if len(m.worktrees) > 0 {
-		b.WriteString(headerStyle.Render("Active worktrees"))
+		title := "Active worktrees"
+		if m.cdMode {
+			title = "Jump to worktree"
+		}
+		b.WriteString(headerStyle.Render(title))
 		b.WriteString("\n")
 	}
 
@@ -178,7 +202,11 @@ func (m menuModel) View() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(helpStyle.Render("j/k navigate  enter select  q quit"))
+	help := "j/k navigate  enter select  q quit"
+	if m.cdMode {
+		help = "j/k navigate  enter cd  l launch claude  q quit"
+	}
+	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
 }

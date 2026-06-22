@@ -44,7 +44,7 @@ func main() {
 		case "--activity-tick":
 			cmdActivityTick(repoRoot)
 			return
-		case "--dashboard", "-d":
+		case "--dashboard":
 			cmdDashboard(cfg, repoRoot)
 			return
 		case "--refresh-docs":
@@ -103,15 +103,21 @@ func main() {
 
 	// Determine initial view
 	initialView := tui.ViewMenu
+	cdMode := false
 	switch {
 	case len(args) > 0 && args[0] == "--clean":
 		initialView = tui.ViewClean
 	case len(args) > 0 && args[0] == "--cd":
 		initialView = tui.ViewCd
+	case len(args) > 0 && (args[0] == "-d" || args[0] == "--dir"):
+		// `work -d` — the normal main menu, but enter cd's into the worktree
+		// (l launches Claude). Jump-to-dir without leaving the familiar list.
+		initialView = tui.ViewMenu
+		cdMode = true
 	}
 
 	// Direct create: `work "some hint"` or `work --review "hint"`
-	if len(args) > 0 && args[0] != "--clean" && args[0] != "--cd" {
+	if len(args) > 0 && args[0] != "--clean" && args[0] != "--cd" && args[0] != "-d" && args[0] != "--dir" {
 		if repoRoot == "" {
 			fmt.Fprintln(os.Stderr, "error: not inside a git repository")
 			os.Exit(1)
@@ -142,7 +148,7 @@ func main() {
 
 	reapStale(repoRoot)
 
-	app := tui.NewApp(cfg, repoRoot, initialView)
+	app := tui.NewAppMode(cfg, repoRoot, initialView, cdMode)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	m, err := p.Run()
 	if err != nil {
@@ -163,9 +169,10 @@ func main() {
 		clearScreen()
 		tui.LaunchClaude(result.Path, true)
 	case tui.ResultCd:
+		// Parent-shell cd: write the target and exit. The `work()` shell wrapper
+		// cd's the *current* shell into it — no nested subshell.
 		writeCdTarget(result.Path)
 		clearScreen()
-		launchShell(result.Path)
 	}
 }
 
@@ -1422,12 +1429,14 @@ Usage:
   work "hint"             Create task worktree with hint (base: pr_base default)
   work "hint" --from <b>  Override base branch for this worktree
   work --review "hint"    Create review worktree
-  work --cd               Jump into a worktree shell
+  work -d, --dir          Main menu in cd-mode: enter cd's into the worktree,
+                          l launches Claude
+  work --cd               Jump into a worktree shell (picker)
   work --clean            Jump to clean view
   work --list             List worktrees (git)
   work --status           Show worktrees with details
   work --project-config   Print resolved config as JSON
-  work -d, --dashboard    Live TUI of all known sessions
+  work --dashboard        Live TUI of all known sessions
                           (also opens by default when run outside any git repo)
   work diff               TUI diff vs pr_base (warn if forked from wrong base)
   work diff <pr#>         TUI diff of any open PR (yours or colleague's)
@@ -1443,17 +1452,4 @@ Usage:
 
 func clearScreen() {
 	fmt.Print("\033[H\033[2J")
-}
-
-func launchShell(dir string) {
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
-	cmd := exec.Command(shell, "-i")
-	cmd.Dir = dir
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Run()
 }

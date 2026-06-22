@@ -68,14 +68,22 @@ type worktreeCreatedMsg struct {
 type errMsg struct{ err error }
 
 func NewApp(cfg config.Config, repoRoot string, initialView View) App {
+	return NewAppMode(cfg, repoRoot, initialView, false)
+}
+
+// NewAppMode is NewApp with an explicit menu cd-mode (enter = cd, l = launch).
+// Used by `work -d`.
+func NewAppMode(cfg config.Config, repoRoot string, initialView View, cdMode bool) App {
 	// Surface pr_base as the default choice in the base-branch picker by
 	// putting it first. Keeps "branch base" and "PR target" identical.
 	bases := orderBases(cfg.BaseBranches, cfg.PRBase)
+	menu := newMenuModel()
+	menu.cdMode = cdMode
 	return App{
 		cfg:      cfg,
 		repoRoot: repoRoot,
 		current:  initialView,
-		menu:     newMenuModel(),
+		menu:     menu,
 		clean:    newCleanModel(),
 		create:   newCreateModel(bases),
 		cd:       newCdModel(),
@@ -147,6 +155,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case actionResume:
 				a.quit = true
 				a.result = Result{Action: ResultResume, Path: a.menu.chosen.worktree.Path}
+				return a, tea.Quit
+			case actionCd:
+				a.quit = true
+				a.result = Result{Action: ResultCd, Path: a.menu.chosen.worktree.Path}
 				return a, tea.Quit
 			case actionNewTask:
 				a.current = ViewCreate
