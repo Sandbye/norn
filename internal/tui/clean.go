@@ -14,16 +14,17 @@ type cleanModel struct {
 	worktrees     []git.Worktree
 	remoteChecked bool
 	cursor        int
-	selected      map[int]bool
+	selected      map[string]bool // keyed by worktree Path so filtering is safe
 	confirming    bool
 	done          bool
 	cancelled     bool
 	toRemove      []git.Worktree
+	filter        filterState
 }
 
 func newCleanModel() cleanModel {
 	return cleanModel{
-		selected: make(map[int]bool),
+		selected: make(map[string]bool),
 	}
 }
 
@@ -36,7 +37,7 @@ func (m *cleanModel) autoSelectGone() {
 	firstGone := -1
 	for i, wt := range sorted {
 		if wt.RemoteGone {
-			m.selected[i] = true
+			m.selected[wt.Path] = true
 			if firstGone < 0 {
 				firstGone = i
 			}
@@ -56,80 +57,120 @@ func (m cleanModel) sorted() []git.Worktree {
 	return wts
 }
 
-func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
-	sorted := m.sorted()
+// visible is the sorted list narrowed by the active filter query.
+func (m cleanModel) visible() []git.Worktree {
+	s := m.sorted()
+	if m.filter.query == "" {
+		return s
+	}
+	return rankWorktrees(s, m.filter.query)
+}
 
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		if m.confirming {
-			switch msg.String() {
-			case "y", "Y", "enter":
-				m.done = true
-				m.toRemove = nil
-				for idx := range m.selected {
-					if idx < len(sorted) {
-						m.toRemove = append(m.toRemove, sorted[idx])
-					}
+func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	s := key.String()
+
+	if m.confirming {
+		switch s {
+		case "y", "Y", "enter":
+			m.done = true
+			m.toRemove = nil
+			for _, wt := range m.worktrees {
+				if m.selected[wt.Path] {
+					m.toRemove = append(m.toRemove, wt)
 				}
-			case "n", "N", "esc", "q":
-				m.confirming = false
+			}
+		case "n", "N", "esc", "q":
+			m.confirming = false
+		}
+		return m, nil
+	}
+
+	// Filter input mode (printable/backspace/esc edit query; nav falls through).
+	if m.filter.active {
+		before := m.filter.query
+		if m.filter.handleKey(s) {
+			if m.filter.query != before {
+				m.cursor = 0
 			}
 			return m, nil
 		}
+	} else if s == "/" {
+		m.filter.handleKey(s)
+		return m, nil
+	}
 
-		switch msg.String() {
-		case "up", "k":
+	vis := m.visible()
+	switch s {
+	case "up", "k", "ctrl+p":
+		if len(vis) > 0 {
 			m.cursor--
 			if m.cursor < 0 {
-				m.cursor = len(sorted) - 1
+				m.cursor = len(vis) - 1
 			}
-		case "down", "j":
+		}
+	case "down", "j", "ctrl+n":
+		if len(vis) > 0 {
 			m.cursor++
-			if m.cursor >= len(sorted) {
+			if m.cursor >= len(vis) {
 				m.cursor = 0
 			}
-		case " ", "x":
-			if m.selected[m.cursor] {
-				delete(m.selected, m.cursor)
-			} else {
-				m.selected[m.cursor] = true
-			}
-		case "a":
-			// Select all
-			if len(m.selected) == len(sorted) {
-				m.selected = make(map[int]bool)
-			} else {
-				for i := range sorted {
-					m.selected[i] = true
-				}
-			}
-		case "g":
-			// Select all gone from remote
-			for i, wt := range sorted {
-				if wt.RemoteGone {
-					m.selected[i] = true
-				}
-			}
-		case "d", "enter":
-			if len(m.selected) > 0 {
-				m.confirming = true
-			}
-		case "esc", "q":
-			m.cancelled = true
 		}
+	case " ", "x":
+		if m.cursor < len(vis) {
+			p := vis[m.cursor].Path
+			if m.selected[p] {
+				delete(m.selected, p)
+			} else {
+				m.selected[p] = true
+			}
+		}
+	case "a":
+		// Toggle all *visible* rows.
+		allSel := len(vis) > 0
+		for _, wt := range vis {
+			if !m.selected[wt.Path] {
+				allSel = false
+				break
+			}
+		}
+		for _, wt := range vis {
+			if allSel {
+				delete(m.selected, wt.Path)
+			} else {
+				m.selected[wt.Path] = true
+			}
+		}
+	case "g":
+		// Select all gone-from-remote, regardless of filter.
+		for _, wt := range m.worktrees {
+			if wt.RemoteGone {
+				m.selected[wt.Path] = true
+			}
+		}
+	case "d", "enter":
+		if len(m.selected) > 0 {
+			m.confirming = true
+		}
+	case "esc", "q":
+		// Only reached when not filtering — active filter consumes esc/q.
+		m.cancelled = true
 	}
 
 	return m, nil
 }
 
 func (m cleanModel) View() string {
-	sorted := m.sorted()
+	sorted := m.visible()
 	var b strings.Builder
 
 	b.WriteString(headerStyle.Render("Clean worktrees"))
 	b.WriteString("\n")
 
-	if len(sorted) == 0 {
+	if len(m.worktrees) == 0 {
 		b.WriteString(subtitleStyle.Render("No worktrees found."))
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("q back"))
@@ -139,6 +180,18 @@ func (m cleanModel) View() string {
 	if !m.remoteChecked {
 		b.WriteString(subtitleStyle.Render("Checking remote branches..."))
 		b.WriteString("\n\n")
+	}
+
+	// Filter line.
+	if m.filter.active || m.filter.query != "" {
+		b.WriteString(cursorStyle.Render("/") + m.filter.query)
+		if m.filter.active {
+			b.WriteString(cursorStyle.Render("▏"))
+		}
+		if len(sorted) == 0 {
+			b.WriteString(dimStyle.Render("  no matches"))
+		}
+		b.WriteString("\n")
 	}
 
 	// Table header
@@ -161,7 +214,7 @@ func (m cleanModel) View() string {
 		}
 
 		check := "  "
-		if m.selected[i] {
+		if m.selected[wt.Path] {
 			check = selectedStyle.Render("● ")
 		}
 
@@ -205,9 +258,11 @@ func (m cleanModel) View() string {
 	if m.confirming {
 		count := len(m.selected)
 		b.WriteString(confirmStyle.Render(fmt.Sprintf("Remove %d worktree(s)? (y/n)", count)))
+	} else if m.filter.active {
+		b.WriteString(helpStyle.Render("type to filter  ↑/↓ move  space select  esc clear"))
 	} else {
 		var parts []string
-		parts = append(parts, "j/k navigate", "space select", "a all", "g select gone")
+		parts = append(parts, "j/k navigate", "/ filter", "space select", "a all", "g select gone")
 		if len(m.selected) > 0 {
 			parts = append(parts, "d delete")
 		}
