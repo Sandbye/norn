@@ -39,6 +39,7 @@ type menuModel struct {
 	// dir, `l` = launch/resume Claude. Set by `work -d`. Off = normal: enter
 	// launches/resumes.
 	cdMode bool
+	filter filterState
 }
 
 func newMenuModel() menuModel {
@@ -47,6 +48,25 @@ func newMenuModel() menuModel {
 
 func (m menuModel) buildItems() []menuItem {
 	var items []menuItem
+
+	row := func(wt git.Worktree) menuItem {
+		label := fmt.Sprintf("%s  %s  %s",
+			branchStyle.Render(wt.Branch),
+			ageStyle.Render(git.Age(wt.LastCommit)),
+			commitMsgStyle.Render(truncate(wt.CommitMsg, 40)),
+		)
+		w := wt
+		return menuItem{label: label, action: actionResume, worktree: &w}
+	}
+
+	// When a filter query is active, show only matching worktrees, ranked —
+	// no kind grouping, no action rows (you're searching, not navigating menus).
+	if m.filter.query != "" {
+		for _, wt := range rankWorktrees(m.worktrees, m.filter.query) {
+			items = append(items, row(wt))
+		}
+		return items
+	}
 
 	// Group existing worktrees
 	var tasks, reviews []git.Worktree
@@ -59,36 +79,11 @@ func (m menuModel) buildItems() []menuItem {
 		}
 	}
 
-	if len(tasks) > 0 {
-		for i := range tasks {
-			wt := tasks[i]
-			label := fmt.Sprintf("%s  %s  %s",
-				branchStyle.Render(wt.Branch),
-				ageStyle.Render(git.Age(wt.LastCommit)),
-				commitMsgStyle.Render(truncate(wt.CommitMsg, 40)),
-			)
-			items = append(items, menuItem{
-				label:    label,
-				action:   actionResume,
-				worktree: &wt,
-			})
-		}
+	for _, wt := range tasks {
+		items = append(items, row(wt))
 	}
-
-	if len(reviews) > 0 {
-		for i := range reviews {
-			wt := reviews[i]
-			label := fmt.Sprintf("%s  %s  %s",
-				branchStyle.Render(wt.Branch),
-				ageStyle.Render(git.Age(wt.LastCommit)),
-				commitMsgStyle.Render(truncate(wt.CommitMsg, 40)),
-			)
-			items = append(items, menuItem{
-				label:    label,
-				action:   actionResume,
-				worktree: &wt,
-			})
-		}
+	for _, wt := range reviews {
+		items = append(items, row(wt))
 	}
 
 	// Separator
@@ -109,64 +104,81 @@ func (m menuModel) buildItems() []menuItem {
 func (m menuModel) Update(msg tea.Msg) (menuModel, tea.Cmd) {
 	m.items = m.buildItems()
 
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "up", "k":
-			m.cursor--
-			if m.cursor < 0 {
-				m.cursor = len(m.items) - 1
-			}
-			// Skip separators
-			if m.items[m.cursor].label == "---" {
-				m.cursor--
-				if m.cursor < 0 {
-					m.cursor = len(m.items) - 1
-				}
-			}
-		case "down", "j":
-			m.cursor++
-			if m.cursor >= len(m.items) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	s := key.String()
+
+	// Filter input mode: printable chars + backspace + esc edit the query;
+	// navigation/selection fall through below. j/k type into the query here,
+	// so navigation while filtering uses arrows or ctrl+n/ctrl+p.
+	if m.filter.active {
+		before := m.filter.query
+		if m.filter.handleKey(s) {
+			if m.filter.query != before {
+				m.items = m.buildItems()
 				m.cursor = 0
 			}
-			if m.items[m.cursor].label == "---" {
-				m.cursor++
-				if m.cursor >= len(m.items) {
-					m.cursor = 0
-				}
-			}
-		case "enter":
-			if m.cursor < len(m.items) {
-				item := m.items[m.cursor]
-				if item.label == "---" {
-					break
-				}
-				action := item.action
-				// In cd-mode, enter on a worktree row jumps to its dir instead
-				// of launching Claude. Non-worktree rows keep their action.
-				if m.cdMode && item.worktree != nil && action == actionResume {
-					action = actionCd
-				}
-				m.chosen = &menuChoice{
-					action:   action,
-					worktree: item.worktree,
-				}
-			}
-		case "l":
-			// Launch/resume Claude for the row under the cursor. Primary use is
-			// cd-mode (where enter cd's), but harmless in normal mode too.
-			if m.cursor < len(m.items) {
-				item := m.items[m.cursor]
-				if item.worktree != nil {
-					m.chosen = &menuChoice{action: actionResume, worktree: item.worktree}
-				}
-			}
-		case "q", "esc":
-			m.chosen = &menuChoice{action: actionQuit}
+			return m, nil
 		}
+	} else if s == "/" {
+		m.filter.handleKey(s)
+		return m, nil
+	}
+
+	switch s {
+	case "up", "k", "ctrl+p":
+		m.moveCursor(-1)
+	case "down", "j", "ctrl+n":
+		m.moveCursor(+1)
+	case "enter":
+		if m.cursor < len(m.items) {
+			item := m.items[m.cursor]
+			if item.label == "---" {
+				break
+			}
+			action := item.action
+			// In cd-mode, enter on a worktree row jumps to its dir instead of
+			// launching Claude. Non-worktree rows keep their action.
+			if m.cdMode && item.worktree != nil && action == actionResume {
+				action = actionCd
+			}
+			m.chosen = &menuChoice{action: action, worktree: item.worktree}
+		}
+	case "l":
+		// Launch/resume Claude for the row under the cursor (primary use is
+		// cd-mode, where enter cd's). Skipped while filtering — 'l' types there.
+		if !m.filter.active && m.cursor < len(m.items) {
+			if wt := m.items[m.cursor].worktree; wt != nil {
+				m.chosen = &menuChoice{action: actionResume, worktree: wt}
+			}
+		}
+	case "q", "esc":
+		// Only reached when not filtering — an active filter consumes esc/q.
+		m.chosen = &menuChoice{action: actionQuit}
 	}
 
 	return m, nil
+}
+
+// moveCursor steps the selection by dir, wrapping and skipping separators.
+func (m *menuModel) moveCursor(dir int) {
+	n := len(m.items)
+	if n == 0 {
+		return
+	}
+	for i := 0; i < n; i++ {
+		m.cursor += dir
+		if m.cursor < 0 {
+			m.cursor = n - 1
+		} else if m.cursor >= n {
+			m.cursor = 0
+		}
+		if m.items[m.cursor].label != "---" {
+			return
+		}
+	}
 }
 
 func (m menuModel) View() string {
@@ -179,6 +191,18 @@ func (m menuModel) View() string {
 			title = "Jump to worktree"
 		}
 		b.WriteString(headerStyle.Render(title))
+		b.WriteString("\n")
+	}
+
+	// Filter line.
+	if m.filter.active || m.filter.query != "" {
+		b.WriteString(cursorStyle.Render("/") + m.filter.query)
+		if m.filter.active {
+			b.WriteString(cursorStyle.Render("▏"))
+		}
+		if len(m.items) == 0 {
+			b.WriteString(dimStyle.Render("  no matches"))
+		}
 		b.WriteString("\n")
 	}
 
@@ -202,9 +226,14 @@ func (m menuModel) View() string {
 		b.WriteString("\n")
 	}
 
-	help := "j/k navigate  enter select  q quit"
-	if m.cdMode {
-		help = "j/k navigate  enter cd  l launch claude  q quit"
+	var help string
+	switch {
+	case m.filter.active:
+		help = "type to filter  ↑/↓ or ctrl+n/p move  enter select  esc clear"
+	case m.cdMode:
+		help = "j/k navigate  / filter  enter cd  l launch claude  q quit"
+	default:
+		help = "j/k navigate  / filter  enter select  q quit"
 	}
 	b.WriteString(helpStyle.Render(help))
 
