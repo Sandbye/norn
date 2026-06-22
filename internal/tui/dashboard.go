@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,6 +39,41 @@ type Dashboard struct {
 
 	// prCache: branch -> cached PR result. TTL prevents re-fetch on every tick.
 	prCache map[string]prCacheEntry
+
+	filter filterState
+}
+
+// visibleRows is d.rows narrowed by the active filter query (fuzzy on branch /
+// clickup id / repo), best-ranked first. Empty query returns rows unchanged.
+func (d Dashboard) visibleRows() []dashRow {
+	if d.filter.query == "" {
+		return d.rows
+	}
+	type scored struct {
+		row   dashRow
+		score int
+	}
+	var hits []scored
+	for _, r := range d.rows {
+		best := -1
+		for _, field := range []string{r.Branch, r.ClickUpID, r.Repo} {
+			if field == "" {
+				continue
+			}
+			if s, ok := fuzzyScore(d.filter.query, field); ok && s > best {
+				best = s
+			}
+		}
+		if best > -1 {
+			hits = append(hits, scored{r, best})
+		}
+	}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
+	out := make([]dashRow, len(hits))
+	for i, h := range hits {
+		out[i] = h.row
+	}
+	return out
 }
 
 type prCacheEntry struct {
@@ -101,22 +137,42 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.height = msg.Height
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
+		s := msg.String()
+
+		// Filter input: printable/backspace/esc edit the query. While filtering,
+		// letters type into the query, so navigation uses arrows/ctrl+n+p and
+		// the action letters (r/a/p/t/d) are paused until esc.
+		if d.filter.active {
+			before := d.filter.query
+			if d.filter.handleKey(s) {
+				if d.filter.query != before {
+					d.cursor = 0
+				}
+				return d, nil
+			}
+		} else if s == "/" {
+			d.filter.handleKey(s)
+			return d, nil
+		}
+
+		vis := d.visibleRows()
+		switch s {
+		case "ctrl+c", "q", "esc":
+			// esc only reaches here when not filtering (active filter eats it).
 			d.quit = true
 			return d, tea.Quit
-		case "j", "down":
-			if d.cursor < len(d.rows)-1 {
+		case "j", "down", "ctrl+n":
+			if d.cursor < len(vis)-1 {
 				d.cursor++
 			}
-		case "k", "up":
+		case "k", "up", "ctrl+p":
 			if d.cursor > 0 {
 				d.cursor--
 			}
 		case "g":
 			d.cursor = 0
 		case "G":
-			d.cursor = len(d.rows) - 1
+			d.cursor = len(vis) - 1
 		case "r":
 			return d, d.loadCmd()
 		case "a":
@@ -126,8 +182,8 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			// cd into the worktree dir (via the shell wrapper). Default action.
-			if d.cursor < len(d.rows) {
-				row := d.rows[d.cursor]
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
 				if row.WorktreeAlive {
 					d.quit = true
 					d.result = Result{Action: ResultCd, Path: row.Path}
@@ -136,8 +192,8 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "l", "c":
 			// Launch/resume Claude in the worktree.
-			if d.cursor < len(d.rows) {
-				row := d.rows[d.cursor]
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
 				if row.WorktreeAlive {
 					d.quit = true
 					d.result = Result{Action: ResultResume, Path: row.Path}
@@ -145,24 +201,23 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "p":
-			if d.cursor < len(d.rows) {
-				row := d.rows[d.cursor]
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
 				if row.PRNumber > 0 {
 					openPRInBrowser(row.Branch, row.Path)
 				}
 			}
 		case "t":
-			if d.cursor < len(d.rows) {
-				row := d.rows[d.cursor]
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
 				if row.ClickUpID != "" {
 					openURL("https://app.clickup.com/t/" + row.ClickUpID)
 				}
 			}
 		case "d":
-			if d.cursor < len(d.rows) {
-				row := d.rows[d.cursor]
-				// Load fresh so we don't overwrite activity-tick bumps that
-				// may have happened since the dashboard opened.
+			// Drop the session from the dashboard.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
 				if fresh, err := state.Load(); err == nil && fresh != nil {
 					fresh.Remove(row.ID)
 					_ = fresh.Save()
@@ -275,9 +330,11 @@ func (d Dashboard) View() string {
 	headerLine := joinCells(headers, colWidths)
 	headerRow := hdrStyle.Render(headerLine)
 
+	vis := d.visibleRows()
+
 	var rows []string
 	rows = append(rows, headerRow)
-	for i, r := range d.rows {
+	for i, r := range vis {
 		cells := []string{
 			r.Branch,
 			r.Kind,
@@ -301,6 +358,18 @@ func (d Dashboard) View() string {
 
 	body := strings.Join(rows, "\n")
 
+	// Filter line above the help.
+	if d.filter.active || d.filter.query != "" {
+		fl := cursorStyle.Render("/") + d.filter.query
+		if d.filter.active {
+			fl += cursorStyle.Render("▏")
+		}
+		if len(vis) == 0 {
+			fl += dimStyle.Render("  no matches")
+		}
+		body += "\n\n" + fl
+	}
+
 	if d.err != nil {
 		body += "\n" + errorStyle.Render(fmt.Sprintf("error: %v", d.err))
 	}
@@ -311,9 +380,13 @@ func (d Dashboard) View() string {
 // dashKeyHelp is context-aware: only shows actions that are available for the
 // currently-focused row. Quieter UI, less guesswork.
 func (d Dashboard) dashKeyHelp() string {
-	parts := []string{"j/k move"}
-	if d.cursor < len(d.rows) {
-		row := d.rows[d.cursor]
+	if d.filter.active {
+		return dimStyle.Render("type to filter · ↑/↓ or ctrl+n/p move · ⏎ cd · l claude · esc clear")
+	}
+	vis := d.visibleRows()
+	parts := []string{"j/k move", "/ filter"}
+	if d.cursor < len(vis) {
+		row := vis[d.cursor]
 		if row.WorktreeAlive {
 			parts = append(parts, "⏎ cd", "l claude")
 		}
