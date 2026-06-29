@@ -63,6 +63,31 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error)
 
 ---
 
+## ▶ Next: PR review-since-stamp diff (outdated-comment fix)
+
+**Problem.** GitHub drops a reviewer's comment from the Files-changed diff once the author edits that line ("outdated") — you can't see your comment and the new code in one view, even viewing all commits. Confirmed GitHub limitation (community #23138).
+
+**Insight.** `work diff <pr#>` already has the viewer, commit-scope picker, ref-diffing, syntax/wrap/jump/mouse. The fix is NOT side-by-side (expensive 2-column rewrite, and not the win). If BASE = your review-stamp commit and you diff `reviewSHA..HEAD` in the existing unified viewer, the old-side lines are the code as you reviewed it and the added lines below show how it was addressed — comment + new code in one scroll once comments are overlaid.
+
+**MVP.** `work diff <pr#> --since-review` (and/or a key in the PR view):
+
+1. **Resolve review-stamp SHA** — `gh api repos/{o}/{r}/pulls/{n}/reviews`, filter `user.login == me` (resolve me via `gh api user` → `.login`), latest by `submitted_at`, take `.commit_id` = BASE. HEAD = current branch tip.
+2. **Diff `reviewSHA..HEAD`** — reuse the existing diff plumbing with BASE override (same path as `--base`). Two-dot == three-dot here since HEAD descends from reviewSHA.
+3. **Fetch my comments** — `gh api .../pulls/{n}/comments --paginate`, filter to me; keep `path`, `original_line`, `body`, `in_reply_to_id`. (New: current code only *posts* comments, never *reads* existing.)
+4. **Overlay inline** — render each comment anchored to its `original_line` on the old side, visually distinct from pending comments. New render hook in `diff.go`.
+
+**Reuses:** the whole PR diff TUI. **New code:** reviews/comments `gh api` fetch + parse (`cmd/work/main.go`), an `ExistingComment` type + inline render in `internal/tui/diff.go`, and a flag/keybind to enter the mode.
+
+**Concerns / gates.**
+- If I have no review on the PR → fall back to base...HEAD with a note.
+- Comments on files not in the `reviewSHA..HEAD` diff (commented line untouched since) — still surface them (a "comments with no remaining diff" tail) so nothing's hidden.
+- `original_line` can be null on very old comments — fall back to `original_position` or list under the file.
+- **Verify:** run against a real PR where I left a comment that went outdated; confirm the comment renders next to the current code.
+
+**Deferred:** true side-by-side old|new rendering — only if unified+overlay proves insufficient.
+
+---
+
 ## Backlog
 
 ### Tier 1 — high leverage, fits the setup
