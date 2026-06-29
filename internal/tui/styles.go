@@ -83,6 +83,14 @@ var (
 			Bold(true).
 			PaddingLeft(1)
 
+	// Inline existing-comment overlay (--since-review).
+	commentTagStyle = lipgloss.NewStyle().
+			Foreground(colorPeach).
+			Bold(true)
+
+	commentBodyStyle = lipgloss.NewStyle().
+			Foreground(colorYellow)
+
 	boxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorSurface).
