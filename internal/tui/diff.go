@@ -71,6 +71,15 @@ type DiffView struct {
 
 	warn string
 
+	// existing holds the reviewer's own comments to overlay inline
+	// (--since-review mode). Distinct from `pending`, which are new comments
+	// being authored.
+	existing []ExistingComment
+
+	// split renders the file view side-by-side (old | new) instead of unified.
+	// Toggle with `t`. Lines are truncated to the column width to stay aligned.
+	split bool
+
 	// Review state (PR mode only)
 	pending        []PendingComment
 	commentArea    textarea.Model
@@ -122,6 +131,17 @@ type PendingComment struct {
 	Body        string
 }
 
+// ExistingComment is one of the reviewer's own inline comments on the PR,
+// anchored to the line it was written on (valid even when GitHub marks it
+// outdated). Rendered inline in --since-review mode.
+type ExistingComment struct {
+	Path     string
+	Line     int // original_line — a line number in the review-stamp (old) side
+	Body     string
+	Outdated bool
+	IsReply  bool
+}
+
 // parsedDiffLine is one row of the file view.
 type parsedDiffLine struct {
 	kind    diffLineKind
@@ -170,6 +190,45 @@ func NewPRDiffView(repoRoot string, meta PRMeta, files []DiffFile, perFileDiff m
 		visualStart: -1,
 		editingIdx:  -1,
 	}
+}
+
+// WithExistingComments attaches the reviewer's own comments for inline overlay
+// (--since-review mode). Returns the updated view.
+func (d DiffView) WithExistingComments(cs []ExistingComment) DiffView {
+	d.existing = cs
+	return d
+}
+
+// WithSplit sets the initial side-by-side layout (toggleable at runtime with t).
+func (d DiffView) WithSplit(v bool) DiffView {
+	d.split = v
+	return d
+}
+
+// commentLines returns rendered overlay lines for any of my comments anchored to
+// (path, oldLine). Empty when there are none. oldLine 0 (added/no-old) never matches.
+func (d DiffView) commentLines(path string, oldLine int) []string {
+	if len(d.existing) == 0 || oldLine == 0 {
+		return nil
+	}
+	var out []string
+	for _, c := range d.existing {
+		if c.Path != path || c.Line != oldLine {
+			continue
+		}
+		tag := commentTagStyle.Render(" 💬 you")
+		if c.IsReply {
+			tag = commentTagStyle.Render(" 💬 you (reply)")
+		}
+		if c.Outdated {
+			tag += dimStyle.Render(" · was outdated on GitHub")
+		}
+		out = append(out, tag)
+		for _, ln := range strings.Split(strings.TrimRight(c.Body, "\n"), "\n") {
+			out = append(out, commentBodyStyle.Render("    "+ln))
+		}
+	}
+	return out
 }
 
 func (d DiffView) Init() tea.Cmd { return nil }
@@ -971,6 +1030,9 @@ func (d DiffView) updateFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		d.fileCursor = max0(len(d.parsed) - 1)
 		d.adjustFileScroll()
+	case "t":
+		// Toggle split (side-by-side) ↔ unified layout.
+		d.split = !d.split
 	case "n":
 		if d.cursor < len(d.files)-1 {
 			d.cursor++
@@ -1252,7 +1314,12 @@ func (d DiffView) renderFile() string {
 		}
 		hasComment := d.lineHasPending(i)
 		focused := i == d.fileCursor || (vLo >= 0 && i >= vLo && i <= vHi)
-		row := d.renderRow(d.parsed[i], mask, lexer, focused, hasComment)
+		var row string
+		if d.split {
+			row = d.renderSplitRow(d.parsed[i], lexer, focused, hasComment)
+		} else {
+			row = d.renderRow(d.parsed[i], mask, lexer, focused, hasComment)
+		}
 		// renderRow returns its segments joined by "\n" (no trailing newline),
 		// so visual rows == newlines + 1.
 		rowLines := strings.Count(row, "\n") + 1
@@ -1268,6 +1335,17 @@ func (d DiffView) renderFile() string {
 		}
 		b.WriteString(row + "\n")
 		emitted += rowLines
+
+		// Overlay my existing review comments anchored to this old-side line.
+		// This is the review-since-stamp win: the comment sits with the code I
+		// reviewed, and the added lines below show how it was addressed.
+		for _, cl := range d.commentLines(f.Path, d.parsed[i].oldNum) {
+			if emitted >= vh {
+				break
+			}
+			b.WriteString(cl + "\n")
+			emitted++
+		}
 	}
 
 	if len(d.parsed) > 0 {
@@ -1290,10 +1368,10 @@ func (d DiffView) renderFile() string {
 		help = "-- VISUAL --  j/k extend · c comment range · v cancel · q quit"
 	case d.prMeta != nil:
 		help = fmt.Sprintf(
-			"j/k · d/u · :<line> · n/p file · m scope · v range · c comment · C file · D delete · R review (%d) · esc · q",
+			"j/k · d/u · :<line> · t split · n/p file · m scope · v range · c comment · C file · D delete · R review (%d) · esc · q",
 			len(d.pending))
 	default:
-		help = "j/k line · d/u page · :<line> jump · g/G top/bottom · n/p next/prev file · esc back · q quit"
+		help = "j/k line · d/u page · :<line> jump · t split · g/G top/bottom · n/p file · esc back · q quit"
 	}
 	b.WriteString("\n" + helpStyle.Render(help))
 	if d.statusMsg != "" {
@@ -1360,6 +1438,75 @@ func (d DiffView) findPendingForCursor() int {
 // renderRow lays out one parsed line with gutter + prefix cell + syntax-coloured
 // body, all sharing the same row background. focus = current cursor row.
 // commented = a pending review comment targets this row.
+// renderSplitRow renders one parsed line in side-by-side layout: context shows
+// on both sides, removed left-only, added right-only. Content is truncated to
+// the column width (no wrap) so the two columns stay aligned. Meta/hunk rows and
+// too-narrow terminals fall back to the unified renderer.
+func (d DiffView) renderSplitRow(p parsedDiffLine, lexer chroma.Lexer, focus, commented bool) string {
+	if p.kind == kindMeta || p.kind == kindHunk {
+		return d.renderRow(p, nil, lexer, focus, commented)
+	}
+	const sepW = 3 // " │ "
+	colW := (d.width - sepW) / 2
+	if colW < 12 {
+		return d.renderRow(p, nil, lexer, focus, commented)
+	}
+
+	var left, right string
+	switch p.kind {
+	case kindAdded:
+		left = d.halfCell(0, "", lexer, colorBase, colW)
+		right = d.halfCell(p.newNum, p.content, lexer, colorAddedBG, colW)
+	case kindRemoved:
+		left = d.halfCell(p.oldNum, p.content, lexer, colorRemovedBG, colW)
+		right = d.halfCell(0, "", lexer, colorBase, colW)
+	default: // context
+		left = d.halfCell(p.oldNum, p.content, lexer, colorBase, colW)
+		right = d.halfCell(p.newNum, p.content, lexer, colorBase, colW)
+	}
+	sep := " │ "
+	if focus {
+		sep = cursorStyle.Render(" │ ")
+	} else {
+		sep = dimStyle.Render(" │ ")
+	}
+	return left + sep + right
+}
+
+// halfCell renders one column: a 4-wide line number + space, then the (syntax-
+// highlit) content truncated to fit, padded to colW on the row background.
+func (d DiffView) halfCell(num int, content string, lexer chroma.Lexer, bg lipgloss.Color, colW int) string {
+	const gutW = 5 // "%4d "
+	numStr := "    "
+	if num > 0 {
+		numStr = fmt.Sprintf("%4d", num)
+	}
+	gut := lipgloss.NewStyle().Background(bg).Foreground(colorSubtext).Render(numStr + " ")
+	body := renderCodeLine(truncCols(content, colW-gutW), lexer, bg, bg, nil)
+	return padToWidth(gut+body, colW, bg)
+}
+
+// truncCols truncates s to at most w visual columns (rune/width aware).
+func truncCols(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(s) <= w {
+		return s
+	}
+	var b strings.Builder
+	width := 0
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if width+rw > w {
+			break
+		}
+		b.WriteRune(r)
+		width += rw
+	}
+	return b.String()
+}
+
 func (d DiffView) renderRow(p parsedDiffLine, mask []bool, lexer chroma.Lexer, focus, commented bool) string {
 	gutter := formatGutter(p)
 	if commented {

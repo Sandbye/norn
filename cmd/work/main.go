@@ -53,6 +53,7 @@ func main() {
 		case "--diff", "diff":
 			plain := false
 			list := false
+			sinceReview := false
 			prNum := ""
 			baseOverride := ""
 			diffArgs := args[1:]
@@ -63,6 +64,8 @@ func main() {
 					plain = true
 				case a == "--list" || a == "-l":
 					list = true
+				case a == "--since-review":
+					sinceReview = true
 				case a == "--base" || a == "-b":
 					// `--base <ref>` — peek next arg.
 					if i+1 < len(diffArgs) {
@@ -84,7 +87,7 @@ func main() {
 				return
 			}
 			if prNum != "" {
-				cmdDiffPR(cfg, repoRoot, prNum, plain)
+				cmdDiffPR(cfg, repoRoot, prNum, plain, sinceReview)
 				return
 			}
 			cmdDiff(cfg, repoRoot, plain, baseOverride)
@@ -393,13 +396,13 @@ func cmdDiffList(cfg config.Config, repoRoot string, plain bool) {
 		return // cancelled
 	}
 	clearScreen()
-	cmdDiffPR(cfg, repoRoot, fmt.Sprintf("%d", selected), plain)
+	cmdDiffPR(cfg, repoRoot, fmt.Sprintf("%d", selected), plain, false)
 }
 
 // cmdDiffPR shows the diff for any open PR (yours or a colleague's). Uses
 // `gh pr diff` so no local checkout is needed. Renders in the same TUI as
 // the local-branch view, with PR metadata in the header instead of "vs branch".
-func cmdDiffPR(cfg config.Config, repoRoot, prNum string, plain bool) {
+func cmdDiffPR(cfg config.Config, repoRoot, prNum string, plain, sinceReview bool) {
 	if repoRoot == "" {
 		fmt.Fprintln(os.Stderr, "error: not inside a git repository (gh needs repo context)")
 		os.Exit(1)
@@ -412,11 +415,29 @@ func cmdDiffPR(cfg config.Config, repoRoot, prNum string, plain bool) {
 		os.Exit(1)
 	}
 
-	// Fetch the full diff once. Parse per-file from there.
-	diffOut, err := exec.Command("gh", "pr", "diff", prNum).Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: gh pr diff failed: %v\n", err)
-		os.Exit(1)
+	var (
+		diffOut  []byte
+		myComments []tui.ExistingComment
+	)
+	if sinceReview {
+		// Diff from the commit your latest review was stamped on → HEAD, so your
+		// (now "outdated") comments line up with the code you reviewed, and the
+		// added lines below show how each was addressed.
+		out, comments, baseLabel, rerr := reviewSinceDiff(repoRoot, prNum)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", rerr)
+			os.Exit(1)
+		}
+		diffOut = out
+		myComments = comments
+		meta.BaseRef = baseLabel
+	} else {
+		out, derr := exec.Command("gh", "pr", "diff", prNum).Output()
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "error: gh pr diff failed: %v\n", derr)
+			os.Exit(1)
+		}
+		diffOut = out
 	}
 	files, perFileDiff := splitDiffByFile(string(diffOut))
 
@@ -426,11 +447,155 @@ func cmdDiffPR(cfg config.Config, repoRoot, prNum string, plain bool) {
 	}
 
 	dv := tui.NewPRDiffView(repoRoot, meta, files, perFileDiff)
+	dv = dv.WithExistingComments(myComments).WithSplit(sinceReview)
 	p := tea.NewProgram(dv, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "diff TUI error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// reviewSinceDiff resolves the reviewer's latest review-stamp commit on the PR
+// and returns the unified diff reviewSHA..HEAD plus the reviewer's own review
+// comments (anchored to their original lines). Falls back to base...HEAD with a
+// note if the user has no review on the PR.
+func reviewSinceDiff(repoRoot, prNum string) (diff []byte, comments []tui.ExistingComment, baseLabel string, err error) {
+	nwo, err := repoNWO(repoRoot)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	login, err := ghLogin()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	reviewSHA := latestReviewSHA(nwo, prNum, login)
+	if reviewSHA == "" {
+		// No review by me — fall back to the full PR diff.
+		out, derr := exec.Command("gh", "pr", "diff", prNum).Output()
+		if derr != nil {
+			return nil, nil, "", fmt.Errorf("gh pr diff: %w", derr)
+		}
+		fmt.Fprintln(os.Stderr, "note: no review by you on this PR — showing full PR diff")
+		return out, nil, "base (no review found)", nil
+	}
+	headSHA, err := prHeadSHA(prNum)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	// Raw unified diff via the compare API (same format as `gh pr diff`).
+	out, err := exec.Command("gh", "api",
+		fmt.Sprintf("repos/%s/compare/%s...%s", nwo, reviewSHA, headSHA),
+		"-H", "Accept: application/vnd.github.diff").Output()
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("gh api compare: %w", err)
+	}
+	comments = myReviewComments(nwo, prNum, login)
+	return out, comments, "your review @ " + short7(reviewSHA), nil
+}
+
+func short7(s string) string {
+	if len(s) > 7 {
+		return s[:7]
+	}
+	return s
+}
+
+// ghLogin returns the authenticated GitHub username.
+func ghLogin() (string, error) {
+	out, err := exec.Command("gh", "api", "user", "-q", ".login").Output()
+	if err != nil {
+		return "", fmt.Errorf("gh api user: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// repoNWO returns the "owner/repo" for the current repo.
+func repoNWO(repoRoot string) (string, error) {
+	cmd := exec.Command("gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh repo view: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// latestReviewSHA returns the commit_id of login's most-recent review on the PR,
+// or "" if none.
+func latestReviewSHA(nwo, prNum, login string) string {
+	out, err := exec.Command("gh", "api", "--paginate",
+		fmt.Sprintf("repos/%s/pulls/%s/reviews", nwo, prNum)).Output()
+	if err != nil {
+		return ""
+	}
+	var reviews []struct {
+		User        struct{ Login string } `json:"user"`
+		SubmittedAt string                 `json:"submitted_at"`
+		CommitID    string                 `json:"commit_id"`
+	}
+	if json.Unmarshal(out, &reviews) != nil {
+		return ""
+	}
+	best, bestAt := "", ""
+	for _, r := range reviews {
+		if r.User.Login != login || r.CommitID == "" {
+			continue
+		}
+		if r.SubmittedAt >= bestAt { // RFC3339 sorts lexicographically
+			bestAt = r.SubmittedAt
+			best = r.CommitID
+		}
+	}
+	return best
+}
+
+// prHeadSHA returns the PR branch's current HEAD commit SHA.
+func prHeadSHA(prNum string) (string, error) {
+	out, err := exec.Command("gh", "pr", "view", prNum, "--json", "headRefOid", "-q", ".headRefOid").Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view headRefOid: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// myReviewComments returns login's inline review comments on the PR, anchored to
+// the line they were originally written on (valid even when GitHub marks them
+// outdated).
+func myReviewComments(nwo, prNum, login string) []tui.ExistingComment {
+	out, err := exec.Command("gh", "api", "--paginate",
+		fmt.Sprintf("repos/%s/pulls/%s/comments", nwo, prNum)).Output()
+	if err != nil {
+		return nil
+	}
+	var raw []struct {
+		User         struct{ Login string } `json:"user"`
+		Path         string                 `json:"path"`
+		OriginalLine int                    `json:"original_line"`
+		Line         int                    `json:"line"`
+		Body         string                 `json:"body"`
+		InReplyTo    int64                  `json:"in_reply_to_id"`
+	}
+	if json.Unmarshal(out, &raw) != nil {
+		return nil
+	}
+	var cs []tui.ExistingComment
+	for _, c := range raw {
+		if c.User.Login != login {
+			continue
+		}
+		ln := c.OriginalLine
+		if ln == 0 {
+			ln = c.Line
+		}
+		cs = append(cs, tui.ExistingComment{
+			Path:      c.Path,
+			Line:      ln,
+			Body:      c.Body,
+			Outdated:  c.Line == 0,
+			IsReply:   c.InReplyTo != 0,
+		})
+	}
+	return cs
 }
 
 // fetchPRMeta pulls PR metadata for the header.
@@ -1447,6 +1612,9 @@ Usage:
   work --dashboard        Same as bare work — live TUI of all known sessions
   work diff               TUI diff vs pr_base (warn if forked from wrong base)
   work diff <pr#>         TUI diff of any open PR (yours or colleague's)
+  work diff <pr#> --since-review
+                          Diff from your last review's commit → HEAD, with your
+                          (even "outdated") comments overlaid next to the code
   work diff --list, -l    Pick an open PR from a list, then view its diff
   work diff --base <ref>  Diff against any local/remote ref (origin/HEAD, master, @{u}, …)
   work diff --plain, -p   Plain text diff for piping
