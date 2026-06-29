@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -8,8 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/sandbye/work/internal/claude"
 	"github.com/sandbye/work/internal/config"
 	"github.com/sandbye/work/internal/git"
 	"github.com/sandbye/work/internal/state"
@@ -41,6 +44,19 @@ type Dashboard struct {
 	prCache map[string]prCacheEntry
 
 	filter filterState
+
+	// Headless "summarize session" overlay (press `s`). Additive — does not
+	// affect any existing navigation/launch flow.
+	summarizing   bool
+	summary       string
+	summaryBranch string
+	summaryPath   string            // worktree path, kept for `r` refresh
+	summaryErr    error
+	summaryCached bool              // current overlay came from cache
+	showSummary   bool              // overlay open (opened intentionally with `s`)
+	readyBranch   string            // summary finished, waiting to be viewed
+	summaryCache  map[string]string // branch -> last summary text
+	spinner       spinner.Model
 }
 
 // visibleRows is d.rows narrowed by the active filter query (fuzzy on branch /
@@ -105,6 +121,33 @@ type prFetchedMsg struct {
 	ok     bool
 }
 
+// summaryMsg carries the result of a headless "summarize session" run.
+type summaryMsg struct {
+	branch string
+	text   string
+	err    error
+}
+
+// summarizeCmd runs `claude -p` in the worktree to summarize recent work.
+// Read-only: only Read + git-read tools are allowed, so no prompts, no mutation.
+func summarizeCmd(dir, branch string) tea.Cmd {
+	return func() tea.Msg {
+		const prompt = "Summarize the work done on this branch in 3-6 terse bullet points: " +
+			"what changed and why. Base it on `git log` against the default branch and the diff. " +
+			"No preamble, just the bullets."
+		res, err := claude.Run(context.Background(), dir, prompt, claude.Options{
+			AllowedTools: []string{"Read", "Bash(git log *)", "Bash(git diff *)", "Bash(git status *)"},
+		})
+		if err != nil {
+			return summaryMsg{branch: branch, err: err}
+		}
+		if res.IsError {
+			return summaryMsg{branch: branch, err: fmt.Errorf("claude reported an error")}
+		}
+		return summaryMsg{branch: branch, text: res.Text}
+	}
+}
+
 // NewDashboard creates a dashboard. If scopeRepo is non-empty, only sessions
 // for that repo basename are shown; press `a` to clear.
 func NewDashboard(cfg config.Config, scopeRepo string) Dashboard {
@@ -113,11 +156,15 @@ func NewDashboard(cfg config.Config, scopeRepo string) Dashboard {
 		store = &state.Store{}
 	}
 	store.SortByActivity()
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
 	return Dashboard{
-		cfg:       cfg,
-		store:     store,
-		scopeRepo: scopeRepo,
-		prCache:   map[string]prCacheEntry{},
+		cfg:          cfg,
+		store:        store,
+		scopeRepo:    scopeRepo,
+		prCache:      map[string]prCacheEntry{},
+		summaryCache: map[string]string{},
+		spinner:      sp,
 	}
 }
 
@@ -138,6 +185,23 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		s := msg.String()
+
+		// Summary overlay swallows keys: `r` forces a fresh summary, anything
+		// else dismisses. Checked first so it can't interfere with anything else.
+		if d.showSummary {
+			if s == "r" || s == "R" {
+				d.showSummary = false
+				d.summary = ""
+				d.summaryCached = false
+				d.summarizing = true
+				return d, tea.Batch(summarizeCmd(d.summaryPath, d.summaryBranch), d.spinner.Tick)
+			}
+			d.showSummary = false
+			d.summary = ""
+			d.summaryErr = nil
+			d.summaryCached = false
+			return d, nil
+		}
 
 		// Filter input: printable/backspace/esc edit the query. While filtering,
 		// letters type into the query, so navigation uses arrows/ctrl+n+p and
@@ -214,6 +278,33 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					openURL("https://app.clickup.com/t/" + row.ClickUpID)
 				}
 			}
+		case "s":
+			// Headless summarize of the focused worktree. Show cache instantly
+			// if we have one (refresh from the overlay with `r`).
+			if d.cursor < len(vis) && !d.summarizing {
+				row := vis[d.cursor]
+				if row.WorktreeAlive && claude.Available() {
+					d.summaryBranch = row.Branch
+					d.summaryPath = row.Path
+					if cached, ok := d.summaryCache[row.Branch]; ok {
+						d.summary = cached
+						d.summaryErr = nil
+						d.summaryCached = true
+						d.showSummary = true
+						if d.readyBranch == row.Branch {
+							d.readyBranch = ""
+						}
+						return d, nil
+					}
+					// No cache (first run, or retry after an error).
+					d.summaryErr = nil
+					if d.readyBranch == row.Branch {
+						d.readyBranch = ""
+					}
+					d.summarizing = true
+					return d, tea.Batch(summarizeCmd(row.Path, row.Branch), d.spinner.Tick)
+				}
+			}
 		case "d":
 			// Drop the session from the dashboard.
 			if d.cursor < len(vis) {
@@ -282,6 +373,26 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+
+	case spinner.TickMsg:
+		if d.summarizing {
+			var cmd tea.Cmd
+			d.spinner, cmd = d.spinner.Update(msg)
+			return d, cmd
+		}
+
+	case summaryMsg:
+		// Non-modal: finishing does NOT pop the overlay. Cache it and flag the
+		// row as ready; the user opens it with `s` when they want it.
+		d.summarizing = false
+		if msg.err != nil {
+			d.summaryErr = msg.err
+			d.summaryBranch = msg.branch
+			d.readyBranch = msg.branch // s will retry (no cache on error)
+		} else if msg.text != "" {
+			d.summaryCache[msg.branch] = msg.text
+			d.readyBranch = msg.branch
+		}
 	}
 
 	return d, nil
@@ -292,6 +403,21 @@ func (d Dashboard) View() string {
 		return ""
 	}
 
+	// Summary overlay takes over the screen only when opened intentionally (`s`).
+	if d.showSummary {
+		title := headerStyle.Render("Summary: " + d.summaryBranch)
+		if d.summaryCached {
+			title += dimStyle.Render("   (cached)")
+		}
+		var body string
+		if d.summaryErr != nil {
+			body = errorStyle.Render("summarize failed: " + d.summaryErr.Error())
+		} else {
+			body = d.summary
+		}
+		return fmt.Sprintf("\n%s\n\n%s\n\n%s\n", title, body, dimStyle.Render("r refresh · any key to dismiss"))
+	}
+
 	header := titleStyle.Render("work") + " " + dimStyle.Render("dashboard")
 	scope := "all repos"
 	if d.scopeRepo != "" {
@@ -300,6 +426,15 @@ func (d Dashboard) View() string {
 	header += dimStyle.Render(fmt.Sprintf("   scope: %s", scope))
 	if !d.lastLoad.IsZero() {
 		header += dimStyle.Render(fmt.Sprintf("   refreshed %s ago", shortAge(d.lastLoad)))
+	}
+	// Non-modal summary status — dashboard stays usable while a summary runs.
+	switch {
+	case d.summarizing:
+		header += "   " + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"…")
+	case d.summaryErr != nil && d.readyBranch != "":
+		header += errorStyle.Render("   ✗ summary failed: " + d.readyBranch + " (s retries)")
+	case d.readyBranch != "":
+		header += activeStyle.Render("   ✓ summary ready: " + d.readyBranch + " (press s)")
 	}
 
 	if len(d.rows) == 0 {
@@ -389,6 +524,9 @@ func (d Dashboard) dashKeyHelp() string {
 		row := vis[d.cursor]
 		if row.WorktreeAlive {
 			parts = append(parts, "⏎ cd", "l claude")
+			if claude.Available() {
+				parts = append(parts, "s summary")
+			}
 		}
 		if row.PRNumber > 0 {
 			parts = append(parts, "p pr")
