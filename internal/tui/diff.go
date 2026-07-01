@@ -210,9 +210,12 @@ func (d DiffView) WithSplit(v bool) DiffView {
 }
 
 // WithWorkingTree marks this as an uncommitted-changes diff (working tree vs
-// HEAD), changing how per-file diffs are loaded and the header label.
+// HEAD), changing how per-file diffs are loaded and the header label. It also
+// opens straight into the first file's diff (skip the file-list step) — for a
+// quick "what am I about to commit" you want the changes, not a picker.
 func (d DiffView) WithWorkingTree() DiffView {
 	d.workTree = true
+	d.mode = modeFile
 	return d
 }
 
@@ -242,7 +245,14 @@ func (d DiffView) commentLines(path string, oldLine int) []string {
 	return out
 }
 
-func (d DiffView) Init() tea.Cmd { return nil }
+func (d DiffView) Init() tea.Cmd {
+	// If we're starting directly in file view (working-tree mode), load the
+	// first file's diff so the user lands on content, not an empty pane.
+	if d.mode == modeFile && d.parsed == nil && len(d.files) > 0 {
+		return d.loadCurrentFileCmd()
+	}
+	return nil
+}
 
 func (d DiffView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
