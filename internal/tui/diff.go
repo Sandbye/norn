@@ -80,6 +80,10 @@ type DiffView struct {
 	// Toggle with `t`. Lines are truncated to the column width to stay aligned.
 	split bool
 
+	// workTree means the diff is the working tree vs HEAD (uncommitted changes),
+	// so per-file loading uses `git diff HEAD -- path` (two-dot) not target...HEAD.
+	workTree bool
+
 	// Review state (PR mode only)
 	pending        []PendingComment
 	commentArea    textarea.Model
@@ -202,6 +206,13 @@ func (d DiffView) WithExistingComments(cs []ExistingComment) DiffView {
 // WithSplit sets the initial side-by-side layout (toggleable at runtime with t).
 func (d DiffView) WithSplit(v bool) DiffView {
 	d.split = v
+	return d
+}
+
+// WithWorkingTree marks this as an uncommitted-changes diff (working tree vs
+// HEAD), changing how per-file diffs are loaded and the header label.
+func (d DiffView) WithWorkingTree() DiffView {
+	d.workTree = true
 	return d
 }
 
@@ -893,6 +904,9 @@ func (d DiffView) loadCurrentFileCmd() tea.Cmd {
 		content := d.prFileDiffs[path]
 		return func() tea.Msg { return fileLoadedMsg{idx: idx, content: content} }
 	}
+	if d.workTree {
+		return loadWorkingFileCmd(d.repoRoot, idx, path)
+	}
 	return loadFileDiffCmd(d.repoRoot, d.target, idx, path)
 }
 
@@ -1205,6 +1219,8 @@ func (d DiffView) renderList() string {
 			d.prMeta.Number, d.prMeta.BaseRef, d.prMeta.HeadRef, d.prMeta.Author, scope, len(d.files)))
 		b.WriteString("\n" + hdr + "\n")
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(colorText).Bold(true).PaddingLeft(1).Render(d.prMeta.Title) + "\n")
+	} else if d.workTree {
+		hdr += dimStyle.Render(fmt.Sprintf("   uncommitted changes · %d file(s)", len(d.files)))
 	} else {
 		hdr += dimStyle.Render(fmt.Sprintf("   vs %s · %d commit(s) · %d file(s)",
 			strings.TrimPrefix(d.target, "origin/"), d.commits, len(d.files)))
@@ -2019,6 +2035,19 @@ func loadFileDiffCmd(repoRoot, target string, idx int, path string) tea.Cmd {
 		// Plain unified diff — no --word-diff. Word-level highlighting is
 		// computed in-process so we control row layout.
 		cmd := exec.Command("git", "-C", repoRoot, "diff", target+"...HEAD", "--", path)
+		out, err := cmd.Output()
+		if err != nil {
+			return fileLoadedMsg{idx: idx, content: fmt.Sprintf("error: %v\n", err)}
+		}
+		return fileLoadedMsg{idx: idx, content: string(out)}
+	}
+}
+
+// loadWorkingFileCmd loads the working-tree diff for one file (uncommitted
+// changes vs HEAD, staged + unstaged).
+func loadWorkingFileCmd(repoRoot string, idx int, path string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("git", "-C", repoRoot, "diff", "HEAD", "--", path)
 		out, err := cmd.Output()
 		if err != nil {
 			return fileLoadedMsg{idx: idx, content: fmt.Sprintf("error: %v\n", err)}

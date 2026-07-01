@@ -54,6 +54,7 @@ func main() {
 			plain := false
 			list := false
 			sinceReview := false
+			baseFlag := false
 			prNum := ""
 			baseOverride := ""
 			diffArgs := args[1:]
@@ -67,14 +68,17 @@ func main() {
 				case a == "--since-review":
 					sinceReview = true
 				case a == "--base" || a == "-b":
-					// `--base <ref>` — peek next arg.
+					baseFlag = true
+					// `--base <ref>` — peek next arg (may be omitted → pr_base).
 					if i+1 < len(diffArgs) {
 						baseOverride = diffArgs[i+1]
 						i++
 					}
 				case strings.HasPrefix(a, "--base="):
+					baseFlag = true
 					baseOverride = strings.TrimPrefix(a, "--base=")
 				case strings.HasPrefix(a, "-b="):
+					baseFlag = true
 					baseOverride = strings.TrimPrefix(a, "-b=")
 				case strings.HasPrefix(a, "#"):
 					prNum = strings.TrimPrefix(a, "#")
@@ -90,7 +94,9 @@ func main() {
 				cmdDiffPR(cfg, repoRoot, prNum, plain, sinceReview)
 				return
 			}
-			cmdDiff(cfg, repoRoot, plain, baseOverride)
+			// Bare `work diff` → current uncommitted changes. `--base` (with or
+			// without a ref) → compare against a base ref / pr_base.
+			cmdDiff(cfg, repoRoot, plain, baseOverride, !baseFlag)
 			return
 		case "init":
 			cmdInit(repoRoot)
@@ -698,11 +704,33 @@ func splitDiffByFile(diff string) ([]tui.DiffFile, map[string]string) {
 
 // cmdDiff shows what's about to be shipped: current branch vs pr_base.
 // TUI by default; plain text mode behind --plain for piping / scripts.
-func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string) {
+func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string, working bool) {
 	if repoRoot == "" {
 		fmt.Fprintln(os.Stderr, "error: not inside a git repository")
 		os.Exit(1)
 	}
+
+	// Bare `work diff` → current uncommitted changes (staged + unstaged vs HEAD).
+	if working {
+		numstat, _ := gitOutput(repoRoot, "git", "diff", "--numstat", "HEAD")
+		files := parseNumstat(numstat)
+		if len(files) == 0 {
+			fmt.Println("No uncommitted changes.")
+			return
+		}
+		if plain {
+			printDiffPlain("HEAD (uncommitted)", 0, files, "")
+			return
+		}
+		dv := tui.NewDiffView(repoRoot, "HEAD", 0, files, "").WithWorkingTree()
+		p := tea.NewProgram(dv, tea.WithAltScreen(), tea.WithMouseCellMotion())
+		if _, err := p.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "diff TUI error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	branch := strings.TrimSpace(currentBranch(repoRoot))
 	if branch == "" {
 		fmt.Fprintln(os.Stderr, "error: could not determine current branch")
@@ -1610,13 +1638,14 @@ Usage:
   work --status           Show worktrees with details
   work --project-config   Print resolved config as JSON
   work --dashboard        Same as bare work — live TUI of all known sessions
-  work diff               TUI diff vs pr_base (warn if forked from wrong base)
+  work diff               TUI diff of current uncommitted changes (working tree)
+  work diff --base [ref]  Compare committed branch vs a base: no ref = pr_base,
+                          or any local/remote ref (origin/HEAD, master, @{u}, …)
   work diff <pr#>         TUI diff of any open PR (yours or colleague's)
   work diff <pr#> --since-review
                           Diff from your last review's commit → HEAD, with your
                           (even "outdated") comments overlaid next to the code
   work diff --list, -l    Pick an open PR from a list, then view its diff
-  work diff --base <ref>  Diff against any local/remote ref (origin/HEAD, master, @{u}, …)
   work diff --plain, -p   Plain text diff for piping
   work init               Scaffold a project config for the current repo
   work doctor             Diagnose hooks, skills, configs, docs, state
