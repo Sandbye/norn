@@ -1117,12 +1117,9 @@ func short(p, home string) string {
 func cmdDoctor(cfg config.Config, repoRoot string) {
 	home, _ := os.UserHomeDir()
 	checks := []doctorCheck{
-		checkBinary("git"),
-		checkBinary("gh"),
-		checkBinary("python3"),
-		checkClaudeDir(home),
-		checkHooksExecutable(home),
-		checkSkillsPresent(home),
+		checkBinary("git", true, "required for everything norn does"),
+		checkBinary("gh", false, "needed for PR features (norn diff <pr#>, --since-review)"),
+		checkBinary("claude", false, "needed to launch sessions + AI features (summarize, AI naming)"),
 		checkGlobalConfig(home),
 		checkProjectConfigs(home),
 		checkDocsPaths(home),
@@ -1145,7 +1142,7 @@ func cmdDoctor(cfg config.Config, repoRoot string) {
 			fmt.Printf("      fix: %s\n", c.fix)
 		}
 	}
-	fmt.Println("work --doctor")
+	fmt.Println("norn doctor")
 	fmt.Println()
 	fails, warns := 0, 0
 	for _, c := range checks {
@@ -1176,77 +1173,19 @@ type doctorCheck struct {
 	fail   bool
 }
 
-func checkBinary(name string) doctorCheck {
-	_, err := exec.LookPath(name)
-	if err != nil {
-		return doctorCheck{name: name + " in PATH", fail: true, fix: "install " + name}
+// checkBinary reports whether a CLI is on PATH. Required-missing fails; an
+// optional one only warns, with a note on what degrades without it.
+func checkBinary(name string, required bool, note string) doctorCheck {
+	if _, err := exec.LookPath(name); err != nil {
+		c := doctorCheck{name: name + " in PATH", detail: note, fix: "install " + name}
+		if required {
+			c.fail = true
+		} else {
+			c.warn = true
+		}
+		return c
 	}
 	return doctorCheck{name: name + " in PATH"}
-}
-
-func checkClaudeDir(home string) doctorCheck {
-	p := filepath.Join(home, ".claude")
-	if _, err := os.Stat(p); err != nil {
-		return doctorCheck{name: "~/.claude exists", fail: true, fix: "install Claude Code"}
-	}
-	return doctorCheck{name: "~/.claude exists"}
-}
-
-func checkHooksExecutable(home string) doctorCheck {
-	dir := filepath.Join(home, ".claude", "hooks")
-	expected := []string{
-		"check-stale.py", "track-read.py", "policy-patterns.py",
-		"policy-push.py", "policy-commit.py", "format-on-write.py", "activity-log.py",
-	}
-	var missing, notExec []string
-	for _, f := range expected {
-		p := filepath.Join(dir, f)
-		info, err := os.Stat(p)
-		if err != nil {
-			missing = append(missing, f)
-			continue
-		}
-		if info.Mode()&0o111 == 0 {
-			notExec = append(notExec, f)
-		}
-	}
-	switch {
-	case len(missing) > 0:
-		return doctorCheck{
-			name:   "hooks present + executable",
-			detail: "missing: " + strings.Join(missing, ", "),
-			fix:    "ensure files exist in ~/.claude/hooks/",
-			fail:   true,
-		}
-	case len(notExec) > 0:
-		return doctorCheck{
-			name:   "hooks present + executable",
-			detail: "not executable: " + strings.Join(notExec, ", "),
-			fix:    "chmod +x ~/.claude/hooks/" + strings.Join(notExec, " ~/.claude/hooks/"),
-			fail:   true,
-		}
-	}
-	return doctorCheck{name: "hooks present + executable"}
-}
-
-func checkSkillsPresent(home string) doctorCheck {
-	dir := filepath.Join(home, ".claude", "skills")
-	expected := []string{"start-task", "precheck", "open-pr", "pr-judge", "find-task"}
-	var missing []string
-	for _, s := range expected {
-		if _, err := os.Stat(filepath.Join(dir, s, "SKILL.md")); err != nil {
-			missing = append(missing, s)
-		}
-	}
-	if len(missing) > 0 {
-		return doctorCheck{
-			name:   "personal skills present",
-			detail: "missing: " + strings.Join(missing, ", "),
-			fix:    "recreate from plan or reinstall",
-			fail:   true,
-		}
-	}
-	return doctorCheck{name: "personal skills present"}
 }
 
 func checkGlobalConfig(home string) doctorCheck {
@@ -1271,7 +1210,7 @@ func checkProjectConfigs(home string) doctorCheck {
 	dir := filepath.Join(home, ".config", "work", "projects")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return doctorCheck{name: "project configs parse", detail: "no projects dir yet", warn: true, fix: "`work init` inside any repo"}
+		return doctorCheck{name: "project configs parse", detail: "no projects dir yet", warn: true, fix: "`norn init` inside any repo"}
 	}
 	var bad []string
 	count := 0
@@ -1298,7 +1237,7 @@ func checkProjectConfigs(home string) doctorCheck {
 		}
 	}
 	if count == 0 {
-		return doctorCheck{name: "project configs parse", detail: "no project configs yet", warn: true, fix: "`work init` inside any repo"}
+		return doctorCheck{name: "project configs parse", detail: "no project configs yet", warn: true, fix: "`norn init` inside any repo"}
 	}
 	return doctorCheck{name: fmt.Sprintf("project configs parse (%d)", count)}
 }
@@ -1370,7 +1309,7 @@ func checkActiveRepo(cfg config.Config, repoRoot string) doctorCheck {
 	if _, err := os.Stat(p); err != nil {
 		return doctorCheck{
 			name: "current repo: " + repoName,
-			fix:  "`work init` to scaffold a project config",
+			fix:  "`norn init` to scaffold a project config",
 			warn: true,
 		}
 	}
