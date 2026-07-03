@@ -10,7 +10,7 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/sandbye/work/internal/config"
+	"github.com/sandbye/norn/internal/config"
 )
 
 //go:embed templates/*.md.tmpl

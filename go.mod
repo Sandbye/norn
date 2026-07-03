@@ -1,4 +1,4 @@
-module github.com/sandbye/work
+module github.com/sandbye/norn
 
 go 1.25.4
 

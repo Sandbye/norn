@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/sandbye/work/internal/git"
+	"github.com/sandbye/norn/internal/git"
 )
 
 type cleanModel struct {

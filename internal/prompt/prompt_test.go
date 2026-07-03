@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sandbye/work/internal/config"
+	"github.com/sandbye/norn/internal/config"
 )
 
 func TestRenderTask(t *testing.T) {

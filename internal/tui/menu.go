@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sandbye/work/internal/git"
+	"github.com/sandbye/norn/internal/git"
 )
 
 type menuAction int
