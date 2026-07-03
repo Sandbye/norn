@@ -129,13 +129,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.clean.worktrees = msg.worktrees
 		a.cd.worktrees = msg.worktrees
 		if a.current == ViewClean {
-			return a, checkRemote(a.repoRoot, msg.worktrees)
+			return a, checkRemote(a.repoRoot, msg.worktrees, a.cfg.BaseBranches)
 		}
 
 	case remoteCheckedMsg:
 		a.clean.worktrees = msg.worktrees
 		a.clean.remoteChecked = true
-		a.clean.autoSelectGone()
+		a.clean.autoSelectDone()
 
 	case worktreeCreatedMsg:
 		a.quit = true
@@ -168,7 +168,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.create.kind = "review"
 			case actionClean:
 				a.current = ViewClean
-				cmd = checkRemote(a.repoRoot, a.clean.worktrees)
+				cmd = checkRemote(a.repoRoot, a.clean.worktrees, a.cfg.BaseBranches)
 			case actionQuit:
 				a.quit = true
 				return a, tea.Quit
@@ -268,10 +268,11 @@ func loadWorktrees(worktreeDir, repoRoot string) tea.Cmd {
 	}
 }
 
-func checkRemote(repoRoot string, wts []git.Worktree) tea.Cmd {
+func checkRemote(repoRoot string, wts []git.Worktree, bases []string) tea.Cmd {
 	return func() tea.Msg {
 		_ = git.FetchPrune(repoRoot)
 		checked := git.CheckRemoteGone(repoRoot, wts)
+		checked = git.CheckMerged(repoRoot, checked, bases)
 		return remoteCheckedMsg{checked}
 	}
 }
