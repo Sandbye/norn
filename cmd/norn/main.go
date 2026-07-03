@@ -1504,7 +1504,11 @@ func upsertSession(repoRoot, kind, branch, wtPath, hint string) {
 	if err != nil {
 		return
 	}
-	clickup := extractClickUp(hint)
+	// Prefer the branch (reliably carries #<id> after naming); fall back to the hint.
+	clickup := git.ClickUpID(branch)
+	if clickup == "" {
+		clickup = git.ClickUpID(hint)
+	}
 	store.Upsert(state.Session{
 		ID:             id,
 		Repo:           repo,
@@ -1517,25 +1521,6 @@ func upsertSession(repoRoot, kind, branch, wtPath, hint string) {
 		LastActivityAt: time.Now(),
 	})
 	_ = store.Save()
-}
-
-// extractClickUp pulls the first CU-<id> or bare numeric id from a hint string.
-func extractClickUp(s string) string {
-	// Look for CU-<alnum>
-	for _, prefix := range []string{"CU-", "cu-"} {
-		if i := strings.Index(s, prefix); i >= 0 {
-			rest := s[i+len(prefix):]
-			end := 0
-			for end < len(rest) && (rest[end] == '_' || rest[end] == '-' ||
-				(rest[end] >= 'a' && rest[end] <= 'z') ||
-				(rest[end] >= 'A' && rest[end] <= 'Z') ||
-				(rest[end] >= '0' && rest[end] <= '9')) {
-				end++
-			}
-			return rest[:end]
-		}
-	}
-	return ""
 }
 
 func cmdProjectConfig(cfg config.Config, repoRoot string) {

@@ -345,6 +345,27 @@ func MakeBranch(kind, hint string) string {
 
 var cuRegex = regexp.MustCompile(`(?i)(?:\bCU-|\S*\bclickup\.com/t/)([a-z0-9]+)\S*`)
 
+// clickupIDPatterns matches a ClickUp task id in any of the forms it shows up:
+// a clickup.com URL, a CU-<id> literal, a branch's #<id> segment, or a bare
+// id (ClickUp ids start `86`). Ordered most-specific first.
+var clickupIDPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)clickup\.com/t/([0-9a-z]+)`),
+	regexp.MustCompile(`(?i)\bCU-([0-9a-z]+)`),
+	regexp.MustCompile(`#([0-9a-z]{6,})`),
+	regexp.MustCompile(`\b(86[0-9a-z]{6,})\b`),
+}
+
+// ClickUpID extracts a ClickUp task id from a branch name, hint, or URL, or ""
+// if none is present.
+func ClickUpID(s string) string {
+	for _, re := range clickupIDPatterns {
+		if m := re.FindStringSubmatch(s); m != nil {
+			return strings.ToLower(m[1])
+		}
+	}
+	return ""
+}
+
 // extractCUID returns the CU task id (lowercase, no prefix) and the hint with
 // the matched portion removed. Empty id means no match.
 func extractCUID(hint string) (string, string) {

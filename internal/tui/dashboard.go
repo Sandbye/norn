@@ -580,6 +580,11 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			if scope != "" && sess.Repo != scope {
 				continue
 			}
+			// Backfill the ClickUp id from the branch for older sessions that
+			// were recorded before robust extraction (keeps refs consistent).
+			if sess.ClickUpID == "" {
+				sess.ClickUpID = git.ClickUpID(sess.Branch)
+			}
 			rows = append(rows, dashRow{Session: sess, WorktreeAlive: alive[sess.Path]})
 		}
 		return dashLoadedMsg{rows: rows}
