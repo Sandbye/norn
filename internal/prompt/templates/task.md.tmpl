@@ -1,6 +1,6 @@
 # Worktree Session
 
-You are working in a git worktree. This is an isolated workspace for a single task.
+You are working in a git worktree: an isolated workspace for a single task.
 
 ## User
 
@@ -8,196 +8,94 @@ You are working in a git worktree. This is an isolated workspace for a single ta
 {{- if .User.Email}}
 - Email: {{.User.Email}}
 {{- end}}
-{{- if .User.ClickUpUID}}
-- Use these when resolving ClickUp assignees or filtering tasks.
-{{- end}}
 {{if .ClickUp}}
-## ClickUp Context
+## Issue Tracker (ClickUp)
 
-- Workspace uses **Spaces** to organize work.
-{{- if .ClickUp.Lists}}
 - Key lists:
 {{- range $name, $id := .ClickUp.Lists}}
   - `{{$id}}` — **{{$name}}**
 {{- end}}
-{{- end}}
-- When searching for a task, search across the workspace. If the hint looks like a ClickUp ID, fetch by ID directly.
-- The hint passed at launch is an **intent**, not a literal search query. Examples:
-  - `"something in operations"` → browse Operations list, suggest candidates
-  - `"CU-86c98r0j6"` → fetch that specific task, show it
-  - `"fix the export bug"` → search for matching tasks, show results
-  - `"something assigned to me"` → filter by assignee, show results
+- When searching for a task, search the workspace. If the hint looks like a task ID, fetch it directly.
+- The hint passed at launch is an **intent**, not a literal query:
+  - a task ID or URL → fetch that specific task
+  - a keyword or description → search and present matching candidates
+  - "something assigned to me" → filter by assignee{{if .User.ClickUpUID}} (ID `{{.User.ClickUpUID}}`){{end}}
 {{end}}
 ## Startup Procedure
 
-Follow these steps exactly on session start:
+On session start:
 {{if .Setup}}
-1. **Setup workspace.** Run `{{.Setup}}` to install dependencies and prepare the worktree.
+1. **Set up the workspace.** Run `{{.Setup}}` to install deps and prepare the worktree.
 {{- else}}
-1. **Setup workspace.** Install dependencies if needed.
+1. **Set up the workspace.** Install dependencies if needed.
 {{- end}}
 2. **Load context.** {{.HintBlock}}
-   - If the hint points to a specific ClickUp task ID, fetch and show it.
-   - If the hint is a direction or keyword, fetch candidates and **present them as a list** — do not pick one. Ask the user which to work on.
-   - If no hint, ask the user what to work on. It may or may not be a ClickUp task.
-   - If it's clearly not a ClickUp task (e.g. "refactor X locally"), skip ClickUp entirely and proceed.
-3. **Show a compact summary** once the user has confirmed a task:
-   - Task: [name] ([id]) — or "No ClickUp task"
-   - Type: [Operations / Feature / Data Investigation / Misc / Local]
-   - Status: [status] — if applicable
-   - Priority: [urgent / high / normal / low] — if applicable
-   - Summary: 1-2 sentences
-4. **Ask at least one clarifying question** before starting work — even if the task seems clear.
-5. **Wait for confirmation** before making any changes.
-
-## Task Selection Rules
-
-### Features — NEVER auto-pick
-Features must always be assigned to {{.User.Name}}. If asked to "pick a feature task", only show tasks already assigned to {{.User.Name}}{{if .User.ClickUpUID}} (ID `{{.User.ClickUpUID}}`){{end}}. Never suggest unassigned feature tasks.
-
-### Operations — suggest, don't select
-When the hint points to operations work, follow this process:
-
-1. **Fetch candidates** from the Operations list. Include tasks assigned to {{.User.Name}} AND unassigned tasks.
-2. **Filter by status** — only consider tasks that are actionable:
-   - `ready` — confirmed ready to work on
-   - `backlog` — may be ready, check description
-   - Skip: `on hold`, `awaiting response`, `allocate`, `doing` (someone's on it), `code review`, `solved/released`
-3. **Read task descriptions** of candidates. Evaluate:
-   - Does the description contain enough information to act on?
-   - Is this a code fix, or does it require external action (contacting customers, waiting on third parties, manual DB operations)?
-   - Tasks with clear error messages, stack traces, or reproduction steps are preferred.
-4. **Sort by priority** — `urgent` > `high` > `normal` > `low` > no priority
-5. **Present the top 3-5 candidates** with brief reasoning for each. Let the user pick.
-6. **After the user picks**, ask: "Should I assign this to you and set status to `doing` in ClickUp?" Do not do so automatically.
-
-## Task Type Behaviors
-
-### Operations
-Bugs, support issues, error reports, customer-specific problems. Be conservative — verify before applying. Prefer dry-runs where possible. Check for downstream impact.
-
-**Root cause thinking**: Don't just fix where the error surfaces. Ask *why* this happened — what upstream condition, data state, or missing validation allowed it. Fix the root cause, not just the symptom. If the root cause is outside the scope of this task, note it as a follow-up.
-- Statuses: `backlog` → `ready` → `doing` → `code review` → `solved/released`
-- Also: `awaiting response`, `on hold`, `allocate`
-
-### Features
-Product code, tech debt, integrations. Match existing patterns exactly. Follow the anti-patterns list in AGENTS.md. Write or update tests if a test file exists for the module. Keep PRs focused — one feature per worktree.
-- Statuses: `pm refinement` → `eng refinement` → `backlog` → `ready` → `current sprint` → `doing` → `code review` → `waiting for release` → `released`
-- Also: `on hold`
-
-### Data Investigations
-Exploratory work. Write queries, summarize findings. Do NOT make code changes unless explicitly asked. Present data clearly with counts and examples. Flag anomalies.
-
-### Local / No ClickUp task
-General dev work not tracked in ClickUp. Follow standard project conventions. No ClickUp mutations needed. Ask more questions than usual since scope may be loose.
-
-### Misc
-Doesn't fit the above. Follow standard project conventions. Ask more questions than usual.
+{{- if .ClickUp}}
+   - If the hint points to a specific task, fetch and show it.
+   - If it's a direction or keyword, fetch candidates and **present them as a list**; do not pick one. Ask which to work on.
+{{- end}}
+   - If there's no hint, ask what to work on.
+3. **Show a compact summary** once the task is confirmed: what it is, and a 1-2 sentence intent.
+4. **Ask at least one clarifying question** before starting, even if the task seems clear.
+5. **Wait for confirmation** before making changes.
 
 ## Git & PR Workflow
 
 ### Base branch
 
-This worktree was forked from `{{.Base}}`. **All diffs, comparisons, and "what changed?" lookups MUST use `{{.Base}}` as the baseline.**
+This worktree was forked from `{{.Base}}`. Use `{{.Base}}` as the baseline for all diffs and "what changed?" lookups:
 
 - `git diff {{.Base}}...HEAD`
 - `git log {{.Base}}..HEAD`
-- `git diff origin/{{.Base}}...HEAD` (when comparing against the remote)
+- `git diff origin/{{.Base}}...HEAD` (against the remote)
 
-Do NOT default to `master` or `main` when `{{.Base}}` is something else. Common failure mode: agents assume `master` for every diff and miss commits that landed in a staging branch like `user_test`. If `{{.Base}}` is `user_test`, only `user_test` matters — ignore `master` entirely. If `{{.Base}}` is `master`, both `master` and `user_test` may be relevant for understanding the change's path to production, but the diff baseline is still `master`.
+Don't default to `master`/`main` if `{{.Base}}` is something else.
 {{if and .PRBase (ne .PRBase .Base)}}
-**Dual-base flow:** this repo branches from `{{.Base}}` but PRs target `{{.PRBase}}`. The PR target is separate from the diff baseline — for any local comparison stick with `{{.Base}}`.{{end}}
+**Dual-base flow:** this repo branches from `{{.Base}}` but PRs target `{{.PRBase}}`. The PR target is separate from the diff baseline; for local comparison stick with `{{.Base}}`.{{end}}
 
 ### Commits
-Use Conventional Commits. Format: `type(scope): description`
-- `fix(billing): resolve payout calculation error`
-- `feat(search): add location filtering`
-- `chore(deps): update firebase-admin`
-- `refactor(export): simplify CSV generation`
-- Types: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `chore`, `build`, `ci`, `revert`
-- Scope is optional but preferred — use the package/service name (e.g. `billing`, `export`, `frontend`, `search`, `common`).
+
+Use Conventional Commits: `type(scope): description`. Types: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `chore`, `build`, `ci`, `revert`. Scope is the package/service name, optional but preferred. Explain *why* in the body only when it isn't obvious; the diff shows *what*.
 
 ### Branch naming
-After confirming the task, **rename the branch** to follow team conventions (per `how-we-build/coding-guidelines/git-strategy.md` — Conventional Branch). The worktree directory path doesn't matter — only the branch name matters.
 
-Use `git branch -m <new-name>` to rename.
+After confirming the task, rename the branch to a Conventional Branch name. The directory path doesn't matter; only the branch name does. `git branch -m <new-name>`.
 
-Format: `<prefix>/#<task_id>/<task-title>` — or `<prefix>/<task-title>` if no ClickUp task.
+Format: `<prefix>/<task-title>`{{if .ClickUp}}, or `<prefix>/#<task_id>/<task-title>` when there's a tracker task{{end}}.
 
-Branch prefixes describe the **task**, not the commits inside it:
-- `feature` — new feature
-- `fix` — production bug fix
-- `hotfix` — urgent production fix that bypasses normal release cadence
-- `epic` — larger task consisting of smaller tasks
-- `chore` — everything else: refactor, documentation, dependency updates, tooling, internal cleanup
-
-Examples:
-- `feature/#86c41xu8m/social-login`
-- `fix/#86c94jkk6/dashboard-refund-crash`
-- `chore/update-firebase-dependency` (no task id)
-- `chore/#86c41xu9p/migrate-architecture-docs-to-wiki`
-
-Rules:
-- Task ID is written as `#<id>` — no `CU-` prefix. Kept in branch + PR for human readability and grep, **not** for auto-linking.
-- Title is lowercase kebab-case, short summary of the task (3-5 words max).
-- Branch prefix set is narrower than commit-type set. Refactors/docs/tests are commits but their branches are `chore` (or `feature` if part of a larger feature).
+Prefixes describe the **task**: `feature` (new feature), `fix` (production bug fix), `hotfix` (urgent prod fix), `epic` (umbrella task), `chore` (refactor, docs, deps, tooling, cleanup). Title is short lowercase kebab-case.
 
 ### Pull Requests
 
 When the task is complete:
 1. Push the branch to origin.
-2. Create the PR using `gh pr create --assignee {{.User.Name | printf "%s"}} --base {{if .PRBase}}{{.PRBase}}{{else}}{{.Base}}{{end}}`. **Default is ready-for-review.** Add `--draft` only when unsure the change is actually ready (incomplete work, unverified, WIP, awaiting input). If draft, say why.
-3. **Include the ClickUp task ID** in the PR title or body using `#{task_id}` format — for human readability and grep. Omit if no ClickUp task.
-4. ClickUp status:
-   - Ready PR → set status to `code review` immediately.
-   - Draft PR → leave status as-is; flip to `code review` only when the PR is undrafted.
-5. Open the PR in the browser: `gh pr view --web`.
-6. **Never** add `Co-Authored-By` lines to commits.
-7. **Never** add a test plan section to the PR body unless the user explicitly asks for one. Keep PR descriptions concise.
-
-### Marking a Draft PR as Ready
-Only relevant if the PR was created with `--draft`. When the user says the PR is ready (or asks to undraft/open it):
-1. Mark PR as ready: `gh pr ready`
-2. Update the ClickUp task status to `code review` — if there is a ClickUp task.
-
-### Requesting Re-review
-After pushing new changes to an existing PR (e.g. after fixing review comments), request a fresh Gemini review:
-1. Post a comment on the PR: `gh pr comment --body "/gemini review"`
-2. This triggers the Gemini Code Assist bot to re-review the PR in its current state.
-
-### PR Review Comments
-When asked to check PR feedback:
-1. Fetch PR comments: `gh pr view --comments` and `gh api repos/{owner}/{repo}/pulls/{number}/comments?per_page=100 --paginate` for inline review comments.
-2. A Gemini bot automatically reviews PRs. Its comments may be noise or legitimate issues.
-3. For each comment, evaluate whether the issue is real:
-   - Does it point to an actual bug, missed edge case, or style violation?
-   - Or is it a false positive / stylistic preference that doesn't match the codebase conventions?
-4. If the issue is legitimate, fix it and push.
-5. If it's not, ignore it — don't waste tokens on non-issues.
-6. Summarize what was fixed and what was ignored, with brief reasoning.
+2. Open the PR: `gh pr create --assignee {{.User.Name | printf "%s"}} --base {{if .PRBase}}{{.PRBase}}{{else}}{{.Base}}{{end}}`. Default to ready-for-review; use `--draft` only when unsure it's ready (say why).
+{{- if .ClickUp}}
+3. Reference the task ID in the PR title or body (e.g. `#<task_id>`).
+{{- end}}
+4. Open it in the browser: `gh pr view --web`.
+5. Keep PR descriptions concise. No test-plan section unless asked.
 {{if .Verify}}
-## Verification
+### Verification
 
-Before considering a task done, run:
+Before considering the task done, run:
 {{range $i, $cmd := .Verify}}
 {{$i | plus1}}. `{{$cmd}}`
 {{- end}}
 {{end}}
 ## When Stuck
 
-- Retry up to 2-3 times with different approaches.
-- If the first attempt already consumed significant tokens, do NOT keep retrying the same approach. Step back and look for an alternative path.
-- If still stuck after 2-3 attempts, stop and ask for guidance. Explain what you tried, what failed, and what you think the issue is. Suggest next steps.
+- Retry 2-3 times with different approaches.
+- If an approach already burned significant effort, step back and find another path rather than repeating it.
+- Still stuck after a few tries: stop and ask, explaining what you tried, what failed, and your best guess at the cause.
 
 ## Worktree Rules
 
-- **Never read, output, or log `.env` files.** They contain secrets and are symlinked from the main repo.
-- **Never delete ClickUp tasks.** You may create, read, and update tasks. Never delete.
-- **Never push to `master`, `user_test`, or any branch you didn't create.** Only push to this worktree's own branch. Before any push, verify the current branch with `git branch --show-current` and abort if it's not a `task/`, `fix/`, `bugfix/`, `feat/`, or `refac/` branch.
-- This worktree is disposable. Do not worry about keeping it clean.
-- Commit freely — this is an isolated branch.
-- When done, tell the user the task is complete and suggest cleanup: `git worktree remove <path>`.
-- If the task drifts into unrelated work, suggest creating a new worktree instead.
+- **Never read, output, or log `.env` files.** They hold secrets and are symlinked from the main repo.
+- **Never push to `{{.Base}}`{{if and .PRBase (ne .PRBase .Base)}}, `{{.PRBase}}`{{end}}, or any branch you didn't create.** Only push to this worktree's own branch; verify with `git branch --show-current` before pushing.
+- This worktree is disposable. Commit freely; it's an isolated branch.
+- When done, tell the user and suggest cleanup (`norn --clean`, or `git worktree remove <path>`).
+- If the work drifts into an unrelated task, suggest a fresh worktree instead.
 
 ---
 Generated: {{.Generated}}
