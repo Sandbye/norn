@@ -12,11 +12,11 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sandbye/work/internal/config"
-	"github.com/sandbye/work/internal/git"
-	"github.com/sandbye/work/internal/prompt"
-	"github.com/sandbye/work/internal/state"
-	"github.com/sandbye/work/internal/tui"
+	"github.com/sandbye/norn/internal/config"
+	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/prompt"
+	"github.com/sandbye/norn/internal/state"
+	"github.com/sandbye/norn/internal/tui"
 )
 
 func main() {
@@ -1623,35 +1623,36 @@ func originRepoName(dir string) string {
 }
 
 func cmdHelp() {
-	fmt.Println(`work — worktree manager
+	fmt.Println(`norn · many threads, one tree
+git worktrees + Claude Code sessions, woven together.
 
 Usage:
-  work                    Cross-session dashboard (default view)
-  work "hint"             Create task worktree with hint (base: pr_base default)
-  work "hint" --from <b>  Override base branch for this worktree
-  work --review "hint"    Create review worktree
-  work -d, --dir          Main menu in cd-mode: enter cd's into the worktree,
+  norn                    Cross-session dashboard (default view)
+  norn "hint"             Create task worktree with hint (base: pr_base default)
+  norn "hint" --from <b>  Override base branch for this worktree
+  norn --review "hint"    Create review worktree
+  norn -d, --dir          Main menu in cd-mode: enter cd's into the worktree,
                           l launches Claude
-  work --cd               Jump into a worktree shell (picker)
-  work --clean            Jump to clean view
-  work --list             List worktrees (git)
-  work --status           Show worktrees with details
-  work --project-config   Print resolved config as JSON
-  work --dashboard        Same as bare work — live TUI of all known sessions
-  work diff               TUI diff of current uncommitted changes (working tree)
-  work diff --base [ref]  Compare committed branch vs a base: no ref = pr_base,
+  norn --cd               Jump into a worktree shell (picker)
+  norn --clean            Jump to clean view
+  norn --list             List worktrees (git)
+  norn --status           Show worktrees with details
+  norn --project-config   Print resolved config as JSON
+  norn --dashboard        Same as bare norn: live TUI of all known sessions
+  norn diff               TUI diff of current uncommitted changes (working tree)
+  norn diff --base [ref]  Compare committed branch vs a base: no ref = pr_base,
                           or any local/remote ref (origin/HEAD, master, @{u}, …)
-  work diff <pr#>         TUI diff of any open PR (yours or colleague's)
-  work diff <pr#> --since-review
-                          Diff from your last review's commit → HEAD, with your
+  norn diff <pr#>         TUI diff of any open PR (yours or colleague's)
+  norn diff <pr#> --since-review
+                          Diff from your last review's commit to HEAD, with your
                           (even "outdated") comments overlaid next to the code
-  work diff --list, -l    Pick an open PR from a list, then view its diff
-  work diff --plain, -p   Plain text diff for piping
-  work init               Scaffold a project config for the current repo
-  work doctor             Diagnose hooks, skills, configs, docs, state
-  work --refresh-docs     git pull every doc repo referenced in any project config
-  work --activity-tick    Bump current session's last_activity_at (called by hook)
-  work --help             This help`)
+  norn diff --list, -l    Pick an open PR from a list, then view its diff
+  norn diff --plain, -p   Plain text diff for piping
+  norn init               Scaffold a project config for the current repo
+  norn doctor             Diagnose hooks, skills, configs, docs, state
+  norn --refresh-docs     git pull every doc repo referenced in any project config
+  norn --activity-tick    Bump current session's last_activity_at (called by hook)
+  norn --help             This help`)
 }
 
 func clearScreen() {

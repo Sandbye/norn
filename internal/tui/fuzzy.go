@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sandbye/work/internal/git"
+	"github.com/sandbye/norn/internal/git"
 )
 
 // filterState is a shared `/`-to-search input used by the menu and clean views.

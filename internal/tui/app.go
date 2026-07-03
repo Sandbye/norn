@@ -4,9 +4,9 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sandbye/work/internal/config"
-	"github.com/sandbye/work/internal/git"
-	"github.com/sandbye/work/internal/prompt"
+	"github.com/sandbye/norn/internal/config"
+	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/prompt"
 )
 
 type View int

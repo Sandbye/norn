@@ -12,10 +12,10 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/sandbye/work/internal/claude"
-	"github.com/sandbye/work/internal/config"
-	"github.com/sandbye/work/internal/git"
-	"github.com/sandbye/work/internal/state"
+	"github.com/sandbye/norn/internal/claude"
+	"github.com/sandbye/norn/internal/config"
+	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/state"
 )
 
 // Dashboard is a live view of all known worktree sessions across repos.
@@ -418,7 +418,7 @@ func (d Dashboard) View() string {
 		return fmt.Sprintf("\n%s\n\n%s\n\n%s\n", title, body, dimStyle.Render("r refresh · any key to dismiss"))
 	}
 
-	header := titleStyle.Render("work") + " " + dimStyle.Render("dashboard")
+	header := titleStyle.Render("norn") + " " + dimStyle.Render("threads")
 	scope := "all repos"
 	if d.scopeRepo != "" {
 		scope = d.scopeRepo
@@ -440,9 +440,9 @@ func (d Dashboard) View() string {
 	if len(d.rows) == 0 {
 		var body string
 		if d.scopeRepo != "" {
-			body = dimStyle.Render(fmt.Sprintf("no sessions in %s yet — start one with `work \"hint\"`, or press `a` for all repos", d.scopeRepo))
+			body = dimStyle.Render(fmt.Sprintf("no threads in %s yet. spin one up with `norn \"hint\"`, or press `a` for all repos", d.scopeRepo))
 		} else {
-			body = dimStyle.Render("no sessions yet — start one with `work \"hint\"`")
+			body = dimStyle.Render("no threads yet. spin one up with `norn \"hint\"`")
 		}
 		return fmt.Sprintf("\n%s\n\n%s\n\n%s\n", header, body, d.dashKeyHelp())
 	}

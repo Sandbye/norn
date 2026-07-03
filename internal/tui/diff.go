@@ -1283,13 +1283,14 @@ func (d DiffView) renderList() string {
 
 // --- file mode -------------------------------------------------------------
 
-// Row washes — subtle backgrounds that fill the line width.
+// Row washes — subtle backgrounds that fill the line width. Nord-tuned:
+// muted aurora red/green over polar-night bg, frost tint for hunks.
 var (
-	colorRemovedBG  = lipgloss.Color("#3a1f29")
-	colorAddedBG    = lipgloss.Color("#1f3a2a")
-	colorHunkBG     = lipgloss.Color("#1a2733")
-	colorTokenHiRm  = lipgloss.Color("#5e1f30") // brighter red token bg
-	colorTokenHiAdd = lipgloss.Color("#1f5e3a") // brighter green token bg
+	colorRemovedBG  = lipgloss.Color("#3b2b30") // muted nord11 over polar night
+	colorAddedBG    = lipgloss.Color("#2f3a33") // muted nord14 over polar night
+	colorHunkBG     = lipgloss.Color("#333d4a") // frost-tinted polar night
+	colorTokenHiRm  = lipgloss.Color("#5a3138") // brighter red token bg
+	colorTokenHiAdd = lipgloss.Color("#3f5142") // brighter green token bg
 )
 
 func (d DiffView) renderFile() string {
