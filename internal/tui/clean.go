@@ -28,23 +28,23 @@ func newCleanModel() cleanModel {
 	}
 }
 
-// autoSelectGone pre-selects rows whose remote branch is gone (PR merged or
-// branch deleted) and moves the cursor to the first such row. Called once
-// when the remote check completes so opening Clean is a one-keystroke flow
-// (d → y) instead of "press g, then d, then y".
-func (m *cleanModel) autoSelectGone() {
+// autoSelectDone pre-selects rows whose work is done — either remote-gone
+// (PR merged + branch deleted) or merged into a base branch (catches
+// squash-merges where the remote branch survives) — and moves the cursor to
+// the first such row. Opening Clean becomes a one-keystroke flow (d → y).
+func (m *cleanModel) autoSelectDone() {
 	sorted := m.sorted()
-	firstGone := -1
+	first := -1
 	for i, wt := range sorted {
-		if wt.RemoteGone {
+		if wt.RemoteGone || wt.Merged {
 			m.selected[wt.Path] = true
-			if firstGone < 0 {
-				firstGone = i
+			if first < 0 {
+				first = i
 			}
 		}
 	}
-	if firstGone >= 0 {
-		m.cursor = firstGone
+	if first >= 0 {
+		m.cursor = first
 	}
 }
 
@@ -145,9 +145,9 @@ func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
 			}
 		}
 	case "g":
-		// Select all gone-from-remote, regardless of filter.
+		// Select all done (gone-from-remote OR merged), regardless of filter.
 		for _, wt := range m.worktrees {
-			if wt.RemoteGone {
+			if wt.RemoteGone || wt.Merged {
 				m.selected[wt.Path] = true
 			}
 		}
@@ -230,11 +230,14 @@ func (m cleanModel) View() string {
 		age := ageStyle.Render(fmt.Sprintf("%-5s", git.Age(wt.LastCommit)))
 
 		var remote string
-		if !m.remoteChecked {
+		switch {
+		case !m.remoteChecked:
 			remote = dimStyle.Render("...")
-		} else if wt.RemoteGone {
+		case wt.RemoteGone:
 			remote = goneStyle.Render("gone")
-		} else {
+		case wt.Merged:
+			remote = goneStyle.Render("merged")
+		default:
 			remote = activeStyle.Render("active")
 		}
 		remote = fmt.Sprintf("%-8s", remote)
@@ -262,7 +265,7 @@ func (m cleanModel) View() string {
 		b.WriteString(helpStyle.Render("type to filter  ↑/↓ move  space select  esc clear"))
 	} else {
 		var parts []string
-		parts = append(parts, "j/k navigate", "/ filter", "space select", "a all", "g select gone")
+		parts = append(parts, "j/k navigate", "/ filter", "space select", "a all", "g select done")
 		if len(m.selected) > 0 {
 			parts = append(parts, "d delete")
 		}

@@ -19,6 +19,8 @@ type Worktree struct {
 	LastCommit time.Time
 	CommitMsg  string
 	RemoteGone bool
+	Merged     bool   // branch is an ancestor of a base branch (work is done)
+	MergedInto string // which base it merged into (for display)
 }
 
 func RepoRoot() (string, error) {
@@ -147,6 +149,43 @@ func CheckRemoteGone(repoRoot string, worktrees []Worktree) []Worktree {
 			remoteBranch := "origin/" + worktrees[idx].Branch
 			_, err := cmdOutput(repoRoot, "git", "rev-parse", "--verify", "refs/remotes/"+remoteBranch)
 			worktrees[idx].RemoteGone = err != nil
+		}(i)
+	}
+	wg.Wait()
+	return worktrees
+}
+
+// CheckMerged marks worktrees whose branch is already an ancestor of one of the
+// base branches (i.e. the work is merged) — a stronger "done" signal than
+// remote-gone, since it also catches squash-merges where the remote branch was
+// never deleted. Checks against origin/<base> for each configured base. Run
+// FetchPrune first for fresh results. Fanned out, bounded to 8.
+func CheckMerged(repoRoot string, worktrees []Worktree, bases []string) []Worktree {
+	if len(bases) == 0 {
+		return worktrees
+	}
+	const maxParallel = 8
+	sem := make(chan struct{}, maxParallel)
+	var wg sync.WaitGroup
+
+	for i := range worktrees {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			for _, base := range bases {
+				if worktrees[idx].Branch == base {
+					continue // a base branch isn't "merged into itself"
+				}
+				ref := "refs/remotes/origin/" + base
+				// --is-ancestor exits 0 when the branch is fully contained in base.
+				if err := cmdRun(repoRoot, "git", "merge-base", "--is-ancestor", worktrees[idx].Branch, ref); err == nil {
+					worktrees[idx].Merged = true
+					worktrees[idx].MergedInto = base
+					return
+				}
+			}
 		}(i)
 	}
 	wg.Wait()
