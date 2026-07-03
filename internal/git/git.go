@@ -445,6 +445,54 @@ func slugify(s string) string {
 	return result
 }
 
+// BranchLacksSlug reports whether a branch name has no human-readable
+// description — e.g. `feature/#86caebh17` or a timestamp fallback. These are the
+// names worth enriching with an AI-generated slug.
+func BranchLacksSlug(branch string) bool {
+	parts := strings.Split(branch, "/")
+	last := parts[len(parts)-1]
+	if last == "" || strings.HasPrefix(last, "#") {
+		return true
+	}
+	return timestampSlug.MatchString(last)
+}
+
+var timestampSlug = regexp.MustCompile(`^\d{8}-\d{6}$`)
+
+// validBranchPrefix matches the Conventional Branch prefixes norn allows.
+var validBranchPrefix = regexp.MustCompile(`^(feature|fix|hotfix|epic|chore|review)/`)
+
+// NormalizeSuggestedBranch sanitises a branch name suggested by an LLM into a
+// safe git ref, or returns "" if it doesn't look like a valid branch. Takes the
+// first line, strips quotes/backticks/whitespace, lowercases, keeps only safe
+// chars, and requires a known prefix.
+func NormalizeSuggestedBranch(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.Trim(s, " \t`'\"")
+	s = strings.ToLower(s)
+	// Keep only branch-safe characters; collapse the rest.
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '/' || r == '#' || r == '-' || r == '_':
+			b.WriteRune(r)
+			prevDash = false
+		case !prevDash:
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-/")
+	if !validBranchPrefix.MatchString(out) {
+		return ""
+	}
+	return out
+}
+
 func branchAt(dir string) string {
 	out, err := cmdOutput(dir, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {

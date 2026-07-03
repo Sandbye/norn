@@ -2,6 +2,37 @@ package git
 
 import "testing"
 
+func TestBranchLacksSlug(t *testing.T) {
+	lacks := []string{"feature/#86caebh17", "fix/#86c9y34xd", "feature/20260701-084500", "chore/"}
+	for _, b := range lacks {
+		if !BranchLacksSlug(b) {
+			t.Errorf("BranchLacksSlug(%q) = false, want true", b)
+		}
+	}
+	has := []string{"fix/#86caebh17/no-show-bookings", "feature/social-login", "chore/#86c/update-deps"}
+	for _, b := range has {
+		if BranchLacksSlug(b) {
+			t.Errorf("BranchLacksSlug(%q) = true, want false", b)
+		}
+	}
+}
+
+func TestNormalizeSuggestedBranch(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"fix/#86caebh17/no-show-bookings-completed", "fix/#86caebh17/no-show-bookings-completed"},
+		{"  `feature/social-login`  ", "feature/social-login"},
+		{"Here you go: fix/payout-bug", ""},          // prose prefix → invalid
+		{"FIX/#86C/Auto Payout Charge", "fix/#86c/auto-payout-charge"},
+		{"random text", ""},                          // no valid prefix
+		{"feature/foo\nbar baz", "feature/foo"},      // first line only
+	}
+	for _, c := range cases {
+		if got := NormalizeSuggestedBranch(c.in); got != c.want {
+			t.Errorf("NormalizeSuggestedBranch(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestMakeBranch(t *testing.T) {
 	cases := []struct {
 		kind, hint, want string

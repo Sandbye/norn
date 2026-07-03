@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/sandbye/norn/internal/git"
 )
 
 // Result is the parsed envelope from `claude -p --output-format json`.
@@ -44,6 +46,49 @@ type envelope struct {
 func Available() bool {
 	_, err := exec.LookPath("claude")
 	return err == nil
+}
+
+// EnrichBranchName returns an AI-suggested branch name for the hint, or the
+// given fallback if Claude fails or returns something invalid. Callers gate on
+// Available() + config + git.BranchLacksSlug before calling.
+func EnrichBranchName(ctx context.Context, dir, hint, fallback string) string {
+	s, err := SuggestBranch(ctx, dir, hint)
+	if err != nil {
+		return fallback
+	}
+	if nb := git.NormalizeSuggestedBranch(s); nb != "" {
+		return nb
+	}
+	return fallback
+}
+
+// SuggestBranch asks Claude for a Conventional Branch name for a task hint,
+// resolving a ClickUp id/URL via the clickup MCP when present. Returns the raw
+// suggestion (caller sanitises with git.NormalizeSuggestedBranch). Short timeout
+// so a slow/hung lookup never stalls worktree creation for long.
+func SuggestBranch(ctx context.Context, dir, hint string) (string, error) {
+	prompt := "Name a git branch for this task. Hint: \"" + hint + "\". " +
+		"If it's a ClickUp task id or URL, look it up via the clickup MCP for its title and list. " +
+		"Output ONLY one line, no prose/quotes/backticks: a branch name of the form " +
+		"<type>/#<clickup-id>/<slug> (drop the #<id> segment if there is no ClickUp id). " +
+		"type is one of feature|fix|hotfix|epic|chore: fix for bugs/operations, feature for new features, " +
+		"chore for refactor/docs/deps, hotfix for urgent production fixes, epic for umbrella tasks. " +
+		"slug is 3-6 words, lowercase kebab-case, describing the task."
+	res, err := Run(ctx, dir, prompt, Options{
+		Timeout: 45 * time.Second,
+		AllowedTools: []string{
+			"mcp__clickup__clickup_get_task",
+			"mcp__clickup__clickup_search",
+			"mcp__clickup__clickup_filter_tasks",
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if res.IsError {
+		return "", fmt.Errorf("claude reported an error")
+	}
+	return res.Text, nil
 }
 
 // Run executes `claude -p <prompt>` in dir and returns the parsed result.
