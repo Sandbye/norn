@@ -36,6 +36,12 @@ type Config struct {
 	Setup        string       `yaml:"setup,omitempty" json:"setup,omitempty"`
 	BaseBranches []string     `yaml:"base_branches" json:"base_branches"`
 
+	// AINaming: when a new worktree's name would lack a descriptive slug (e.g.
+	// created from a bare ClickUp id), ask Claude to generate one. Requires the
+	// `claude` CLI; degrades silently to the deterministic name. Default true;
+	// set `ai_naming: false` to disable.
+	AINaming bool `yaml:"ai_naming" json:"ai_naming"`
+
 	// PRBase is the default PR target — where finished branches merge back to.
 	// e.g. user_test for staging-first workflows. Override per-PR with the
 	// HotfixTarget rule below.
@@ -112,6 +118,7 @@ func DefaultConfig() Config {
 	return Config{
 		WorktreeDir:  filepath.Join(home, "worktrees"),
 		BaseBranches: []string{"master", "main"},
+		AINaming:     true,
 		User: User{
 			Name: "unknown",
 		},

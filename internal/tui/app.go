@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/prompt"
@@ -280,6 +282,9 @@ func checkRemote(repoRoot string, wts []git.Worktree, bases []string) tea.Cmd {
 func createWorktree(cfg config.Config, repoRoot, kind, hint, base string) tea.Cmd {
 	return func() tea.Msg {
 		branch := git.MakeBranch(kind, hint)
+		if cfg.AINaming && claude.Available() && git.BranchLacksSlug(branch) {
+			branch = claude.EnrichBranchName(context.Background(), repoRoot, hint, branch)
+		}
 		wtPath, err := git.CreateWorktree(repoRoot, cfg.WorktreeDir, branch, base)
 		if err != nil {
 			return errMsg{err}

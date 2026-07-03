@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/prompt"
@@ -227,6 +229,18 @@ func reapStale(repoRoot string) {
 	_ = git.PruneWorktrees(repoRoot)
 }
 
+// aiResolveBranch is MakeBranch, but when the deterministic name lacks a
+// descriptive slug (e.g. created from a bare ClickUp id) it asks Claude for a
+// better one. Gated on config + `claude` availability; falls back silently.
+func aiResolveBranch(cfg config.Config, repoRoot, kind, hint string) string {
+	branch := git.MakeBranch(kind, hint)
+	if cfg.AINaming && claude.Available() && git.BranchLacksSlug(branch) {
+		fmt.Println("Naming the worktree via Claude…")
+		branch = claude.EnrichBranchName(context.Background(), repoRoot, hint, branch)
+	}
+	return branch
+}
+
 func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride string) {
 	// Resolve the *branch base* (source to fork from) by priority:
 	//   1. explicit --from override
@@ -236,7 +250,7 @@ func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride string) 
 	//   5. "main" as last-resort guess
 	base := resolveBranchBase(cfg, repoRoot, baseOverride)
 
-	branch := git.MakeBranch(kind, hint)
+	branch := aiResolveBranch(cfg, repoRoot, kind, hint)
 	fmt.Printf("Creating worktree: %s (base: %s)\n", branch, base)
 
 	wtPath, err := git.CreateWorktree(repoRoot, cfg.WorktreeDir, branch, base)
