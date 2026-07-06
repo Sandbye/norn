@@ -52,7 +52,8 @@ norn --help              # everything
 |------|------------|
 | `git` | everything (required) |
 | `gh` (GitHub CLI) | PR features: `norn diff <pr#>`, `--since-review` |
-| `claude` (Claude Code) | launching agent sessions, thread summaries, AI branch naming |
+| `claude` (Claude Code) | default agent; thread summaries + AI branch naming (Claude-only) |
+| another agent | set `agent.command` (e.g. `opencode`) to launch it instead of `claude` |
 
 `gh` and `claude` are optional. Without them, the related features degrade gracefully; the rest works. Run `norn doctor` to see what's wired up.
 
@@ -61,6 +62,22 @@ norn --help              # everything
 `norn init` scaffolds a per-project config in the current repo (detects your stack, base branches, verify commands). Global defaults live in `~/.config/work/config.yaml`. Everything has sane defaults, so you can also just run `norn` with no config at all.
 
 Key knobs: `worktree_dir`, `base_branches`, `pr_base`, `ai_naming` (set `false` to disable AI branch naming). See `norn --project-config` to print the resolved config.
+
+### Agent
+
+norn launches a coding agent per worktree. It defaults to [Claude Code](https://claude.com/claude-code), but any CLI agent works:
+
+```yaml
+agent:
+  command: opencode   # claude (default) | opencode | aider | …
+  args: []            # extra args for non-claude agents
+```
+
+With `claude`, norn injects the task brief via `--append-system-prompt` and resumes with `-c`. With any other agent, norn just launches it in the worktree directory, where the generated `.worktree.md` carries the brief (point your agent's `AGENTS.md`/rules at it if it doesn't read it automatically). The headless extras (thread summaries, AI branch naming) are Claude-specific and simply don't run for other agents.
+
+### Footers & MCPs
+
+These belong to your agent, not norn. Clickable footer badges (e.g. linking a ClickUp task) are a Claude Code `settings.json` feature (`footerLinksRegexes`), and MCP servers are configured in your agent's own config. norn launches the agent inside the worktree; it stays out of the agent's configuration.
 
 ## Theme
 
