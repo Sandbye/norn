@@ -46,6 +46,9 @@ func main() {
 		case "--templates":
 			cmdTemplates(cfg)
 			return
+		case "settings", "--settings":
+			cmdSettings(&cfg, repoRoot)
+			return
 		case "--activity-tick":
 			cmdActivityTick(repoRoot)
 			return
@@ -1490,24 +1493,44 @@ func cmdDashboard(cfg config.Config, repoRoot string) {
 	if repoRoot != "" {
 		scope = originRepoName(repoRoot)
 	}
-	dash := tui.NewDashboard(cfg, scope)
-	p := tea.NewProgram(dash, tea.WithAltScreen())
-	m, err := p.Run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dashboard error: %v\n", err)
-		os.Exit(1)
-	}
-	result := m.(tui.Dashboard).Result()
-	switch result.Action {
-	case tui.ResultCd:
-		// Parent-shell cd via the work() wrapper — no nested subshell.
-		writeCdTarget(result.Path)
-		clearScreen()
-	case tui.ResultResume:
-		if result.Path != "" {
-			clearScreen()
-			tui.LaunchAgent(cfg.Agent, result.Path, true)
+	for {
+		dash := tui.NewDashboard(cfg, scope)
+		p := tea.NewProgram(dash, tea.WithAltScreen())
+		m, err := p.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dashboard error: %v\n", err)
+			os.Exit(1)
 		}
+		result := m.(tui.Dashboard).Result()
+		switch result.Action {
+		case tui.ResultCd:
+			// Parent-shell cd via the work() wrapper — no nested subshell.
+			writeCdTarget(result.Path)
+			clearScreen()
+		case tui.ResultResume:
+			if result.Path != "" {
+				clearScreen()
+				tui.LaunchAgent(cfg.Agent, result.Path, true)
+			}
+		case tui.ResultSettings:
+			cmdSettings(&cfg, repoRoot)
+			continue // back to the dashboard, picking up any config change
+		}
+		return
+	}
+}
+
+// cmdSettings runs the settings TUI. cfg is updated in place so a caller (the
+// dashboard loop) reflects edits without reloading.
+func cmdSettings(cfg *config.Config, repoRoot string) {
+	s := tui.NewSettings(*cfg, repoRoot)
+	p := tea.NewProgram(s, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "settings error: %v\n", err)
+		return
+	}
+	if reloaded, err := config.Load(repoRoot); err == nil {
+		*cfg = reloaded
 	}
 }
 
@@ -1640,6 +1663,7 @@ Usage:
                           (even "outdated") comments overlaid next to the code
   norn diff --list, -l    Pick an open PR from a list, then view its diff
   norn diff --plain, -p   Plain text diff for piping
+  norn settings           Edit config (agent, template, toggles); also S in dashboard
   norn init               Scaffold a project config for the current repo
   norn doctor             Diagnose hooks, skills, configs, docs, state
   norn --refresh-docs     git pull every doc repo referenced in any project config
