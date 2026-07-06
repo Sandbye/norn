@@ -239,6 +239,10 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.cursor = len(vis) - 1
 		case "r":
 			return d, d.loadCmd()
+		case "S":
+			d.quit = true
+			d.result = Result{Action: ResultSettings}
+			return d, tea.Quit
 		case "a":
 			if d.scopeRepo != "" {
 				d.scopeRepo = ""
@@ -535,7 +539,7 @@ func (d Dashboard) dashKeyHelp() string {
 			parts = append(parts, "t task")
 		}
 	}
-	parts = append(parts, "r refresh", "d drop")
+	parts = append(parts, "r refresh", "d drop", "S settings")
 	if d.scopeRepo != "" {
 		parts = append(parts, "a all repos")
 	}

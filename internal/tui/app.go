@@ -24,10 +24,11 @@ const (
 type ResultAction int
 
 const (
-	ResultNone    ResultAction = iota
-	ResultLaunch               // launch new Claude session
-	ResultResume               // resume existing Claude session
-	ResultCd                   // cd into worktree shell
+	ResultNone     ResultAction = iota
+	ResultLaunch                // launch new Claude session
+	ResultResume                // resume existing Claude session
+	ResultCd                    // cd into worktree shell
+	ResultSettings              // open the settings view
 )
 
 // Result is returned after the TUI exits, telling main.go what to do.
