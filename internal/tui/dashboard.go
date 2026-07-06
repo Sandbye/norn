@@ -558,7 +558,6 @@ func openURL(url string) {
 // loadCmd reloads the store and reconciles with live worktree list.
 // Fast path only — PR data is fetched async via fetchPRCmd after this returns.
 func (d Dashboard) loadCmd() tea.Cmd {
-	cfg := d.cfg
 	scope := d.scopeRepo
 	return func() tea.Msg {
 		store, err := state.Load()
@@ -566,26 +565,42 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			return dashLoadedMsg{}
 		}
 
-		// Build a set of live worktree paths so we can mark dead ones.
-		alive := map[string]bool{}
-		common := ""
-		wts, _ := git.ListWorktrees(cfg.WorktreeDir, common)
-		for _, wt := range wts {
-			alive[wt.Path] = true
+		// Reconcile: the dashboard reflects live worktrees, not an append-only
+		// log. Drop rows whose path is gone or is the main checkout, collapse
+		// duplicate rows sharing a worktree path, and reconcile each survivor's
+		// branch/ClickUp id against the live checkout. Persist if anything moved.
+		store.SortByActivity()
+		before := len(store.Sessions)
+		store.Prune(func(s state.Session) bool {
+			return git.CheckoutClass(s.Path) == "worktree"
+		})
+		store.DedupeByPath()
+		changed := len(store.Sessions) != before
+
+		for i := range store.Sessions {
+			sess := &store.Sessions[i]
+			if b := git.CurrentBranch(sess.Path); b != "" && b != sess.Branch {
+				sess.Branch = b
+				sess.ID = state.MakeID(sess.Repo, b)
+				changed = true
+			}
+			if sess.ClickUpID == "" {
+				if id := git.ClickUpID(sess.Branch); id != "" {
+					sess.ClickUpID = id
+					changed = true
+				}
+			}
+		}
+		if changed {
+			_ = store.Save()
 		}
 
-		store.SortByActivity()
 		rows := make([]dashRow, 0, len(store.Sessions))
 		for _, sess := range store.Sessions {
 			if scope != "" && sess.Repo != scope {
 				continue
 			}
-			// Backfill the ClickUp id from the branch for older sessions that
-			// were recorded before robust extraction (keeps refs consistent).
-			if sess.ClickUpID == "" {
-				sess.ClickUpID = git.ClickUpID(sess.Branch)
-			}
-			rows = append(rows, dashRow{Session: sess, WorktreeAlive: alive[sess.Path]})
+			rows = append(rows, dashRow{Session: sess, WorktreeAlive: true})
 		}
 		return dashLoadedMsg{rows: rows}
 	}

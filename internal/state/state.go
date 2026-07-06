@@ -129,6 +129,86 @@ func (s *Store) Upsert(sess Session) *Session {
 	return &s.Sessions[len(s.Sessions)-1]
 }
 
+// FindByPath returns the session at the given worktree path, or nil. Worktree
+// path is the stable identity of a thread; branch may change under it.
+func (s *Store) FindByPath(path string) *Session {
+	for i := range s.Sessions {
+		if s.Sessions[i].Path == path {
+			return &s.Sessions[i]
+		}
+	}
+	return nil
+}
+
+// UpsertByPath dedups on worktree path: one row per worktree. If a row for the
+// path exists it's updated in place (branch may have changed); otherwise the
+// session is appended. Prevents branch switches from spawning duplicate rows.
+func (s *Store) UpsertByPath(sess Session) *Session {
+	if existing := s.FindByPath(sess.Path); existing != nil {
+		if sess.ClickUpID == "" {
+			sess.ClickUpID = existing.ClickUpID
+		}
+		if sess.PRNumber == 0 {
+			sess.PRNumber = existing.PRNumber
+		}
+		if sess.Status == "" {
+			sess.Status = existing.Status
+		}
+		if sess.StartedAt.IsZero() {
+			sess.StartedAt = existing.StartedAt
+		}
+		if len(sess.Blockers) == 0 {
+			sess.Blockers = existing.Blockers
+		}
+		*existing = sess
+		return existing
+	}
+	if sess.Status == "" {
+		sess.Status = StatusActive
+	}
+	if sess.StartedAt.IsZero() {
+		sess.StartedAt = time.Now()
+	}
+	if sess.LastActivityAt.IsZero() {
+		sess.LastActivityAt = sess.StartedAt
+	}
+	s.Sessions = append(s.Sessions, sess)
+	return &s.Sessions[len(s.Sessions)-1]
+}
+
+// Prune keeps only sessions for which keep returns true. Returns removed count.
+func (s *Store) Prune(keep func(Session) bool) int {
+	out := s.Sessions[:0]
+	removed := 0
+	for _, sess := range s.Sessions {
+		if keep(sess) {
+			out = append(out, sess)
+		} else {
+			removed++
+		}
+	}
+	s.Sessions = out
+	return removed
+}
+
+// DedupeByPath collapses rows sharing a worktree path down to the first seen.
+// Call SortByActivity first so the newest row survives.
+func (s *Store) DedupeByPath() int {
+	seen := map[string]bool{}
+	out := s.Sessions[:0]
+	removed := 0
+	for _, sess := range s.Sessions {
+		if seen[sess.Path] {
+			removed++
+			continue
+		}
+		seen[sess.Path] = true
+		out = append(out, sess)
+	}
+	s.Sessions = out
+	return removed
+}
+
 // Tick bumps last_activity_at for the session with the given id.
 // Returns false if no session matches (caller decides whether to create).
 func (s *Store) Tick(id string) bool {
