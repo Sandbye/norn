@@ -42,6 +42,13 @@ type Config struct {
 	// set `ai_naming: false` to disable.
 	AINaming bool `yaml:"ai_naming" json:"ai_naming"`
 
+	// Agent selects the coding agent norn launches per worktree. Defaults to
+	// `claude`. Any other command (opencode, aider, …) is launched in the
+	// worktree directory, where `.worktree.md` gives it the task brief.
+	// Headless features (thread summaries, AI branch naming) are Claude-specific
+	// and simply don't run for other agents.
+	Agent AgentConfig `yaml:"agent,omitempty" json:"agent,omitempty"`
+
 	// PRBase is the default PR target — where finished branches merge back to.
 	// e.g. user_test for staging-first workflows. Override per-PR with the
 	// HotfixTarget rule below.
@@ -87,6 +94,15 @@ type Config struct {
 	DoneWhen []string `yaml:"done_when,omitempty" json:"done_when,omitempty"`
 }
 
+// AgentConfig configures which coding agent norn launches and how.
+type AgentConfig struct {
+	// Command is the launcher binary. Empty means "claude".
+	Command string `yaml:"command,omitempty" json:"command,omitempty"`
+	// Args are extra arguments passed to non-claude agents on launch. Ignored
+	// for claude, which uses norn's own flags (--append-system-prompt, -c).
+	Args []string `yaml:"args,omitempty" json:"args,omitempty"`
+}
+
 type User struct {
 	Name       string `yaml:"name" json:"name"`
 	Email      string `yaml:"email" json:"email"`
@@ -119,10 +135,26 @@ func DefaultConfig() Config {
 		WorktreeDir:  filepath.Join(home, "worktrees"),
 		BaseBranches: []string{"master", "main"},
 		AINaming:     true,
+		Agent:        AgentConfig{Command: "claude"},
 		User: User{
 			Name: "unknown",
 		},
 	}
+}
+
+// AgentCommand returns the configured agent launcher, defaulting to "claude".
+func (c Config) AgentCommand() string {
+	if c.Agent.Command == "" {
+		return "claude"
+	}
+	return c.Agent.Command
+}
+
+// HeadlessClaude reports whether the configured agent is Claude Code, gating the
+// headless features (thread summaries, AI branch naming) that rely on
+// `claude -p --output-format json`.
+func (c Config) HeadlessClaude() bool {
+	return c.AgentCommand() == "claude"
 }
 
 // Load reads ~/.config/work/config.yaml merged with .work.yaml from repo root.

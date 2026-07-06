@@ -283,7 +283,7 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// if we have one (refresh from the overlay with `r`).
 			if d.cursor < len(vis) && !d.summarizing {
 				row := vis[d.cursor]
-				if row.WorktreeAlive && claude.Available() {
+				if row.WorktreeAlive && d.cfg.HeadlessClaude() && claude.Available() {
 					d.summaryBranch = row.Branch
 					d.summaryPath = row.Path
 					if cached, ok := d.summaryCache[row.Branch]; ok {
@@ -523,8 +523,8 @@ func (d Dashboard) dashKeyHelp() string {
 	if d.cursor < len(vis) {
 		row := vis[d.cursor]
 		if row.WorktreeAlive {
-			parts = append(parts, "⏎ cd", "l claude")
-			if claude.Available() {
+			parts = append(parts, "⏎ cd", "l "+d.cfg.AgentCommand())
+			if d.cfg.HeadlessClaude() && claude.Available() {
 				parts = append(parts, "s summary")
 			}
 		}
