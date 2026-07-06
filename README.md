@@ -63,6 +63,8 @@ norn --help              # everything
 
 Key knobs: `worktree_dir`, `base_branches`, `pr_base`, `ai_naming` (set `false` to disable AI branch naming). See `norn --project-config` to print the resolved config.
 
+Edit config without leaving your hand comments behind: `norn settings` (or `S` in the dashboard) is a small TUI for the common knobs (agent, template, toggles, paths) with a global/project layer switch. It writes surgically to the YAML, so comments and unmodeled keys survive. Free-form fields (verify commands, forbid rules, ClickUp lists) open in `$EDITOR`.
+
 ### Agent
 
 norn launches a coding agent per worktree. It defaults to [Claude Code](https://claude.com/claude-code), but any CLI agent works:
