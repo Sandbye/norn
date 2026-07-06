@@ -1427,30 +1427,43 @@ func cmdActivityTick(repoRoot string) {
 	if repoRoot == "" {
 		return
 	}
-	branch := strings.TrimSpace(currentBranch(repoRoot))
-	if branch == "" {
+	// Only real worktrees are threads; never record the main checkout. This is
+	// where the log used to balloon — every branch switch in the main repo
+	// inserted a fresh row.
+	if git.CheckoutClass(repoRoot) != "worktree" {
+		return
+	}
+	branch := currentBranch(repoRoot)
+	if branch == "" { // detached or error
 		return
 	}
 	repo := originRepoName(repoRoot)
-	id := state.MakeID(repo, branch)
 
 	store, err := state.Load()
 	if err != nil {
 		return
 	}
-	if !store.Tick(id) {
-		// Session unknown — record one so the dashboard surfaces it.
-		// We don't know kind here; best guess from branch prefix.
+	// Key by path: a thread is a worktree, not a branch. Branch switches update
+	// the existing row rather than spawning a new one.
+	if existing := store.FindByPath(repoRoot); existing != nil {
+		existing.Branch = branch
+		existing.ID = state.MakeID(repo, branch)
+		existing.LastActivityAt = time.Now()
+		if existing.ClickUpID == "" {
+			existing.ClickUpID = git.ClickUpID(branch)
+		}
+	} else {
 		kind := "task"
 		if strings.HasPrefix(branch, "review/") {
 			kind = "review"
 		}
-		store.Upsert(state.Session{
-			ID:             id,
+		store.UpsertByPath(state.Session{
+			ID:             state.MakeID(repo, branch),
 			Repo:           repo,
 			Branch:         branch,
 			Kind:           kind,
 			Path:           repoRoot,
+			ClickUpID:      git.ClickUpID(branch),
 			Status:         state.StatusActive,
 			StartedAt:      time.Now(),
 			LastActivityAt: time.Now(),
@@ -1492,12 +1505,19 @@ func currentBranch(repoRoot string) string {
 	if err != nil {
 		return ""
 	}
-	return string(out)
+	b := strings.TrimSpace(string(out))
+	if b == "HEAD" { // detached — not a real thread
+		return ""
+	}
+	return b
 }
 
 // upsertSession records a newly created worktree to the session store so the
 // dashboard sees it immediately, before any activity-tick fires.
 func upsertSession(repoRoot, kind, branch, wtPath, hint string) {
+	if branch == "" || branch == "HEAD" {
+		return
+	}
 	repo := originRepoName(repoRoot)
 	id := state.MakeID(repo, branch)
 	store, err := state.Load()
@@ -1509,7 +1529,7 @@ func upsertSession(repoRoot, kind, branch, wtPath, hint string) {
 	if clickup == "" {
 		clickup = git.ClickUpID(hint)
 	}
-	store.Upsert(state.Session{
+	store.UpsertByPath(state.Session{
 		ID:             id,
 		Repo:           repo,
 		Branch:         branch,

@@ -127,6 +127,42 @@ func ListWorktrees(worktreeDir string, filterCommon string) ([]Worktree, error) 
 	return results, nil
 }
 
+// CheckoutClass classifies a filesystem path by its git checkout kind:
+//   "worktree" — a linked worktree (`.git` is a file pointing at the admin dir)
+//   "main"     — the primary checkout (`.git` is a real directory)
+//   "dead"     — path is gone or not a git checkout
+//
+// This is the authoritative test the dashboard uses to decide what's a live
+// thread: only linked worktrees count, so deleted paths and the main checkout
+// are reaped automatically.
+func CheckoutClass(path string) string {
+	if path == "" {
+		return "dead"
+	}
+	fi, err := os.Stat(filepath.Join(path, ".git"))
+	if err != nil {
+		return "dead"
+	}
+	if fi.IsDir() {
+		return "main"
+	}
+	return "worktree"
+}
+
+// CurrentBranch returns the checked-out branch at path, or "" when detached or
+// on error. Used to reconcile a session row's branch against the live checkout.
+func CurrentBranch(path string) string {
+	out, err := exec.Command("git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	b := strings.TrimSpace(string(out))
+	if b == "HEAD" { // detached
+		return ""
+	}
+	return b
+}
+
 // FetchPrune runs `git fetch --prune` so remote-tracking refs reflect server state.
 func FetchPrune(repoRoot string) error {
 	return cmdRun(repoRoot, "git", "fetch", "--prune", "--quiet")
