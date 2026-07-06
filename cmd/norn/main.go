@@ -43,6 +43,9 @@ func main() {
 		case "--project-config":
 			cmdProjectConfig(cfg, repoRoot)
 			return
+		case "--templates":
+			cmdTemplates(cfg)
+			return
 		case "--activity-tick":
 			cmdActivityTick(repoRoot)
 			return
@@ -133,16 +136,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: not inside a git repository")
 			os.Exit(1)
 		}
-		// Extract `--from <branch>` / `-b <branch>` if present, so the rest
-		// can flow into the hint without polluting it.
-		baseOverride, rest := extractFromFlag(args)
+		// Extract `--from <branch>` and `--template <name>` if present, so the
+		// rest can flow into the hint without polluting it.
+		baseOverride, templateOverride, rest := extractCreateFlags(args)
 		kind := "task"
 		hint := strings.Join(rest, " ")
 		if len(rest) > 0 && rest[0] == "--review" {
 			kind = "review"
 			hint = strings.Join(rest[1:], " ")
 		}
-		directCreate(cfg, repoRoot, kind, hint, baseOverride)
+		directCreate(cfg, repoRoot, kind, hint, baseOverride, templateOverride)
 		return
 	}
 
@@ -241,7 +244,7 @@ func aiResolveBranch(cfg config.Config, repoRoot, kind, hint string) string {
 	return branch
 }
 
-func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride string) {
+func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templateOverride string) {
 	// Resolve the *branch base* (source to fork from) by priority:
 	//   1. explicit --from override
 	//   2. branch_base from project config (production-line, may differ from PR target)
@@ -262,7 +265,11 @@ func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride string) 
 	_ = git.SymlinkEnvFiles(repoRoot, wtPath)
 
 	// Generate prompt
-	promptText, err := prompt.Render(cfg, kind, hint, base)
+	tmpl := prompt.Resolve(cfg, kind, templateOverride)
+	if templateOverride != "" && !prompt.Has(templateOverride) {
+		fmt.Fprintf(os.Stderr, "warning: template %q not found, using %q\n", templateOverride, tmpl)
+	}
+	promptText, err := prompt.Render(cfg, kind, hint, base, tmpl)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not render prompt: %v\n", err)
 	}
@@ -329,9 +336,10 @@ func cmdStatus(cfg config.Config, repoRoot string) {
 // Silent on no-op; never fails the caller.
 // extractFromFlag pulls `--from <branch>` or `-b <branch>` out of args. Returns
 // the chosen base (or "" if absent) and the remaining args in original order.
-func extractFromFlag(args []string) (string, []string) {
-	out := make([]string, 0, len(args))
-	base := ""
+// extractCreateFlags pulls `--from`/`-b <branch>` and `--template`/`-t <name>`
+// out of the create args so the remainder flows cleanly into the hint.
+func extractCreateFlags(args []string) (base, template string, rest []string) {
+	rest = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -340,11 +348,16 @@ func extractFromFlag(args []string) (string, []string) {
 			i++ // skip the value
 		case strings.HasPrefix(a, "--from="):
 			base = strings.TrimPrefix(a, "--from=")
+		case (a == "--template" || a == "-t") && i+1 < len(args):
+			template = args[i+1]
+			i++ // skip the value
+		case strings.HasPrefix(a, "--template="):
+			template = strings.TrimPrefix(a, "--template=")
 		default:
-			out = append(out, a)
+			rest = append(rest, a)
 		}
 	}
-	return base, out
+	return base, template, rest
 }
 
 // isAllDigits returns true if s consists solely of ASCII digits and is non-empty.
@@ -1543,6 +1556,24 @@ func upsertSession(repoRoot, kind, branch, wtPath, hint string) {
 	_ = store.Save()
 }
 
+func cmdTemplates(cfg config.Config) {
+	names := prompt.List()
+	if len(names) == 0 {
+		fmt.Println("no templates found")
+		return
+	}
+	def := prompt.Resolve(cfg, "task", "") // the default a bare `norn "hint"` uses
+	fmt.Println("Templates (* = default for new tasks):")
+	for _, n := range names {
+		marker := "  "
+		if n == def {
+			marker = "* "
+		}
+		fmt.Printf("%s%s\n", marker, n)
+	}
+	fmt.Println("\nUse: norn \"hint\" --template <name>   ·   set a default via `template:` in config")
+}
+
 func cmdProjectConfig(cfg config.Config, repoRoot string) {
 	// Emit the fully-resolved config as JSON. Used by hooks + skills that need
 	// per-project policy (forbid/format/review), verify cmds, clickup lists.
@@ -1588,6 +1619,8 @@ Usage:
   norn                    Cross-session dashboard (default view)
   norn "hint"             Create task worktree with hint (base: pr_base default)
   norn "hint" --from <b>  Override base branch for this worktree
+  norn "hint" --template <name>, -t <name>
+                          Use a specific prompt template for this worktree
   norn --review "hint"    Create review worktree
   norn -d, --dir          Main menu in cd-mode: enter cd's into the worktree,
                           l launches Claude
@@ -1596,6 +1629,7 @@ Usage:
   norn --list             List worktrees (git)
   norn --status           Show worktrees with details
   norn --project-config   Print resolved config as JSON
+  norn --templates        List available prompt templates (built-in + user)
   norn --dashboard        Same as bare norn: live TUI of all known sessions
   norn diff               TUI diff of current uncommitted changes (working tree)
   norn diff --base [ref]  Compare committed branch vs a base: no ref = pr_base,
