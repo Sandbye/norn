@@ -75,6 +75,17 @@ agent:
 
 With `claude`, norn injects the task brief via `--append-system-prompt` and resumes with `-c`. With any other agent, norn just launches it in the worktree directory, where the generated `.worktree.md` carries the brief (point your agent's `AGENTS.md`/rules at it if it doesn't read it automatically). The headless extras (thread summaries, AI branch naming) are Claude-specific and simply don't run for other agents.
 
+### Templates
+
+Each worktree gets a `.worktree.md` brief rendered from a template. norn ships `task` and `review` templates; drop your own in `~/.config/work/templates/<name>.md.tmpl` (a file there shadows the built-in of the same name).
+
+```sh
+norn --templates                 # list available templates (built-in + user)
+norn "hint" --template spike     # use a specific template for one worktree
+```
+
+Set a default for new tasks with `template: <name>` in config. Templates are Go `text/template`; the data available (user, ClickUp lists, verify commands, base branch, …) is documented in the built-in `task` template.
+
 ### Footers & MCPs
 
 These belong to your agent, not norn. Clickable footer badges (e.g. linking a ClickUp task) are a Claude Code `settings.json` feature (`footerLinksRegexes`), and MCP servers are configured in your agent's own config. norn launches the agent inside the worktree; it stays out of the agent's configuration.
