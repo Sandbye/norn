@@ -15,7 +15,7 @@ func TestRenderTask(t *testing.T) {
 		Setup:   "pnpm cleanup",
 	}
 
-	out, err := Render(cfg, "task", "fix the export bug", "master")
+	out, err := Render(cfg, "task", "fix the export bug", "master", "")
 	if err != nil {
 		t.Fatalf("Render task: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestRenderReview(t *testing.T) {
 		User: config.User{Name: "Test User", Email: "test@example.com"},
 	}
 
-	out, err := Render(cfg, "review", "CU-86c98r0j6", "master")
+	out, err := Render(cfg, "review", "CU-86c98r0j6", "master", "")
 	if err != nil {
 		t.Fatalf("Render review: %v", err)
 	}
@@ -79,12 +79,71 @@ func TestExtractHint(t *testing.T) {
 	}
 }
 
+func TestList(t *testing.T) {
+	names := List()
+	want := map[string]bool{"task": false, "review": false}
+	for _, n := range names {
+		if _, ok := want[n]; ok {
+			want[n] = true
+		}
+	}
+	for n, seen := range want {
+		if !seen {
+			t.Errorf("List() missing built-in template %q; got %v", n, names)
+		}
+	}
+	// Sorted + deduped.
+	for i := 1; i < len(names); i++ {
+		if names[i-1] >= names[i] {
+			t.Errorf("List() not sorted/deduped: %v", names)
+			break
+		}
+	}
+}
+
+func TestHas(t *testing.T) {
+	if !Has("task") {
+		t.Error("Has(task) should be true (built-in)")
+	}
+	if Has("definitely-not-a-template") {
+		t.Error("Has(nonexistent) should be false")
+	}
+	if Has("") {
+		t.Error("Has(empty) should be false")
+	}
+}
+
+func TestResolve(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      config.Config
+		kind     string
+		override string
+		want     string
+	}{
+		{"task default", config.Config{}, "task", "", "task"},
+		{"review default", config.Config{}, "review", "", "review"},
+		{"valid override wins", config.Config{}, "task", "review", "review"},
+		{"unknown override ignored", config.Config{}, "task", "bogus", "task"},
+		{"cfg template for task", config.Config{Template: "review"}, "task", "", "review"},
+		{"unknown cfg template ignored", config.Config{Template: "bogus"}, "task", "", "task"},
+		{"cfg template ignored for review", config.Config{Template: "task"}, "review", "", "review"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Resolve(tt.cfg, tt.kind, tt.override); got != tt.want {
+				t.Errorf("Resolve(%+v, %q, %q) = %q, want %q", tt.cfg, tt.kind, tt.override, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderNoHint(t *testing.T) {
 	cfg := config.Config{
 		User: config.User{Name: "Test"},
 	}
 
-	out, err := Render(cfg, "task", "", "master")
+	out, err := Render(cfg, "task", "", "master", "")
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}

@@ -49,6 +49,12 @@ type Config struct {
 	// and simply don't run for other agents.
 	Agent AgentConfig `yaml:"agent,omitempty" json:"agent,omitempty"`
 
+	// Template names the default prompt template for new task worktrees, by
+	// basename (e.g. `task`, or a custom one dropped in the user templates dir).
+	// Empty means the built-in `task` template. Overridable per-create with
+	// `--template`. Review sessions always use the `review` template.
+	Template string `yaml:"template,omitempty" json:"template,omitempty"`
+
 	// PRBase is the default PR target — where finished branches merge back to.
 	// e.g. user_test for staging-first workflows. Override per-PR with the
 	// HotfixTarget rule below.

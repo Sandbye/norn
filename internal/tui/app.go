@@ -291,7 +291,7 @@ func createWorktree(cfg config.Config, repoRoot, kind, hint, base string) tea.Cm
 		}
 		_ = git.SymlinkEnvFiles(repoRoot, wtPath)
 
-		promptText, _ := prompt.Render(cfg, kind, hint, base)
+		promptText, _ := prompt.Render(cfg, kind, hint, base, prompt.Resolve(cfg, kind, ""))
 		promptPath := wtPath + "/.worktree.md"
 		if err := writeFile(promptPath, promptText); err != nil {
 			return errMsg{err}
