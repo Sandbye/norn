@@ -174,12 +174,12 @@ func main() {
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
 		writeCdTarget(result.Path)
 		clearScreen()
-		tui.LaunchClaude(result.Path, false)
+		tui.LaunchAgent(cfg.Agent, result.Path, false)
 	case tui.ResultResume:
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
 		writeCdTarget(result.Path)
 		clearScreen()
-		tui.LaunchClaude(result.Path, true)
+		tui.LaunchAgent(cfg.Agent, result.Path, true)
 	case tui.ResultCd:
 		// Parent-shell cd: write the target and exit. The `work()` shell wrapper
 		// cd's the *current* shell into it — no nested subshell.
@@ -234,7 +234,7 @@ func reapStale(repoRoot string) {
 // better one. Gated on config + `claude` availability; falls back silently.
 func aiResolveBranch(cfg config.Config, repoRoot, kind, hint string) string {
 	branch := git.MakeBranch(kind, hint)
-	if cfg.AINaming && claude.Available() && git.BranchLacksSlug(branch) {
+	if cfg.AINaming && cfg.HeadlessClaude() && claude.Available() && git.BranchLacksSlug(branch) {
 		fmt.Println("Naming the worktree via Claude…")
 		branch = claude.EnrichBranchName(context.Background(), repoRoot, hint, branch)
 	}
@@ -274,7 +274,7 @@ func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride string) 
 	writeCdTarget(wtPath)
 
 	clearScreen()
-	tui.LaunchClaude(wtPath, false)
+	tui.LaunchAgent(cfg.Agent, wtPath, false)
 }
 
 // writeCdTarget records the path the shell wrapper should `cd` into after the
@@ -1493,7 +1493,7 @@ func cmdDashboard(cfg config.Config, repoRoot string) {
 	case tui.ResultResume:
 		if result.Path != "" {
 			clearScreen()
-			tui.LaunchClaude(result.Path, true)
+			tui.LaunchAgent(cfg.Agent, result.Path, true)
 		}
 	}
 }

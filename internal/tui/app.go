@@ -282,7 +282,7 @@ func checkRemote(repoRoot string, wts []git.Worktree, bases []string) tea.Cmd {
 func createWorktree(cfg config.Config, repoRoot, kind, hint, base string) tea.Cmd {
 	return func() tea.Msg {
 		branch := git.MakeBranch(kind, hint)
-		if cfg.AINaming && claude.Available() && git.BranchLacksSlug(branch) {
+		if cfg.AINaming && cfg.HeadlessClaude() && claude.Available() && git.BranchLacksSlug(branch) {
 			branch = claude.EnrichBranchName(context.Background(), repoRoot, hint, branch)
 		}
 		wtPath, err := git.CreateWorktree(repoRoot, cfg.WorktreeDir, branch, base)
