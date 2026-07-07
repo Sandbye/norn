@@ -1,0 +1,43 @@
+---
+hint: {{printf "%q" .Hint}}
+{{- if .Task}}
+task: {{printf "%q" .Task.Title}}
+id: {{.Task.ID}}
+{{- if .Task.URL}}
+url: {{.Task.URL}}
+{{- end}}
+{{- end}}
+base: {{.Base}}
+created: {{.Generated}}
+---
+
+# {{.Hint | default "New task"}}
+
+Isolated git worktree for a single task. **Follow this repo's own conventions** — its `AGENTS.md` / `CLAUDE.md` / README, if present. The section below is only the task context norn added; it doesn't replace your workflow.
+
+{{if .Task}}## Task
+
+**{{.Task.Title}}** (`{{.Task.ID}}`){{if .Task.URL}} · {{.Task.URL}}{{end}}
+{{- if .Task.Description}}
+
+{{.Task.Description}}
+{{- end}}
+
+_Provided above — no need to re-fetch it._
+{{else}}## Task
+
+{{.HintBlock}}
+{{end}}
+## This worktree
+
+- Forked from `{{.Base}}` — diff your work with `git diff {{.Base}}...HEAD`.
+{{- if and .PRBase (ne .PRBase .Base)}}
+- Branches from `{{.Base}}`, but PRs target `{{.PRBase}}`.
+{{- end}}
+{{- if .Setup}}
+- Setup: run `{{.Setup}}`.
+{{- end}}
+{{- if .Verify}}
+- Before done: {{join .Verify " · "}}
+{{- end}}
+- Disposable — clean up with `norn --clean` once it's merged.

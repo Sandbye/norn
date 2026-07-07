@@ -1,0 +1,71 @@
+# GoReleaser config for norn. Docs: https://goreleaser.com
+# Build + release: push a tag `vX.Y.Z` → the release workflow runs this.
+# Validate locally without publishing: goreleaser build --snapshot --clean
+version: 2
+
+project_name: norn
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: norn
+    main: ./cmd/norn
+    binary: norn
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: norn
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# Homebrew cask (not formula): the modern GoReleaser path for pre-compiled
+# binaries. The post-install hook strips the macOS quarantine xattr so the
+# unsigned binary runs without Gatekeeper blocking it. macOS only — Linux
+# users grab the binary straight from the GitHub release.
+homebrew_casks:
+  - name: norn
+    binaries: [norn]
+    homepage: https://github.com/Sandbye/norn
+    description: "Git worktree manager TUI with per-worktree coding-agent sessions"
+    license: MIT
+    # macOS builds only feed the cask.
+    ids:
+      - norn
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/norn"]
+          end
+    repository:
+      owner: Sandbye
+      name: homebrew-norn
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: goreleaserbot@users.noreply.github.com
+    commit_msg_template: "chore: norn cask {{ .Tag }}"

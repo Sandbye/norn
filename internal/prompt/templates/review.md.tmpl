@@ -1,0 +1,15 @@
+---
+hint: {{printf "%q" .Hint}}
+base: {{.Base}}
+created: {{.Generated}}
+---
+
+# Review · {{.Hint | default "PR review"}}
+
+Isolated worktree to review a change. **Follow this repo's own conventions** (its `AGENTS.md` / `CLAUDE.md`, if present). The below is just the review context norn added.
+
+## Review
+
+{{.HintBlock}}
+
+Read the diff against `{{.Base}}` and weigh: correctness, consistency with the surrounding code, tests, security, and completeness. Leave findings as review comments rather than changing the code.

@@ -1,0 +1,19 @@
+# Compiled binary
+/work
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Go
+*.test
+*.out
+
+# GoReleaser build output
+/dist/
+
+# LTeX (LanguageTool LSP) editor sidecars
+*_ltex.json
