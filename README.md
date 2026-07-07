@@ -11,7 +11,8 @@ Named for the Norns, who weave the threads of fate at the roots of the world tre
 ## Install
 
 ```sh
-brew install sandbye/norn/norn
+brew tap sandbye/norn
+brew install norn
 ```
 
 Or with Go (needs 1.25+, and `~/go/bin` on your `PATH`):
