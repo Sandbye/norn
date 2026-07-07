@@ -474,7 +474,11 @@ func (d Dashboard) View() string {
 	}
 	meta := dimStyle.Render(ThreadWord() + "   scope: " + scope)
 	if !d.lastLoad.IsZero() {
-		meta += dimStyle.Render(fmt.Sprintf("   refreshed %s ago", shortAge(d.lastLoad)))
+		if age := shortAge(d.lastLoad); age == "just now" {
+			meta += dimStyle.Render("   refreshed just now")
+		} else {
+			meta += dimStyle.Render(fmt.Sprintf("   refreshed %s ago", age))
+		}
 	}
 	// Non-modal summary status — dashboard stays usable while a summary runs.
 	switch {
