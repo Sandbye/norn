@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -225,11 +224,7 @@ func orDash(s string) string {
 func (m settingsModel) editYAML() tea.Cmd {
 	path := m.activePath()
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
-	}
-	cmd := exec.Command(editor, path)
+	cmd := config.EditorCommand(path)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg { return editorDoneMsg{err} })
 }
 
