@@ -112,6 +112,10 @@ go build ./... && go test ./...
 
 Conventional Commits, focused changes. Good first PRs: themes, templates, agent presets.
 
+## Support
+
+norn is free and MIT-licensed. If it saves you time, you can [sponsor its development](https://github.com/sponsors/Sandbye). Entirely optional; stars and issues help just as much.
+
 ## License
 
 [MIT](LICENSE) © Anton Sandbye
