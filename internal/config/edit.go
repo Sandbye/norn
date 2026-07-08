@@ -3,8 +3,10 @@ package config
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -202,6 +204,19 @@ func OpenEditorValue(path string, keys []string) (string, bool) {
 		return "", false
 	}
 	return e.GetString(keys)
+}
+
+// EditorCommand builds a command to open path in the user's $EDITOR. It honors
+// arguments in $EDITOR (e.g. "code --wait", "nvim -p", "emacsclient -c") by
+// splitting on whitespace, rather than treating the whole value as one binary
+// name. Falls back to vi when unset. The caller wires stdio / ExecProcess.
+func EditorCommand(path string) *exec.Cmd {
+	editor := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editor == "" {
+		editor = "vi"
+	}
+	fields := strings.Fields(editor)
+	return exec.Command(fields[0], append(fields[1:], path)...)
 }
 
 // Save writes the edited tree back to disk atomically (tmp+rename), matching

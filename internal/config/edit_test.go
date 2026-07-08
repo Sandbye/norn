@@ -136,6 +136,22 @@ func TestEditDelete(t *testing.T) {
 	}
 }
 
+func TestEditorCommandSplitsArgs(t *testing.T) {
+	t.Setenv("EDITOR", "code --wait")
+	cmd := EditorCommand("/tmp/cfg.yaml")
+	if got := strings.Join(cmd.Args, " "); got != "code --wait /tmp/cfg.yaml" {
+		t.Errorf("args = %q, want %q", got, "code --wait /tmp/cfg.yaml")
+	}
+}
+
+func TestEditorCommandFallsBackToVi(t *testing.T) {
+	t.Setenv("EDITOR", "   ") // whitespace-only counts as unset
+	cmd := EditorCommand("/tmp/cfg.yaml")
+	if got := strings.Join(cmd.Args, " "); got != "vi /tmp/cfg.yaml" {
+		t.Errorf("args = %q, want %q", got, "vi /tmp/cfg.yaml")
+	}
+}
+
 func TestEditMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "sub", "config.yaml") // dir doesn't exist yet
