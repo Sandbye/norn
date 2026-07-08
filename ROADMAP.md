@@ -18,15 +18,16 @@ Derived from a 2026-06 landscape scan (worktree managers, agent orchestrators, C
 - **`shell-init`** — drift-proof cd integration (`eval "$(norn shell-init zsh)"`) + auto-reap of stale cd-target files.
 - **Session-log reconcile** — dashboard reflects live worktrees; dead/duplicate/main-checkout rows auto-pruned.
 - **Detached-HEAD guard** + **`text/template` prompt rendering** (both were open in the earlier robustness pass).
+- **Public launch (v0.1.0)** — VHS demo GIF + leaner README, Homebrew **cask** + tag-triggered release workflow, public repo + tap.
+- **CLI polish** — `--version`, explicit `norn create` verb, per-session model pick (`M`) + `agent.model`, `m` go-to-main, constant frame height, `$EDITOR` arg handling.
 
 ---
 
-## ▶ Next up (brand + distribution polish)
+## Backlog
 
-- [ ] **`many threads, one tree` tagline** on the frame (faint, bottom border).
-- [ ] **VHS demo GIF** for the README + eventual Homebrew tap. https://github.com/charmbracelet/vhs
-- [ ] **Homebrew tap formula** — `homebrew-tap` repo already exists.
-- [ ] **Config-dir rename** `~/.config/work` → `~/.config/norn` (+ `.work.yaml`, state, `~/.cache/work`, shell wrapper) with backward-compat fallback. Flagged high-risk/low-payoff; do only alongside a broader cleanup.
+The live backlog is tracked as **[GitHub Issues](https://github.com/Sandbye/norn/issues)**, grouped by `area/*` labels and **[Milestones](https://github.com/Sandbye/norn/milestones)** (a milestone = a release). New here? See **[good first issues](https://github.com/Sandbye/norn/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)** (themes, templates, small polish).
+
+**Deliberately out of scope** (over-engineering for a solo, one-agent-per-worktree setup): multi-agent "teams", peer-to-peer agent messaging, shared task lists with auto-dependency resolution. Those target *teams of agents coordinating on one feature*. Revisit only if running 5+ parallel agents on a single feature.
 
 ---
 
@@ -111,29 +112,6 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error)
 - **Verify:** run against a real PR where I left a comment that went outdated; confirm the comment renders next to the current code.
 
 **Deferred:** true side-by-side old|new rendering — only if unified+overlay proves insufficient.
-
----
-
-## Backlog
-
-### Tier 1 — high leverage, fits the setup
-- [ ] **Per-worktree lifecycle hooks** in `.work.yaml`: `on_create` / `pre_merge` / `post_merge` (auto-install deps, copy configs, run linter on spawn). Extends existing `verify`/`setup`.
-- [ ] **Build-artifact sharing across worktrees** — symlink/share heavy dirs (`node_modules`, `dist`, `target`) on create. Cuts disk + cold-start at ~20 worktrees.
-- [ ] **Port/env collision detection** — worktrees share the filesystem; two `pnpm dev` clash. Detect + auto-assign port ranges per worktree.
-
-### Tier 2 — nice, lower urgency
-- [ ] **`huh` forms** for the create flow — validated, themed hint+base picker (Charm, Bubble Tea v2 native). https://github.com/charmbracelet/huh
-- [ ] **More built-in themes / community palettes** — theme system + Settings picker are in place; adding a palette is a few lines in `styles.go`.
-- [ ] **Bubble Tea v2 "cursed renderer"** — faster, flicker-free dashboard re-renders. Adopt whenever rendering is next touched. https://charm.land/blog/v2/
-- [ ] **Conflict/risk surfacing in diff view** — flag when two live worktrees touch the same file/function before merge.
-
-### Tier 3 — deliberately skipped (over-engineering for solo)
-- Multi-agent "teams" / peer-to-peer agent messaging / shared task lists with auto-dependency resolution. These target *teams of agents coordinating on one feature*; not the one-dev-one-agent-per-task pattern. Revisit only if running 5+ parallel agents on a single feature.
-
-### Pre-existing (from earlier robustness pass, still open)
-- [ ] State-file lock (`state.Mutate` + flock) — concurrent `norn` writes can lose session rows.
-- [ ] Git-op timeouts (context) — bad network shouldn't hang the TUI.
-- [ ] Document `.work.yaml` as team-shareable per-repo config (committed).
 
 ---
 
