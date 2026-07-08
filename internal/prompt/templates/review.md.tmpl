@@ -1,5 +1,12 @@
 ---
 hint: {{printf "%q" .Hint}}
+{{- if .Task}}
+task: {{printf "%q" .Task.Title}}
+id: {{.Task.ID}}
+{{- if .Task.URL}}
+url: {{.Task.URL}}
+{{- end}}
+{{- end}}
 base: {{.Base}}
 created: {{.Generated}}
 ---
@@ -8,7 +15,17 @@ created: {{.Generated}}
 
 Isolated worktree to review a change. **Follow this repo's own conventions** (its `AGENTS.md` / `CLAUDE.md`, if present). The below is just the review context norn added.
 
-## Review
+{{if .Task}}## Task
+
+**{{.Task.Title}}** (`{{.Task.ID}}`){{if .Task.URL}} · {{.Task.URL}}{{end}}
+{{- if .Task.Description}}
+
+{{.Task.Description}}
+{{- end}}
+
+_Provided above, no need to re-fetch it._
+
+{{end}}## Review
 
 {{.HintBlock}}
 
