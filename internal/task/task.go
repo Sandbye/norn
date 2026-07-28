@@ -22,9 +22,10 @@ type Task struct {
 	ID          string // tracker id (issue number, ClickUp task id)
 	Title       string
 	URL         string
-	Kind        string // branch prefix hint: feature | fix | "" (unknown)
-	Description string // body / text content, baked into the worktree brief
-	Group       string // list / folder / space label, for grouping + filtering
+	Kind        string   // branch prefix hint: feature | fix | "" (unknown)
+	Description string   // body / text content, baked into the worktree brief
+	Group       string   // list / folder / space label, for grouping + filtering
+	Labels      []string // tracker labels, for display in the task view
 }
 
 // Provider lists candidate tasks for the current repo/workspace.
@@ -60,12 +61,17 @@ func (GitHub) List(ctx context.Context, repoRoot string) ([]Task, error) {
 	}
 	tasks := make([]Task, 0, len(raw))
 	for _, r := range raw {
+		labels := make([]string, 0, len(r.Labels))
+		for _, l := range r.Labels {
+			labels = append(labels, l.Name)
+		}
 		tasks = append(tasks, Task{
 			ID:          strconv.Itoa(r.Number),
 			Title:       r.Title,
 			URL:         r.URL,
 			Kind:        kindFromLabels(r.Labels),
 			Description: r.Body,
+			Labels:      labels,
 		})
 	}
 	return tasks, nil
