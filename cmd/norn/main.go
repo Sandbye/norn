@@ -60,7 +60,7 @@ func main() {
 			cmdProjectConfig(cfg, repoRoot)
 
 		case "context", "--context":
-			cmdContext(repoRoot)
+			cmdContext(cfg, repoRoot)
 			return
 		case "--templates":
 			cmdTemplates(cfg)
@@ -499,7 +499,7 @@ func cmdStatus(cfg config.Config, repoRoot string) {
 // to the rest of the tree. Read-only, sourced from the session store. Silent
 // (no output) outside a repo or when there are no sibling worktrees, so a hook
 // can inject its stdout unconditionally.
-func cmdContext(repoRoot string) {
+func cmdContext(cfg config.Config, repoRoot string) {
 	if repoRoot == "" {
 		return
 	}
@@ -535,6 +535,13 @@ func cmdContext(repoRoot string) {
 		return
 	}
 
+	// Files this worktree touches, to flag collisions with a sibling's set.
+	base := resolveBranchBase(cfg, repoRoot, "")
+	mine := map[string]struct{}{}
+	for _, f := range git.ChangedFiles(repoRoot, base) {
+		mine[f] = struct{}{}
+	}
+
 	fmt.Println("## Other active worktrees (this repo)")
 	fmt.Println()
 	for _, s := range sibs {
@@ -548,6 +555,30 @@ func cmdContext(repoRoot string) {
 		}
 		line += " · " + git.Age(s.LastActivityAt)
 		fmt.Println(line)
+
+		if len(mine) == 0 {
+			continue
+		}
+		var overlap []string
+		for _, f := range git.ChangedFiles(s.Path, base) {
+			if _, ok := mine[f]; ok {
+				overlap = append(overlap, f)
+			}
+		}
+		if len(overlap) == 0 {
+			continue
+		}
+		shown := overlap
+		extra := 0
+		if len(shown) > 6 {
+			extra = len(shown) - 6
+			shown = shown[:6]
+		}
+		msg := "    ⚠ overlaps: " + strings.Join(shown, ", ")
+		if extra > 0 {
+			msg += fmt.Sprintf(" (+%d more)", extra)
+		}
+		fmt.Println(msg)
 	}
 }
 
