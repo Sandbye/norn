@@ -58,6 +58,9 @@ func main() {
 			return
 		case "--project-config":
 			cmdProjectConfig(cfg, repoRoot)
+
+		case "context", "--context":
+			cmdContext(repoRoot)
 			return
 		case "--templates":
 			cmdTemplates(cfg)
@@ -488,6 +491,63 @@ func cmdStatus(cfg config.Config, repoRoot string) {
 			fmt.Printf("  Last:  %s (%s)\n", wt.CommitMsg, git.Age(wt.LastCommit))
 		}
 		fmt.Printf("  Path:  %s\n\n", wt.Path)
+	}
+}
+
+// cmdContext prints a compact digest of the OTHER active worktrees in the
+// current repo: what parallel threads are in flight, so a session isn't blind
+// to the rest of the tree. Read-only, sourced from the session store. Silent
+// (no output) outside a repo or when there are no sibling worktrees, so a hook
+// can inject its stdout unconditionally.
+func cmdContext(repoRoot string) {
+	if repoRoot == "" {
+		return
+	}
+	scope := originRepoName(repoRoot)
+	store, err := state.Load()
+	if err != nil || store == nil {
+		return
+	}
+	store.SortByActivity()
+
+	cur := repoRoot
+	if abs, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		cur = abs
+	}
+	var sibs []state.Session
+	for _, s := range store.Sessions {
+		if s.Repo != scope || s.Status != state.StatusActive {
+			continue
+		}
+		p := s.Path
+		if abs, err := filepath.EvalSymlinks(p); err == nil {
+			p = abs
+		}
+		if p == cur {
+			continue // this worktree
+		}
+		if git.CheckoutClass(s.Path) != "worktree" {
+			continue // gone / not a live worktree
+		}
+		sibs = append(sibs, s)
+	}
+	if len(sibs) == 0 {
+		return
+	}
+
+	fmt.Println("## Other active worktrees (this repo)")
+	fmt.Println()
+	for _, s := range sibs {
+		label := s.Title
+		if label == "" {
+			label = s.Branch
+		}
+		line := fmt.Sprintf("- %s  `%s`", label, s.Branch)
+		if s.PRNumber > 0 {
+			line += fmt.Sprintf(" · PR #%d", s.PRNumber)
+		}
+		line += " · " + git.Age(s.LastActivityAt)
+		fmt.Println(line)
 	}
 }
 
