@@ -51,6 +51,28 @@ func TestSettingsApplyStringAndClear(t *testing.T) {
 	}
 }
 
+func TestSettingsTaskProvider(t *testing.T) {
+	m := newTestSettings(t)
+	m.applyString([]string{"tasks", "provider"}, "github")
+	if v, ok := config.OpenEditorValue(m.activePath(), []string{"tasks", "provider"}); !ok || v != "github" {
+		t.Fatalf("tasks.provider = %q, %v", v, ok)
+	}
+
+	// Unset provider displays as "none", not blank.
+	var providerRow settingRow
+	for _, r := range settingRows() {
+		if strings.Join(r.keys, ".") == "tasks.provider" {
+			providerRow = r
+		}
+	}
+	if providerRow.choices[0] != "github" {
+		t.Fatalf("provider row missing/misconfigured: %+v", providerRow)
+	}
+	if got := resolvedDisplay(config.DefaultConfig(), providerRow); got != "none" {
+		t.Errorf("unset provider display = %q, want none", got)
+	}
+}
+
 func TestSettingsViewRenders(t *testing.T) {
 	m := newTestSettings(t)
 	out := m.View()
