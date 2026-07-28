@@ -38,6 +38,7 @@ func settingRows() []settingRow {
 		{"Worktrees", "pr_base", []string{"pr_base"}, kindString, nil},
 		{"Worktrees", "branch_base", []string{"branch_base"}, kindString, nil},
 		{"Templates", "template", []string{"template"}, kindPicker, nil},
+		{"Tasks", "provider", []string{"tasks", "provider"}, kindPicker, []string{"github", "clickup", "none"}},
 		{"Appearance", "theme", []string{"theme"}, kindPicker, nil},
 		{"Lists & policy", "base_branches", []string{"base_branches"}, kindEditor, nil},
 		{"Lists & policy", "verify", []string{"verify"}, kindEditor, nil},
@@ -186,6 +187,11 @@ func resolvedDisplay(cfg config.Config, r settingRow) string {
 			return cfg.Template
 		}
 		return "task"
+	case "tasks.provider":
+		if cfg.Tasks.Provider != "" {
+			return cfg.Tasks.Provider
+		}
+		return "none"
 	case "theme":
 		if cfg.Theme != "" {
 			return cfg.Theme
