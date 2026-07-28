@@ -50,6 +50,15 @@ type TaskRef struct {
 	Description string
 }
 
+// PRRef is the pull request a review worktree is checked out to, baked into the
+// review brief so the agent knows exactly what it's reviewing and against what.
+type PRRef struct {
+	Number int
+	Title  string
+	URL    string
+	Base   string // the PR's base branch — diff HEAD against this
+}
+
 // Data holds all values available to templates.
 type Data struct {
 	Kind      string // "task" or "review"
@@ -62,6 +71,7 @@ type Data struct {
 	Base      string // branch this worktree was forked from (diff baseline)
 	PRBase    string // default PR target (cfg.pr_base — may equal Base or differ)
 	Task      *TaskRef
+	PR        *PRRef // set for review worktrees (norn review <pr#>)
 	Generated string
 }
 
@@ -90,12 +100,38 @@ func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef) 
 		Generated: time.Now().Format("2006-01-02 15:04"),
 	}
 
-	// Try user override first: <templates dir>/<name>.md.tmpl
+	return renderNamed(tmplName, data)
+}
+
+// RenderReview renders the review brief for a PR-checkout worktree (norn review
+// <pr#>). `tmpl` is the template name (empty → "review"); a user override of
+// that name still wins over the built-in.
+func RenderReview(cfg config.Config, tmpl string, pr *PRRef) (string, error) {
+	if tmpl == "" {
+		tmpl = "review"
+	}
+	data := Data{
+		Kind:      "review",
+		Hint:      pr.Title,
+		HintBlock: hintBlock("review", pr.Title),
+		User:      cfg.User,
+		ClickUp:   cfg.ClickUp,
+		Verify:    cfg.Verify,
+		Setup:     cfg.Setup,
+		Base:      pr.Base,
+		PRBase:    cfg.PRBase,
+		PR:        pr,
+		Generated: time.Now().Format("2006-01-02 15:04"),
+	}
+	return renderNamed(tmpl+".md.tmpl", data)
+}
+
+// renderNamed loads a template by filename — user override dir first, then the
+// embedded built-in — and renders it with data.
+func renderNamed(tmplName string, data Data) (string, error) {
 	if content, err := os.ReadFile(filepath.Join(userTemplateDir(), tmplName)); err == nil {
 		return render(string(content), tmplName, data)
 	}
-
-	// Fall back to embedded
 	content, err := embedded.ReadFile("templates/" + tmplName)
 	if err != nil {
 		return "", fmt.Errorf("template %q not found: %w", tmplName, err)

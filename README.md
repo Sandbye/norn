@@ -43,11 +43,12 @@ norn is one tabbed TUI. `Tab` / `1`-`4` switch tabs, `?` shows keys, `esc` backs
 ```sh
 norn                      # the TUI
 norn create "add caching" # new worktree + branch, launch a session
+norn review 42            # check out PR #42 into a worktree, agent reviews it
 norn diff                 # review uncommitted changes (or: --base, <pr#>)
 norn --help               # everything
 ```
 
-The **diff** viewer does uncommitted changes, branch-vs-base, or any open PR, with split view and syntax highlighting. `norn diff <pr#> --since-review` overlays your own review comments next to the current code.
+**`norn review <pr#>`** checks the PR's branch out into a worktree and launches the agent on the real code, so it can read, run, and comment on the actual change (fork PRs included). For a quick read without a worktree, the **diff** viewer does uncommitted changes, branch-vs-base, or any open PR, with split view and syntax highlighting; `norn diff <pr#> --since-review` overlays your own review comments next to the current code.
 
 ## Configuration
 
