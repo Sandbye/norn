@@ -504,18 +504,41 @@ func (d Dashboard) View() string {
 	// one outer style for cursor / dead state. This keeps padding correct —
 	// ANSI escape codes are invisible to rune counts.
 	const (
-		branchW   = 24
-		kindW     = 8
-		clickupW  = 12
-		prW       = 12
-		statusW   = 14
-		activityW = 10
+		kindW     = 7
+		clickupW  = 11
+		prW       = 9
+		statusW   = 9
+		activityW = 9
 	)
-	// TITLE flexes to fill the remaining terminal width so the fixed columns
-	// stay put; joinCells truncates it with `…` when the task name is long.
-	titleW := max(d.width-(branchW+kindW+clickupW+prW+statusW+activityW), 20)
-	colWidths := []int{branchW, titleW, kindW, clickupW, prW, statusW, activityW}
-	headers := []string{"BRANCH", "TITLE", "KIND", "CU", "PR", "STATUS", "LAST"}
+	// Size the table to the panel frame() renders into, NOT the full terminal:
+	// inner = min(frameWidth, width-8), minus the 3-col horizontal padding each
+	// side. Overshooting here makes every row wrap. The small columns are fixed;
+	// BRANCH and TITLE flex to fill exactly what's left, so the table always fits.
+	avail := frameWidth - 6
+	if d.width > 0 {
+		if inner := d.width - 8; inner < frameWidth {
+			avail = inner - 6
+		}
+	}
+	smallFixed := kindW + clickupW + prW + statusW + activityW
+	remaining := max(avail-smallFixed, 8)
+
+	// Give TITLE the space beyond a 24-col branch when there's room for both;
+	// on a panel too narrow, drop TITLE and let BRANCH take the remainder.
+	branchW := remaining
+	titleW := 0
+	showTitle := remaining >= 24+10
+	if showTitle {
+		branchW = 24
+		titleW = remaining - 24
+	}
+
+	colWidths := []int{branchW, kindW, clickupW, prW, statusW, activityW}
+	headers := []string{"BRANCH", "KIND", "CU", "PR", "STATUS", "LAST"}
+	if showTitle {
+		colWidths = []int{branchW, titleW, kindW, clickupW, prW, statusW, activityW}
+		headers = []string{"BRANCH", "TITLE", "KIND", "CU", "PR", "STATUS", "LAST"}
+	}
 
 	hdrStyle := lipgloss.NewStyle().Bold(true).Foreground(colorText)
 	headerLine := joinCells(headers, colWidths)
@@ -526,15 +549,17 @@ func (d Dashboard) View() string {
 	var rows []string
 	rows = append(rows, headerRow)
 	for i, r := range vis {
-		cells := []string{
-			r.Branch,
-			r.Title,
+		cells := []string{r.Branch}
+		if showTitle {
+			cells = append(cells, r.Title)
+		}
+		cells = append(cells,
 			r.Kind,
 			clickupCell(r.ClickUpID),
 			prCell(r),
 			statusCell(r),
 			shortAge(r.LastActivityAt),
-		}
+		)
 		line := joinCells(cells, colWidths)
 		switch {
 		case i == d.cursor:
