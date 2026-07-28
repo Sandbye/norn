@@ -58,16 +58,23 @@ type createModel struct {
 // visibleTasks narrows + ranks tasks by the picker filter (matches the
 // list/folder group and the title), so typing a list name scopes the list.
 func (m createModel) visibleTasks() []task.Task {
-	if m.taskFilter.query == "" {
-		return m.tasks
+	return filterTasks(m.tasks, m.taskFilter.query)
+}
+
+// filterTasks fuzzy-ranks tasks by group + title against query, best first.
+// Empty query returns the tasks unchanged. Shared by the New-tab picker and
+// the Tasks tab so both filter identically.
+func filterTasks(tasks []task.Task, query string) []task.Task {
+	if query == "" {
+		return tasks
 	}
 	type scored struct {
 		t     task.Task
 		score int
 	}
 	var hits []scored
-	for _, t := range m.tasks {
-		if s, ok := fuzzyScore(m.taskFilter.query, t.Group+" "+t.Title); ok {
+	for _, t := range tasks {
+		if s, ok := fuzzyScore(query, t.Group+" "+t.Title); ok {
 			hits = append(hits, scored{t, s})
 		}
 	}
@@ -77,6 +84,23 @@ func (m createModel) visibleTasks() []task.Task {
 		out[i] = h.t
 	}
 	return out
+}
+
+// withTask seeds the create form from a task chosen elsewhere (the Tasks tab):
+// same effect as picking it in the inline picker, so all creation logic is
+// reused. Lands on the base-branch step, or confirms straight away when there's
+// only one base.
+func (m createModel) withTask(t task.Task) createModel {
+	m.hint = fmt.Sprintf("#%s %s", t.ID, t.Title)
+	tt := t
+	m.selectedTask = &tt
+	if len(m.baseBranches) == 1 {
+		m.baseBranch = m.baseBranches[0]
+		m.confirmed = true
+	} else {
+		m.step = stepBase
+	}
+	return m
 }
 
 type taskLoadedMsg struct {

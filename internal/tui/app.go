@@ -18,6 +18,7 @@ type View int
 
 const (
 	ViewThreads  View = iota // dashboard (home tab)
+	ViewTasks                // tracker tasks browser (tab: Tasks)
 	ViewCreate               // new worktree (tab: New)
 	ViewClean                // prune (tab)
 	ViewSettings             // config (tab)
@@ -26,12 +27,14 @@ const (
 
 // appTabs is the top-level tab order (left to right). ViewCd is intentionally
 // absent — it's a CLI-only picker, not part of the tabbed hub.
-var appTabs = []View{ViewThreads, ViewCreate, ViewClean, ViewSettings}
+var appTabs = []View{ViewThreads, ViewTasks, ViewCreate, ViewClean, ViewSettings}
 
 func tabLabel(v View) string {
 	switch v {
 	case ViewThreads:
 		return "Threads"
+	case ViewTasks:
+		return "Tasks"
 	case ViewCreate:
 		return "New"
 	case ViewClean:
@@ -77,6 +80,7 @@ type App struct {
 	current  View
 
 	dashboard Dashboard
+	tasks     tasksModel
 	clean     cleanModel
 	create    createModel
 	cd        cdModel
@@ -118,6 +122,7 @@ func NewApp(cfg config.Config, repoRoot, scope string, initialView View) App {
 		scope:     scope,
 		current:   initialView,
 		dashboard: NewDashboard(cfg, scope),
+		tasks:     newTasksModel(cfg, repoRoot, scope),
 		clean:     newCleanModel(),
 		create:    newCreateFor(cfg, repoRoot),
 		cd:        newCdModel(),
@@ -211,6 +216,8 @@ func (a App) capturing() bool {
 	switch a.current {
 	case ViewThreads:
 		return a.dashboard.filter.active || a.dashboard.showSummary || a.dashboard.confirmDrop
+	case ViewTasks:
+		return a.tasks.filter.active
 	case ViewCreate:
 		return a.create.focused || a.create.pickingTask // capture while typing or picking
 	case ViewClean:
@@ -241,6 +248,11 @@ func (a App) gotoTab(v View) (App, tea.Cmd) {
 	switch v {
 	case ViewThreads:
 		return a, a.dashboard.Init() // refresh + restart the live tick
+	case ViewTasks:
+		a.tasks = newTasksModel(a.cfg, a.repoRoot, a.scope)
+		a.tasks.width, a.tasks.height = a.width, a.height
+		a.tasks.loading = a.tasks.provider != nil
+		return a, a.tasks.Init()
 	case ViewCreate:
 		a.create = newCreateFor(a.cfg, a.repoRoot)
 		a.create.width, a.create.height = a.width, a.height
@@ -262,6 +274,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, c2 = a.settings.Update(msg)
 		a.settings = m.(settingsModel)
 		a.create, _ = a.create.Update(msg)
+		a.tasks, _ = a.tasks.Update(msg)
 		return a, tea.Batch(c1, c2)
 
 	case worktreesLoadedMsg:
@@ -316,7 +329,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a.gotoTab(a.nextTab())
 			case "shift+tab":
 				return a.gotoTab(a.prevTab())
-			case "1", "2", "3", "4":
+			case "1", "2", "3", "4", "5":
 				if i := int(msg.String()[0] - '1'); i < len(appTabs) {
 					return a.gotoTab(appTabs[i])
 				}
@@ -381,6 +394,22 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
+	case ViewTasks:
+		a.tasks, cmd = a.tasks.Update(msg)
+		if a.tasks.chosen != nil {
+			t := *a.tasks.chosen
+			a.tasks.chosen = nil
+			c := newCreateFor(a.cfg, a.repoRoot)
+			c.width, c.height = a.width, a.height
+			c = c.withTask(t)
+			a.create = c
+			a.current = ViewCreate
+			if a.create.confirmed {
+				return a, createWorktree(a.cfg, a.repoRoot, a.create.kind, a.create.hint, a.create.baseBranch, a.create.template, a.create.model, taskRefOf(a.create.selectedTask))
+			}
+			return a, nil
+		}
+
 	case ViewCreate:
 		a.create, cmd = a.create.Update(msg)
 		if a.create.confirmed {
@@ -438,6 +467,11 @@ func helpFor(v View) []keyHint {
 			{"p", "open PR"}, {"t", "open task"}, {"d", "drop session"},
 			{"/", "filter"}, {"a", "all repos"}, {"r", "refresh"}, {"j/k g/G", "move"},
 		}
+	case ViewTasks:
+		return []keyHint{
+			{"⏎", "worktree from task"}, {"o", "open in browser"}, {"/", "filter"},
+			{"r", "refresh"}, {"j/k", "move"}, {"esc", "back"},
+		}
 	case ViewCreate:
 		return []keyHint{{"⏎", "start typing / confirm"}, {"T", "pick a task"}, {"t", "change template"}, {"M", "change model"}, {"↑/↓", "pick base branch"}, {"esc", "cancel"}}
 	case ViewClean:
@@ -459,7 +493,7 @@ func renderHelp(current View) string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("norn · keys") + "\n\n")
 	b.WriteString(subtitleStyle.Render("Navigate") + "\n")
-	b.WriteString("  " + keyStyle.Render("⇥ / ⇧⇥ / 1-4") + dimStyle.Render("  switch tab") + "\n")
+	b.WriteString("  " + keyStyle.Render("⇥ / ⇧⇥ / 1-5") + dimStyle.Render("  switch tab") + "\n")
 	b.WriteString("  " + keyStyle.Render("esc") + dimStyle.Render("  back to Threads") + "\n")
 	b.WriteString("  " + keyStyle.Render("m") + dimStyle.Render("  cd to the main checkout") + "\n")
 	b.WriteString("  " + keyStyle.Render("q") + dimStyle.Render("  quit") + "\n\n")
@@ -484,6 +518,8 @@ func (a App) View() string {
 	switch a.current {
 	case ViewThreads:
 		body = a.dashboard.View()
+	case ViewTasks:
+		body = a.tasks.View()
 	case ViewClean:
 		body = a.clean.View()
 	case ViewCreate:
