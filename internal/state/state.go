@@ -62,26 +62,49 @@ func Load() (*Store, error) {
 		return &s, nil
 	}
 	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", p, err)
+		// Don't brick on a corrupt file: move it aside and start fresh. The
+		// dashboard reconciles against live worktrees, so the rows rebuild.
+		_ = os.Rename(p, p+".corrupt")
+		return &Store{}, nil
 	}
 	return &s, nil
 }
 
-// Save writes the store atomically via tmp+rename.
+// Save writes the store atomically via a unique temp file + rename. A unique
+// temp (not a fixed "<p>.tmp") matters: multiple norn processes write this file
+// concurrently (the TUI plus per-tool-call activity-tick hooks), and a shared
+// temp path lets their writes interleave and corrupt it. Each writer getting
+// its own temp + an atomic rename means a reader always sees a whole document
+// (last writer wins; no interleaving).
 func (s *Store) Save() error {
 	p := Path()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, ".sessions-*.json")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, p); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // Find returns the session with the matching id, or nil.
