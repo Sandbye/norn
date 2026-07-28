@@ -214,7 +214,7 @@ func (a App) capturing() bool {
 	case ViewCreate:
 		return a.create.focused || a.create.pickingTask // capture while typing or picking
 	case ViewClean:
-		return a.clean.filter.active || a.clean.confirming
+		return a.clean.filter.active || a.clean.confirming || a.clean.showResults
 	case ViewSettings:
 		return a.settings.mode != sModeList
 	case ViewCd:
@@ -342,20 +342,31 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ViewClean:
 		a.clean, cmd = a.clean.Update(msg)
+		if a.clean.dismissed {
+			// User acknowledged the result summary → back to Threads.
+			a.clean = newCleanModel()
+			return a.gotoTab(ViewThreads)
+		}
 		if a.clean.done {
+			var outcomes []git.RemoveOutcome
 			for _, wt := range a.clean.toRemove {
-				git.RemoveWorktree(a.repoRoot, wt.Path, wt.Branch)
+				// merged/gone → norn already confirmed the branch is safe to force-delete.
+				outcomes = append(outcomes, git.RemoveWorktree(a.repoRoot, wt.Path, wt.Branch, wt.Merged || wt.RemoteGone))
 			}
 			git.CleanEmptyDirs(a.cfg.WorktreeDir)
-			// If we just deleted the worktree we're standing in, don't strand the
+			// If we just removed the worktree we're standing in, don't strand the
 			// shell there — cd to the main checkout and exit.
 			if a.mainDir != "" && git.CheckoutClass(a.repoRoot) == "dead" {
 				a.quit = true
 				a.result = Result{Action: ResultCd, Path: a.mainDir}
 				return a, tea.Quit
 			}
+			// Show the result summary in Clean (any key returns to Threads),
+			// instead of leaking git output under the TUI.
 			a.clean = newCleanModel()
-			return a.gotoTab(ViewThreads)
+			a.clean.showResults = true
+			a.clean.results = outcomes
+			return a, nil
 		}
 
 	case ViewCreate:
