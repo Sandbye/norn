@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -298,6 +299,43 @@ func IsDirty(wtPath string) bool {
 		return false
 	}
 	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// ChangedFiles returns the sorted set of repo-relative paths this worktree
+// touches: files that differ from base (committed since the fork point via
+// `base...HEAD`) plus anything uncommitted or untracked. Best-effort — a
+// failing git call contributes nothing rather than erroring the caller.
+func ChangedFiles(wtPath, base string) []string {
+	set := map[string]struct{}{}
+	if base != "" {
+		if out, err := exec.Command("git", "-C", wtPath, "diff", "--name-only", base+"...HEAD").Output(); err == nil {
+			for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if l != "" {
+					set[l] = struct{}{}
+				}
+			}
+		}
+	}
+	if out, err := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output(); err == nil {
+		for _, l := range strings.Split(string(out), "\n") {
+			if len(l) < 4 {
+				continue // "XY path" — need at least a status pair + a path
+			}
+			p := strings.TrimSpace(l[3:])
+			if i := strings.Index(p, " -> "); i >= 0 {
+				p = p[i+4:] // rename "old -> new": the new path is what's touched
+			}
+			if p != "" {
+				set[p] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // RemoveOutcome reports what RemoveWorktree actually did for one worktree, so
