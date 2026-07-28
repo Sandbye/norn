@@ -1,32 +1,28 @@
 ---
-hint: {{printf "%q" .Hint}}
-{{- if .Task}}
-task: {{printf "%q" .Task.Title}}
-id: {{.Task.ID}}
-{{- if .Task.URL}}
-url: {{.Task.URL}}
-{{- end}}
+{{- if .PR}}
+pr: {{.PR.Number}}
+title: {{printf "%q" .PR.Title}}
+url: {{.PR.URL}}
 {{- end}}
 base: {{.Base}}
 created: {{.Generated}}
 ---
 
-# Review · {{.Hint | default "PR review"}}
+# Review · {{if .PR}}PR #{{.PR.Number}} — {{.PR.Title}}{{else}}{{.Hint | default "PR review"}}{{end}}
 
-Isolated worktree to review a change. **Follow this repo's own conventions** (its `AGENTS.md` / `CLAUDE.md`, if present). The below is just the review context norn added.
+This worktree is checked out to the PR branch. **Follow this repo's own conventions** (its `AGENTS.md` / `CLAUDE.md`, if present). Below is just the review context norn added.
 
-{{if .Task}}## Task
+{{if .PR}}## Under review
 
-**{{.Task.Title}}** (`{{.Task.ID}}`){{if .Task.URL}} · {{.Task.URL}}{{end}}
-{{- if .Task.Description}}
+**PR #{{.PR.Number}} — {{.PR.Title}}**{{if .PR.URL}} · {{.PR.URL}}{{end}}
 
-{{.Task.Description}}
-{{- end}}
+Review the diff of this PR against `{{.PR.Base}}`:
 
-_Provided above, no need to re-fetch it._
-
-{{end}}## Review
+    git diff {{.PR.Base}}...HEAD
+{{else}}## Review
 
 {{.HintBlock}}
 
-Read the diff against `{{.Base}}` and weigh: correctness, consistency with the surrounding code, tests, security, and completeness. Leave findings as review comments rather than changing the code.
+Read the diff against `{{.Base}}`.
+{{end}}
+Weigh: correctness, consistency with surrounding code, tests, security, completeness. Read surrounding code for context, don't review diffs in isolation. **Leave findings as review comments; change no code.**

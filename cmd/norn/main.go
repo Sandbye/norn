@@ -102,7 +102,7 @@ func main() {
 			plain := false
 			list := false
 			sinceReview := false
-			baseFlag := false
+			working := false
 			prNum := ""
 			baseOverride := ""
 			diffArgs := args[1:]
@@ -113,20 +113,19 @@ func main() {
 					plain = true
 				case a == "--list" || a == "-l":
 					list = true
+				case a == "--working" || a == "--wip" || a == "-w":
+					working = true
 				case a == "--since-review":
 					sinceReview = true
 				case a == "--base" || a == "-b":
-					baseFlag = true
-					// `--base <ref>` — peek next arg (may be omitted → pr_base).
-					if i+1 < len(diffArgs) {
+					// `--base <ref>` — peek next arg (may be omitted → fork base).
+					if i+1 < len(diffArgs) && !strings.HasPrefix(diffArgs[i+1], "-") {
 						baseOverride = diffArgs[i+1]
 						i++
 					}
 				case strings.HasPrefix(a, "--base="):
-					baseFlag = true
 					baseOverride = strings.TrimPrefix(a, "--base=")
 				case strings.HasPrefix(a, "-b="):
-					baseFlag = true
 					baseOverride = strings.TrimPrefix(a, "-b=")
 				case strings.HasPrefix(a, "#"):
 					prNum = strings.TrimPrefix(a, "#")
@@ -142,16 +141,16 @@ func main() {
 				cmdDiffPR(cfg, repoRoot, prNum, plain, sinceReview)
 				return
 			}
-			// Bare `work diff` → current uncommitted changes. `--base` (with or
-			// without a ref) → compare against a base ref / pr_base.
-			cmdDiff(cfg, repoRoot, plain, baseOverride, !baseFlag)
+			// Bare `norn diff` → the whole branch (fork base ...HEAD, committed,
+			// pushed or not). `-w`/`--working` → just current uncommitted changes.
+			// `--base [ref]` → compare against a specific ref instead of the fork base.
+			cmdDiff(cfg, repoRoot, plain, baseOverride, working)
 			return
 		case "create", "new", "c":
 			runCreate(cfg, repoRoot, args[1:])
 			return
-		case "--review":
-			// Back-compat alias: `norn --review "hint"` → `norn create --review …`.
-			runCreate(cfg, repoRoot, args)
+		case "review":
+			runReview(cfg, repoRoot, args[1:])
 			return
 		case "init":
 			cmdInit(repoRoot)
@@ -308,27 +307,23 @@ func aiResolveBranch(cfg config.Config, repoRoot, kind, hint string) string {
 	return branch
 }
 
-// runCreate handles `norn create [--review] [--from x] [--template y] "hint"`.
-// createArgs is everything after the `create` verb. A bare `norn create` (no
-// hint) opens the New tab instead of creating blindly.
+// runCreate handles `norn create [--from x] [--template y] "hint"`. createArgs
+// is everything after the `create` verb. A bare `norn create` (no hint) opens
+// the New tab instead of creating blindly. (PR review is its own verb: `norn
+// review <pr#>`.)
 func runCreate(cfg config.Config, repoRoot string, createArgs []string) {
 	if repoRoot == "" {
 		fmt.Fprintln(os.Stderr, "error: not inside a git repository")
 		os.Exit(1)
 	}
 	baseOverride, templateOverride, rest := extractCreateFlags(createArgs)
-	kind := "task"
-	if len(rest) > 0 && rest[0] == "--review" {
-		kind = "review"
-		rest = rest[1:]
-	}
 	hint := strings.Join(rest, " ")
 	if strings.TrimSpace(hint) == "" {
 		// No hint given → let the user compose it in the New tab.
 		runApp(cfg, repoRoot, tui.ViewCreate)
 		return
 	}
-	directCreate(cfg, repoRoot, kind, hint, baseOverride, templateOverride)
+	directCreate(cfg, repoRoot, "task", hint, baseOverride, templateOverride)
 }
 
 func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templateOverride string) {
@@ -369,6 +364,85 @@ func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templat
 
 	clearScreen()
 	tui.LaunchAgent(cfg.Agent, wtPath, false, "") // config default model
+}
+
+// runReview handles `norn review <pr#>`: check the PR's head out into a
+// worktree and launch the agent with a PR-aware review brief. Read-only: the
+// branch is never pushed and the brief tells the agent to comment, not commit.
+func runReview(cfg config.Config, repoRoot string, reviewArgs []string) {
+	if repoRoot == "" {
+		fmt.Fprintln(os.Stderr, "error: not inside a git repository")
+		os.Exit(1)
+	}
+	if len(reviewArgs) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: norn review <pr#>")
+		os.Exit(1)
+	}
+	prNum := strings.TrimPrefix(strings.TrimSpace(reviewArgs[0]), "#")
+	if !isAllDigits(prNum) {
+		fmt.Fprintf(os.Stderr, "error: %q is not a PR number\n", reviewArgs[0])
+		os.Exit(1)
+	}
+
+	pr, err := fetchReviewPR(repoRoot, prNum)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	branch := fmt.Sprintf("review/pr-%d", pr.Number)
+	wtPath := filepath.Join(cfg.WorktreeDir, branch)
+
+	if _, statErr := os.Stat(wtPath); statErr == nil {
+		// Already reviewing this PR — just jump back into the existing worktree.
+		fmt.Printf("Review worktree for PR #%d already exists at %s\n", pr.Number, wtPath)
+	} else {
+		fmt.Printf("Reviewing PR #%d: %s (base: %s)\n", pr.Number, pr.Title, pr.Base)
+		if err := git.FetchPRHead(repoRoot, prNum, branch); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		wtPath, err = git.AddWorktreeFromRef(repoRoot, cfg.WorktreeDir, branch)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		_ = git.SymlinkEnvFiles(repoRoot, wtPath)
+
+		promptText, rerr := prompt.RenderReview(cfg, "", &pr)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not render review brief: %v\n", rerr)
+		}
+		if werr := os.WriteFile(wtPath+"/.worktree.md", []byte(promptText), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write brief: %v\n", werr)
+		}
+	}
+
+	upsertSession(repoRoot, "review", branch, wtPath, pr.Title)
+	writeCdTarget(wtPath)
+
+	clearScreen()
+	tui.LaunchAgent(cfg.Agent, wtPath, false, "")
+}
+
+// fetchReviewPR resolves the PR fields needed for a review worktree + brief.
+func fetchReviewPR(repoRoot, prNum string) (prompt.PRRef, error) {
+	cmd := exec.Command("gh", "pr", "view", prNum, "--json", "number,title,url,baseRefName")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return prompt.PRRef{}, fmt.Errorf("gh pr view #%s (is gh installed + authed, and does this PR exist on origin?): %w", prNum, err)
+	}
+	var raw struct {
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		URL         string `json:"url"`
+		BaseRefName string `json:"baseRefName"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return prompt.PRRef{}, fmt.Errorf("parse pr view: %w", err)
+	}
+	return prompt.PRRef{Number: raw.Number, Title: raw.Title, URL: raw.URL, Base: raw.BaseRefName}, nil
 }
 
 // writeCdTarget records the path the shell wrapper should `cd` into after the
@@ -823,7 +897,7 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 		os.Exit(1)
 	}
 
-	// Bare `work diff` → current uncommitted changes (staged + unstaged vs HEAD).
+	// `-w`/`--working` → current uncommitted changes (staged + unstaged vs HEAD).
 	if working {
 		numstat, _ := gitOutput(repoRoot, "git", "diff", "--numstat", "HEAD")
 		files := parseNumstat(numstat)
@@ -852,7 +926,9 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 
 	// Resolve the diff base. `--base <ref>` wins outright (lets the user point
 	// at any local or remote ref — `master`, `origin/HEAD`, `feature/foo`,
-	// `@{u}`, etc.). Otherwise fall back to the PR target from config.
+	// `@{u}`, etc.). Otherwise default to the branch's fork base, so the diff is
+	// the whole branch: everything from where it forked to HEAD, committed,
+	// pushed or not.
 	var ref, target string
 	if baseOverride != "" {
 		ref = baseOverride
@@ -860,12 +936,17 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 		// just the branch name.
 		target = strings.TrimPrefix(baseOverride, "origin/")
 	} else {
-		target = resolvePRTarget(cfg, branch)
+		target = resolveBranchBase(cfg, repoRoot, "")
 		if target == "" {
-			fmt.Fprintln(os.Stderr, "error: no pr_base or base_branches configured (use --base <ref> to override)")
+			fmt.Fprintln(os.Stderr, "error: no branch_base/pr_base configured (use --base <ref> to override)")
 			os.Exit(1)
 		}
-		ref = "origin/" + target
+		// The fork commit lives on the local base ref; fall back to origin/ if
+		// the base branch isn't checked out locally.
+		ref = target
+		if !refExists(repoRoot, ref) && refExists(repoRoot, "origin/"+target) {
+			ref = "origin/" + target
+		}
 	}
 	if branch == target {
 		fmt.Printf("On %s — nothing to compare.\n", target)
@@ -881,6 +962,14 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 
 	numstat, _ := gitOutput(repoRoot, "git", "diff", "--numstat", ref+"...HEAD")
 	files := parseNumstat(numstat)
+
+	if len(files) == 0 {
+		fmt.Printf("No committed changes vs %s.\n", target)
+		if wip, _ := gitOutput(repoRoot, "git", "diff", "--numstat", "HEAD"); strings.TrimSpace(wip) != "" {
+			fmt.Println("(you have uncommitted changes — see them with `norn diff -w`)")
+		}
+		return
+	}
 
 	if plain {
 		printDiffPlain(target, commitCount, files, warn)
@@ -998,6 +1087,12 @@ func resolvePRTarget(cfg config.Config, branchName string) string {
 		return cfg.HotfixTarget
 	}
 	return resolvePRBase(cfg)
+}
+
+// refExists reports whether a git ref (branch, remote-tracking, sha) resolves.
+func refExists(repoRoot, ref string) bool {
+	_, err := gitOutput(repoRoot, "git", "rev-parse", "--verify", "--quiet", ref)
+	return err == nil
 }
 
 func gitOutput(dir string, name string, args ...string) (string, error) {
@@ -1907,7 +2002,7 @@ Usage:
                           Override base branch for this worktree
   norn create "hint" --template <name>, -t <name>
                           Use a specific prompt template for this worktree
-  norn create --review "hint"  Create review worktree
+  norn review <pr#>       Check out a PR into a worktree + launch the agent to review it
   norn --clean            Open on the Clean tab
   norn settings           Open on the Settings tab
   norn --cd               Jump into a worktree shell (picker)
@@ -1919,9 +2014,11 @@ Usage:
   norn template edit [name]  Customize a template in $EDITOR (default: task)
   norn auth [provider]    Connect an integration (ClickUp, …) for the task picker
   norn shell-init [shell]  Print the cd wrapper: eval "$(norn shell-init zsh)"
-  norn diff               TUI diff of current uncommitted changes (working tree)
-  norn diff --base [ref]  Compare committed branch vs a base: no ref = pr_base,
-                          or any local/remote ref (origin/HEAD, master, @{u}, …)
+  norn diff               TUI diff of the whole branch: fork base → HEAD
+                          (every commit since the branch was created, pushed or not)
+  norn diff -w, --working  Just current uncommitted changes (working tree)
+  norn diff --base [ref]  Compare against a specific ref instead of the fork base
+                          (origin/HEAD, master, @{u}, another branch, …)
   norn diff <pr#>         TUI diff of any open PR (yours or colleague's)
   norn diff <pr#> --since-review
                           Diff from your last review's commit to HEAD, with your

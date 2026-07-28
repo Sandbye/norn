@@ -277,11 +277,7 @@ func (m createModel) updateTaskPicker(s string) (createModel, tea.Cmd) {
 func (m createModel) View() string {
 	var b strings.Builder
 
-	kindLabel := kindTaskStyle.Render("New task")
-	if m.kind == "review" {
-		kindLabel = kindReviewStyle.Render("New review")
-	}
-	b.WriteString(headerStyle.Render(kindLabel))
+	b.WriteString(headerStyle.Render(kindTaskStyle.Render("New task")))
 	b.WriteString("\n")
 
 	if m.pickingTask {
