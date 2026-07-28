@@ -257,9 +257,9 @@ func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) 
 	// Without this, the dashboard's PR lookup and `work diff` against origin/<branch>
 	// produce false negatives until the user pushes manually. Best-effort:
 	// failures don't block worktree creation (offline / auth issues happen).
-	if err := cmdRun(wtPath, "git", "push", "-u", "origin", branch, "--quiet"); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: initial push of %s failed: %v\n", branch, err)
-	}
+	// Silent on failure (offline / auth): printing here would leak under the
+	// TUI, and the branch works locally until the next push.
+	_ = cmdRun(wtPath, "git", "push", "-u", "origin", branch, "--quiet")
 
 	return wtPath, nil
 }
@@ -675,9 +675,16 @@ func cmdOutput(dir string, name string, args ...string) (string, error) {
 func cmdRun(dir string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	// Capture git's chatter rather than letting it bleed onto the terminal /
+	// under the TUI (worktree create/remove, fetch, push are all plumbing).
+	// Fold any output into the error so failures stay useful.
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if o := strings.TrimSpace(string(out)); o != "" {
+			return fmt.Errorf("%w: %s", err, o)
+		}
+		return err
+	}
+	return nil
 }
 
 // captureRun runs a command capturing combined stdout+stderr instead of letting
