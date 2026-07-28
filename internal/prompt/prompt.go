@@ -286,6 +286,11 @@ func render(tmplStr, name string, data Data) (string, error) {
 // frontmatterHint reads the `hint:` field from a leading YAML frontmatter block.
 var frontmatterHintRegex = regexp.MustCompile(`(?m)^hint:\s*(.+)$`)
 
+// frontmatterTitleRegex reads the human task title: `title:` if present (what a
+// later start-task writeback sets), else `task:` (what the task template writes
+// when a ClickUp task is known at create time).
+var frontmatterTitleRegex = regexp.MustCompile(`(?m)^(?:title|task):\s*(.+)$`)
+
 // hintMarkerRegex matches the legacy prose markers `Hint: "..."` /
 // `Review hint: "..."` for .worktree.md files written before frontmatter.
 var hintMarkerRegex = regexp.MustCompile(`(?:Review hint|Hint):\s*"([^"]*)"`)
@@ -309,6 +314,26 @@ func ExtractHint(content string) string {
 	}
 	if m := hintMarkerRegex.FindStringSubmatch(content); m != nil {
 		return m[1]
+	}
+	return ""
+}
+
+// ExtractTitle recovers the human task title from a rendered .worktree.md so the
+// dashboard can label a row by what the task actually is, not just the branch.
+// Reads the frontmatter `title:`/`task:` field. Returns "" if none (bare-hint
+// worktrees have no title until start-task resolves + writes one back).
+func ExtractTitle(content string) string {
+	if strings.HasPrefix(content, "---") {
+		if end := strings.Index(content[3:], "\n---"); end >= 0 {
+			fm := content[3 : 3+end]
+			if m := frontmatterTitleRegex.FindStringSubmatch(fm); m != nil {
+				v := strings.TrimSpace(m[1])
+				if unq, err := strconv.Unquote(v); err == nil {
+					return unq
+				}
+				return strings.Trim(v, `"`)
+			}
+		}
 	}
 	return ""
 }

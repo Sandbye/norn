@@ -25,9 +25,10 @@ type Session struct {
 	Branch         string    `json:"branch"`          // full branch name
 	Kind           string    `json:"kind"`            // task | review
 	Path           string    `json:"path"`            // worktree absolute path
+	Title          string    `json:"title,omitempty"` // human task title, sourced from .worktree.md
 	ClickUpID      string    `json:"clickup_id,omitempty"`
 	PRNumber       int       `json:"pr_number,omitempty"`
-	Status         string    `json:"status"`          // active | merged | abandoned
+	Status         string    `json:"status"` // active | merged | abandoned
 	StartedAt      time.Time `json:"started_at"`
 	LastActivityAt time.Time `json:"last_activity_at"`
 	Blockers       []string  `json:"blockers,omitempty"`
@@ -121,6 +122,9 @@ func (s *Store) Find(id string) *Session {
 func (s *Store) Upsert(sess Session) *Session {
 	if existing := s.Find(sess.ID); existing != nil {
 		// Preserve fields the caller didn't set.
+		if sess.Title == "" {
+			sess.Title = existing.Title
+		}
 		if sess.ClickUpID == "" {
 			sess.ClickUpID = existing.ClickUpID
 		}
@@ -168,6 +172,9 @@ func (s *Store) FindByPath(path string) *Session {
 // session is appended. Prevents branch switches from spawning duplicate rows.
 func (s *Store) UpsertByPath(sess Session) *Session {
 	if existing := s.FindByPath(sess.Path); existing != nil {
+		if sess.Title == "" {
+			sess.Title = existing.Title
+		}
 		if sess.ClickUpID == "" {
 			sess.ClickUpID = existing.ClickUpID
 		}
