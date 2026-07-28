@@ -138,9 +138,10 @@ func ListWorktrees(worktreeDir string, filterCommon string) ([]Worktree, error) 
 }
 
 // CheckoutClass classifies a filesystem path by its git checkout kind:
-//   "worktree" — a linked worktree (`.git` is a file pointing at the admin dir)
-//   "main"     — the primary checkout (`.git` is a real directory)
-//   "dead"     — path is gone or not a git checkout
+//
+//	"worktree" — a linked worktree (`.git` is a file pointing at the admin dir)
+//	"main"     — the primary checkout (`.git` is a real directory)
+//	"dead"     — path is gone or not a git checkout
 //
 // This is the authoritative test the dashboard uses to decide what's a live
 // thread: only linked worktrees count, so deleted paths and the main checkout
@@ -263,6 +264,33 @@ func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) 
 	return wtPath, nil
 }
 
+// FetchPRHead fetches a pull request's head commit into a local branch,
+// fork-safe: the `pull/<n>/head` ref resolves for same-repo AND fork PRs on
+// GitHub, and the leading `+` force-updates the branch if it already exists (so
+// re-reviewing an updated PR just refreshes). Assumes `origin` is the GitHub remote.
+func FetchPRHead(repoRoot, prNum, localBranch string) error {
+	refspec := fmt.Sprintf("+pull/%s/head:%s", prNum, localBranch)
+	if err := cmdRun(repoRoot, "git", "fetch", "origin", refspec, "--quiet"); err != nil {
+		return fmt.Errorf("fetch PR #%s failed (is origin a GitHub remote?): %w", prNum, err)
+	}
+	return nil
+}
+
+// AddWorktreeFromRef adds a worktree checked out to an existing local branch.
+// Unlike CreateWorktree it does NOT create a new branch (`-b`) or push — used
+// for review worktrees, where the branch already exists (a fetched PR head), the
+// checkout is read-only, and pushing someone else's PR would be wrong.
+func AddWorktreeFromRef(repoRoot, worktreeDir, branch string) (string, error) {
+	wtPath := filepath.Join(worktreeDir, branch)
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := cmdRun(repoRoot, "git", "worktree", "add", wtPath, branch); err != nil {
+		return "", fmt.Errorf("worktree add failed: %w", err)
+	}
+	return wtPath, nil
+}
+
 // IsDirty reports whether the worktree has uncommitted changes.
 func IsDirty(wtPath string) bool {
 	out, err := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output()
@@ -272,36 +300,62 @@ func IsDirty(wtPath string) bool {
 	return len(strings.TrimSpace(string(out))) > 0
 }
 
-// RemoveWorktree deletes a worktree + its branch, safe-first: a plain
-// `git worktree remove` (refuses on a dirty tree) and `git branch -d` (refuses
-// unmerged) are tried first; only if git refuses do we escalate to --force /
-// -D. The Clean confirm surfaces dirty/unmerged counts beforehand, so an
-// escalation only happens on work the user was warned about.
-func RemoveWorktree(repoRoot, wtPath, branch string) error {
-	var errs []string
+// RemoveOutcome reports what RemoveWorktree actually did for one worktree, so
+// the caller can surface a clear summary instead of leaking raw git output.
+type RemoveOutcome struct {
+	Branch     string
+	Removed    bool   // worktree checkout removed from disk
+	BranchKept bool   // worktree removed, but the branch was left (unmerged)
+	Skipped    bool   // nothing touched — worktree left fully intact
+	Reason     string // short human reason for Skipped / BranchKept
+}
 
-	if err := cmdRun(repoRoot, "git", "worktree", "remove", wtPath); err != nil {
-		if err2 := cmdRun(repoRoot, "git", "worktree", "remove", "--force", wtPath); err2 != nil {
-			errs = append(errs, "worktree remove: "+err2.Error())
+// RemoveWorktree removes a worktree SAFELY and reports the outcome. It never
+// forces destructively and never leaves half-deleted state:
+//   - `git worktree remove` (no --force). If it refuses (uncommitted / locked),
+//     the worktree is left FULLY intact and reported as Skipped — no dir nuke,
+//     no branch touch. This avoids orphaned folders + disk bloat.
+//   - Branch delete only after the worktree is gone: `git branch -d` (safe). If
+//     that refuses, escalate to -D ONLY when mergedUpstream is true (norn
+//     already confirmed the branch merged / its remote is gone — git's -d
+//     HEAD-check is a false alarm there). Otherwise the branch is KEPT (a
+//     dangling ref is harmless; force-losing unmerged work is not).
+//
+// All git output is captured, never printed to the terminal.
+func RemoveWorktree(repoRoot, wtPath, branch string, mergedUpstream bool) RemoveOutcome {
+	res := RemoveOutcome{Branch: branch}
+
+	if out, err := captureRun(repoRoot, "git", "worktree", "remove", wtPath); err != nil {
+		res.Skipped = true
+		res.Reason = removeReason(out)
+		return res
+	}
+	res.Removed = true
+	// Release the ghost entry in .git/worktrees/ so the branch is deletable.
+	_, _ = captureRun(repoRoot, "git", "worktree", "prune")
+
+	if _, err := captureRun(repoRoot, "git", "branch", "-d", branch); err != nil {
+		if mergedUpstream {
+			_, _ = captureRun(repoRoot, "git", "branch", "-D", branch) // remote-confirmed merged: safe
+		} else {
+			res.BranchKept = true
+			res.Reason = "branch not merged"
 		}
 	}
-	// Remove any leftover dir.
-	if _, err := os.Stat(wtPath); err == nil {
-		os.RemoveAll(wtPath)
-	}
-	// Prune ghost entries in .git/worktrees/ so the branch is fully released.
-	_ = cmdRun(repoRoot, "git", "worktree", "prune")
+	return res
+}
 
-	if err := cmdRun(repoRoot, "git", "branch", "-d", branch); err != nil {
-		if err2 := cmdRun(repoRoot, "git", "branch", "-D", branch); err2 != nil {
-			errs = append(errs, "branch delete: "+err2.Error())
-		}
+// removeReason turns a failed `git worktree remove` into a short reason.
+func removeReason(out string) string {
+	o := strings.ToLower(out)
+	switch {
+	case strings.Contains(o, "modified or untracked") || strings.Contains(o, "use --force"):
+		return "uncommitted changes"
+	case strings.Contains(o, "locked"):
+		return "locked"
+	default:
+		return "in use"
 	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("%s", strings.Join(errs, "; "))
-	}
-	return nil
 }
 
 // PruneWorktrees removes stale entries in .git/worktrees/ whose directories
@@ -624,4 +678,14 @@ func cmdRun(dir string, name string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// captureRun runs a command capturing combined stdout+stderr instead of letting
+// it hit the terminal. Used where git's chatter would otherwise leak under the
+// TUI (e.g. worktree/branch removal).
+func captureRun(dir string, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }

@@ -20,6 +20,12 @@ type cleanModel struct {
 	done          bool
 	toRemove      []git.Worktree
 	filter        filterState
+
+	// After removal: show a summary of what happened (removed / skipped / branch
+	// kept) in-TUI instead of leaking git output. Any key sets dismissed.
+	showResults bool
+	results     []git.RemoveOutcome
+	dismissed   bool
 }
 
 func newCleanModel() cleanModel {
@@ -72,6 +78,11 @@ func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
 		return m, nil
 	}
 	s := key.String()
+
+	if m.showResults {
+		m.dismissed = true // any key returns to Threads
+		return m, nil
+	}
 
 	if m.confirming {
 		switch s {
@@ -175,6 +186,10 @@ func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
 }
 
 func (m cleanModel) View() string {
+	if m.showResults {
+		return m.resultsView()
+	}
+
 	sorted := m.visible()
 	var b strings.Builder
 
@@ -291,5 +306,52 @@ func (m cleanModel) View() string {
 		b.WriteString(helpStyle.Render(strings.Join(parts, "  ")))
 	}
 
+	return b.String()
+}
+
+// resultsView summarizes what removal actually did, so skipped/kept items and
+// the reasons are shown clearly in the TUI (no leaked git output).
+func (m cleanModel) resultsView() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("Clean — done"))
+	b.WriteString("\n\n")
+
+	removed := 0
+	var skipped, kept []git.RemoveOutcome
+	for _, r := range m.results {
+		if r.Removed {
+			removed++
+		}
+		if r.Skipped {
+			skipped = append(skipped, r)
+		}
+		if r.BranchKept {
+			kept = append(kept, r)
+		}
+	}
+
+	b.WriteString(activeStyle.Render(fmt.Sprintf("Removed %d worktree(s).", removed)))
+	b.WriteString("\n")
+
+	if len(skipped) > 0 {
+		b.WriteString("\n")
+		b.WriteString(goneStyle.Render(fmt.Sprintf("Skipped %d (left intact):", len(skipped))))
+		b.WriteString("\n")
+		for _, r := range skipped {
+			b.WriteString("  " + branchStyle.Render(r.Branch) + dimStyle.Render(" — "+r.Reason) + "\n")
+		}
+	}
+
+	if len(kept) > 0 {
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render(fmt.Sprintf("Kept %d branch(es) (unmerged — delete manually if you're sure):", len(kept))))
+		b.WriteString("\n")
+		for _, r := range kept {
+			b.WriteString("  " + branchStyle.Render(r.Branch) + "\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(helpStyle.Render("press any key to return"))
 	return b.String()
 }

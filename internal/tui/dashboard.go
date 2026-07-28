@@ -473,13 +473,9 @@ func (d Dashboard) View() string {
 		scope = d.scopeRepo
 	}
 	meta := dimStyle.Render(ThreadWord() + "   scope: " + scope)
-	if !d.lastLoad.IsZero() {
-		if age := shortAge(d.lastLoad); age == "just now" {
-			meta += dimStyle.Render("   refreshed just now")
-		} else {
-			meta += dimStyle.Render(fmt.Sprintf("   refreshed %s ago", age))
-		}
-	}
+	// (No "refreshed Xs ago": the dashboard reloads on every action, so it was
+	// always "just now" — noise. Staleness that matters is the remote check,
+	// tracked separately if we ever surface it.)
 	// Non-modal summary status — dashboard stays usable while a summary runs.
 	switch {
 	case d.summarizing:
