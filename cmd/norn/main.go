@@ -2034,5 +2034,7 @@ Usage:
 }
 
 func clearScreen() {
-	fmt.Print("\033[H\033[2J")
+	// Home + clear screen + clear scrollback, so the agent spawns on a truly
+	// clean terminal with nothing from the norn session left above it.
+	fmt.Print("\033[H\033[2J\033[3J")
 }
