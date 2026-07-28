@@ -255,6 +255,10 @@ func (m createModel) updateTaskPicker(s string) (createModel, tea.Cmd) {
 				m.taskCursor = 0
 			}
 		}
+	case "o":
+		if m.taskCursor < len(vis) && vis[m.taskCursor].URL != "" {
+			openURL(vis[m.taskCursor].URL)
+		}
 	case "enter":
 		if m.taskCursor < len(vis) {
 			t := vis[m.taskCursor]
@@ -331,7 +335,7 @@ func (m createModel) View() string {
 			}
 		}
 		b.WriteString("\n")
-		b.WriteString(helpStyle.Render("j/k move · / filter · ⏎ select · esc back"))
+		b.WriteString(helpStyle.Render("j/k move · / filter · ⏎ select · o open · esc back"))
 		return b.String()
 	}
 
