@@ -217,7 +217,7 @@ func (a App) capturing() bool {
 	case ViewThreads:
 		return a.dashboard.filter.active || a.dashboard.showSummary || a.dashboard.confirmDrop
 	case ViewTasks:
-		return a.tasks.filter.active
+		return a.tasks.filter.active || a.tasks.confirming
 	case ViewCreate:
 		return a.create.focused || a.create.pickingTask // capture while typing or picking
 	case ViewClean:

@@ -28,7 +28,9 @@ type tasksModel struct {
 	err     error
 	filter  filterState
 
-	chosen *task.Task // set on enter; App turns it into a worktree
+	chosen     *task.Task // set once confirmed; App turns it into a worktree
+	confirming bool       // enter opened the "create worktree?" y/n gate
+	pending    *task.Task // the task awaiting confirmation
 
 	width, height int
 }
@@ -63,6 +65,17 @@ func (m tasksModel) Update(msg tea.Msg) (tasksModel, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		s := msg.String()
+		// Confirmation gate: enter on a task asks before spawning a worktree,
+		// since that launches the agent. y/enter proceeds, n/esc cancels.
+		if m.confirming {
+			switch s {
+			case "y", "enter":
+				m.chosen, m.confirming, m.pending = m.pending, false, nil
+			case "n", "esc":
+				m.confirming, m.pending = false, nil
+			}
+			return m, nil
+		}
 		// Filter input first: `/` activates, typing narrows. Arrows/enter fall
 		// through so you can navigate + select while filtering.
 		if m.filter.active {
@@ -99,7 +112,8 @@ func (m tasksModel) Update(msg tea.Msg) (tasksModel, tea.Cmd) {
 		case "enter":
 			if m.cursor < len(vis) {
 				t := vis[m.cursor]
-				m.chosen = &t
+				m.pending = &t
+				m.confirming = true
 			}
 		}
 	}
@@ -203,7 +217,11 @@ func (m tasksModel) View() string {
 	)
 	b.WriteString(panes)
 	b.WriteString("\n\n")
-	b.WriteString(helpStyle.Render("⏎ worktree · o open · / filter · r refresh · esc back"))
+	if m.confirming && m.pending != nil {
+		b.WriteString(confirmStyle.Render(fmt.Sprintf("create worktree from #%s %s? (y/n)", m.pending.ID, truncate(m.pending.Title, 40))))
+	} else {
+		b.WriteString(helpStyle.Render("⏎ worktree · o open · / filter · r refresh · esc back"))
+	}
 	return b.String()
 }
 
