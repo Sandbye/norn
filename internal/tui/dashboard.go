@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/prompt"
 	"github.com/sandbye/norn/internal/state"
 )
 
@@ -80,7 +82,7 @@ func (d Dashboard) visibleRows() []dashRow {
 	var hits []scored
 	for _, r := range d.rows {
 		best := -1
-		for _, field := range []string{r.Branch, r.ClickUpID, r.Repo} {
+		for _, field := range []string{r.Branch, r.Title, r.ClickUpID, r.Repo} {
 			if field == "" {
 				continue
 			}
@@ -502,15 +504,18 @@ func (d Dashboard) View() string {
 	// one outer style for cursor / dead state. This keeps padding correct —
 	// ANSI escape codes are invisible to rune counts.
 	const (
-		branchW   = 38
+		branchW   = 24
 		kindW     = 8
 		clickupW  = 12
 		prW       = 12
 		statusW   = 14
 		activityW = 10
 	)
-	colWidths := []int{branchW, kindW, clickupW, prW, statusW, activityW}
-	headers := []string{"BRANCH", "KIND", "CU", "PR", "STATUS", "LAST"}
+	// TITLE flexes to fill the remaining terminal width so the fixed columns
+	// stay put; joinCells truncates it with `…` when the task name is long.
+	titleW := max(d.width-(branchW+kindW+clickupW+prW+statusW+activityW), 20)
+	colWidths := []int{branchW, titleW, kindW, clickupW, prW, statusW, activityW}
+	headers := []string{"BRANCH", "TITLE", "KIND", "CU", "PR", "STATUS", "LAST"}
 
 	hdrStyle := lipgloss.NewStyle().Bold(true).Foreground(colorText)
 	headerLine := joinCells(headers, colWidths)
@@ -523,6 +528,7 @@ func (d Dashboard) View() string {
 	for i, r := range vis {
 		cells := []string{
 			r.Branch,
+			r.Title,
 			r.Kind,
 			clickupCell(r.ClickUpID),
 			prCell(r),
@@ -588,6 +594,16 @@ func openURL(url string) {
 	_ = cmd.Start()
 }
 
+// worktreeTitle reads the human task title from a worktree's .worktree.md.
+// Returns "" if the file is missing or carries no title yet.
+func worktreeTitle(wtPath string) string {
+	data, err := os.ReadFile(wtPath + "/.worktree.md")
+	if err != nil {
+		return ""
+	}
+	return prompt.ExtractTitle(string(data))
+}
+
 // loadCmd reloads the store and reconciles with live worktree list.
 // Fast path only — PR data is fetched async via fetchPRCmd after this returns.
 func (d Dashboard) loadCmd() tea.Cmd {
@@ -622,6 +638,13 @@ func (d Dashboard) loadCmd() tea.Cmd {
 					sess.ClickUpID = id
 					changed = true
 				}
+			}
+			// Re-read the title from .worktree.md every load: a bare-hint
+			// worktree has none until start-task resolves the task and writes
+			// it back, at which point the dashboard picks it up on next refresh.
+			if t := worktreeTitle(sess.Path); t != "" && t != sess.Title {
+				sess.Title = t
+				changed = true
 			}
 		}
 		if changed {
