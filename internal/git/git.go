@@ -240,10 +240,64 @@ func CheckMerged(repoRoot string, worktrees []Worktree, bases []string) []Worktr
 	return worktrees
 }
 
+// revCount returns the number of commits in the given range (e.g. "a..b"), or 0
+// on error. Cheap ancestry/divergence probe.
+func revCount(repoRoot, rangeExpr string) int {
+	out, err := exec.Command("git", "-C", repoRoot, "rev-list", "--count", rangeExpr).Output()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &n); err != nil {
+		return 0
+	}
+	return n
+}
+
+// BranchExists reports whether a local branch of that name exists.
+func BranchExists(repoRoot, branch string) bool {
+	return cmdRun(repoRoot, "git", "rev-parse", "--verify", "--quiet", "refs/heads/"+branch) == nil
+}
+
+// WorktreePathForBranch returns the path of the linked worktree that has branch
+// checked out, or "" if none. Lets creation reuse a dropped-but-not-deleted
+// thread instead of colliding on the branch name.
+func WorktreePathForBranch(repoRoot, branch string) string {
+	out, err := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return ""
+	}
+	want := "branch refs/heads/" + branch
+	path := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			path = strings.TrimPrefix(line, "worktree ")
+		case line == want:
+			return path
+		}
+	}
+	return ""
+}
+
 func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) {
 	wtPath := filepath.Join(worktreeDir, branch)
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
 		return "", err
+	}
+
+	// Reuse a dropped-but-not-deleted thread: dropping only delists a session,
+	// so the branch + its worktree survive on disk. Re-create then means reuse.
+	if existing := WorktreePathForBranch(repoRoot, branch); existing != "" {
+		return existing, nil
+	}
+	// Branch exists but isn't checked out anywhere (worktree removed, branch
+	// kept) → attach a fresh worktree to it rather than colliding on `-b`.
+	if BranchExists(repoRoot, branch) {
+		if err := cmdRun(repoRoot, "git", "worktree", "add", wtPath, branch); err != nil {
+			return "", fmt.Errorf("worktree add (existing branch) failed: %w", err)
+		}
+		return wtPath, nil
 	}
 
 	if err := cmdRun(repoRoot, "git", "fetch", "origin", base, "--quiet"); err != nil {
