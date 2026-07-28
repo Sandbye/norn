@@ -225,6 +225,18 @@ func (a App) capturing() bool {
 
 // gotoTab switches the active tab and returns any refresh command that tab needs.
 func (a App) gotoTab(v View) (App, tea.Cmd) {
+	// Leaving Settings: re-read config from disk so edits (task provider, agent,
+	// template, theme…) take effect live, no restart. newCreateFor below then
+	// rebuilds the New tab from the fresh cfg.
+	if a.current == ViewSettings && v != ViewSettings {
+		if cfg, err := config.Load(a.repoRoot); err == nil {
+			a.cfg = cfg
+			prev := a.settings
+			a.settings = NewSettings(cfg, a.repoRoot)
+			a.settings.cursor, a.settings.layer = prev.cursor, prev.layer
+			a.settings.width, a.settings.height = a.width, a.height
+		}
+	}
 	a.current = v
 	switch v {
 	case ViewThreads:
