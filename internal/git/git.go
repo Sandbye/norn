@@ -228,11 +228,18 @@ func CheckMerged(repoRoot string, worktrees []Worktree, bases []string) []Worktr
 				}
 				ref := "refs/remotes/origin/" + base
 				// --is-ancestor exits 0 when the branch is fully contained in base.
-				if err := cmdRun(repoRoot, "git", "merge-base", "--is-ancestor", worktrees[idx].Branch, ref); err == nil {
-					worktrees[idx].Merged = true
-					worktrees[idx].MergedInto = base
-					return
+				if err := cmdRun(repoRoot, "git", "merge-base", "--is-ancestor", worktrees[idx].Branch, ref); err != nil {
+					continue
 				}
+				// An untouched branch (forked, never committed) sits exactly at
+				// origin/base — an ancestor, but nothing was merged. Only call it
+				// merged once base has advanced past the branch tip.
+				if revCount(repoRoot, worktrees[idx].Branch+".."+ref) == 0 {
+					continue
+				}
+				worktrees[idx].Merged = true
+				worktrees[idx].MergedInto = base
+				return
 			}
 		}(i)
 	}
