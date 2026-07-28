@@ -170,6 +170,13 @@ func (m tasksModel) View() string {
 	rows := max(m.height-13, 3)
 	start, end := scrollWindow(m.cursor, len(vis), rows)
 
+	// Right-align the id in a fixed field so ids of different digit-lengths
+	// (#9 vs #3991) don't shove the badge/title column out of alignment.
+	idW := 1
+	for _, t := range vis {
+		idW = max(idW, len(t.ID))
+	}
+
 	var list strings.Builder
 	for i := start; i < end; i++ {
 		t := vis[i]
@@ -179,8 +186,7 @@ func (m tasksModel) View() string {
 			cursor = cursorStyle.Render("> ")
 			titleStyle = taskSelStyle
 		}
-		badge := kindBadge(t.Kind)
-		head := cursor + dimStyle.Render("#"+t.ID+" ") + badge
+		head := cursor + dimStyle.Render(fmt.Sprintf("#%*s ", idW, t.ID)) + kindBadge(t.Kind)
 		title := titleStyle.Render(truncate(t.Title, max(listW-lipgloss.Width(head)-1, 6)))
 		list.WriteString(head + title + "\n")
 	}
@@ -236,5 +242,5 @@ func kindBadge(kind string) string {
 	case "fix":
 		return lipgloss.NewStyle().Foreground(colorPeach).Render("[fix]  ")
 	}
-	return ""
+	return "       " // 7 blanks: keep titles aligned when there's no kind
 }
