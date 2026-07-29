@@ -11,6 +11,26 @@ import (
 	"github.com/sandbye/norn/internal/task"
 )
 
+// nornHuhTheme recolors huh's base theme to the active norn palette so the New
+// tab form matches the rest of the TUI instead of huh's default purple.
+func nornHuhTheme() *huh.Theme {
+	t := huh.ThemeBase()
+	f := &t.Focused
+	f.Base = f.Base.BorderForeground(colorLavender)
+	f.Title = f.Title.Foreground(colorLavender).Bold(true)
+	f.SelectSelector = f.SelectSelector.Foreground(colorLavender)
+	f.SelectedOption = f.SelectedOption.Foreground(colorBlue)
+	f.Option = f.Option.Foreground(colorText)
+	f.TextInput.Cursor = f.TextInput.Cursor.Foreground(colorLavender)
+	f.TextInput.Prompt = f.TextInput.Prompt.Foreground(colorLavender)
+	f.TextInput.Placeholder = f.TextInput.Placeholder.Foreground(colorOverlay)
+	f.TextInput.Text = f.TextInput.Text.Foreground(colorText)
+	b := &t.Blurred
+	b.Title = b.Title.Foreground(colorSubtext)
+	b.Base = b.Base.BorderForeground(colorSurface)
+	return t
+}
+
 type createModel struct {
 	kind         string // "task" or "review"
 	baseBranches []string
@@ -68,7 +88,8 @@ func (m *createModel) buildForm() *huh.Form {
 		fields = append(fields, huh.NewSelect[string]().Key("model").
 			Title("Model").Options(modelOptions(m.models)...))
 	}
-	return huh.NewForm(huh.NewGroup(fields...)).WithShowHelp(true).WithWidth(m.formWidth())
+	return huh.NewForm(huh.NewGroup(fields...)).
+		WithShowHelp(true).WithWidth(m.formWidth()).WithTheme(nornHuhTheme())
 }
 
 func (m createModel) formWidth() int {
@@ -247,6 +268,15 @@ func (m createModel) Update(msg tea.Msg) (createModel, tea.Cmd) {
 				}
 			}
 		}
+		return m, nil
+	}
+
+	// Focused: esc backs out to idle (huh only aborts on ctrl+c, so esc would
+	// otherwise do nothing and trap you in the form).
+	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" {
+		m.focused = false
+		m.seeded = false
+		m.form = m.buildForm()
 		return m, nil
 	}
 
