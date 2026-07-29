@@ -92,13 +92,13 @@ Set TypingSpeed 60ms
 Hide
 Type "cd $REPO"
 Enter
-Type "export HOME=$HOMED XDG_STATE_HOME=$STATE CLAUDE_CONFIG_DIR=$CLAUDEC"
+Type "export HOME=$HOMED XDG_STATE_HOME=$STATE CLAUDE_CONFIG_DIR=$CLAUDEC PATH=$BASE:\$PATH"
 Enter
 Type "clear"
 Enter
 Sleep 800ms
 Show
-Type "$BASE/norn"
+Type "norn"
 Enter
 Sleep 4s
 Down@700ms 3
