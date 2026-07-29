@@ -135,12 +135,13 @@ func NewApp(cfg config.Config, repoRoot, scope string, initialView View) App {
 func newCreateFor(cfg config.Config, repoRoot string) createModel {
 	c := newCreateModel(orderBases(cfg.BaseBranches, cfg.PRBase))
 	c.kind = "task"
-	c.templates = prompt.List()
 	c.template = prompt.Resolve(cfg, "task", "")
-	c.models = modelChoices(cfg)
+	c.templates = moveFront(prompt.List(), c.template) // default first so the select starts on it
 	c.model = cfg.Agent.Model
+	c.models = moveFront(modelChoices(cfg), c.model) // default first so the select starts on it
 	c.taskProvider = providerFor(cfg)
 	c.repoRoot = repoRoot
+	c.form = c.buildForm()
 	return c
 }
 

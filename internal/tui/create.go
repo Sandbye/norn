@@ -7,39 +7,31 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"github.com/sandbye/norn/internal/task"
-)
-
-type createStep int
-
-const (
-	stepHint createStep = iota
-	stepBase
 )
 
 type createModel struct {
 	kind         string // "task" or "review"
 	baseBranches []string
-	step         createStep
-	hint         string
-	hintInput    string
-	baseBranch   string
-	baseCursor   int
-	confirmed    bool
-	cancelled    bool
-	// focused gates text input: the New tab shows the form but doesn't capture
-	// keys until enter, so Tab/1-4 still switch tabs. Enter focuses; esc unfocuses.
+	templates    []string
+	template     string
+	models       []string
+	model        string
+
+	// The New-tab form (hint + base + template + model) is a huh form. It's
+	// rebuilt when seeding from a task (the hint field is dropped then).
+	form   *huh.Form
+	seeded bool // hint came from a task → form omits the hint field
+	// focused gates the form: the tab shows the form but doesn't capture keys
+	// until enter, so Tab/1-5 still switch tabs. Enter focuses; the form's own
+	// esc aborts back to idle.
 	focused bool
 
-	// template is the prompt template this worktree renders; `t` cycles through
-	// the available ones (set by the App, which has cfg).
-	template  string
-	templates []string
-
-	// model is the per-session model for this worktree; `M` cycles the choices.
-	// "" means the agent's own default. Empty `models` (non-claude) hides it.
-	model  string
-	models []string
+	hint       string
+	baseBranch string
+	confirmed  bool
+	cancelled  bool
 
 	// Task picker (`T`): seed the hint from a real GitHub/ClickUp task.
 	taskProvider task.Provider
@@ -55,8 +47,90 @@ type createModel struct {
 	width, height int
 }
 
-// visibleTasks narrows + ranks tasks by the picker filter (matches the
-// list/folder group and the title), so typing a list name scopes the list.
+// buildForm assembles the huh form from the current choices. Fields with a
+// single option are omitted (base/template) or hidden (model when non-claude);
+// when seeded from a task the hint field is dropped since the task defines it.
+func (m *createModel) buildForm() *huh.Form {
+	var fields []huh.Field
+	if !m.seeded {
+		fields = append(fields, huh.NewInput().Key("hint").
+			Title("Task").Placeholder("what are you working on?"))
+	}
+	if len(m.baseBranches) > 1 {
+		fields = append(fields, huh.NewSelect[string]().Key("base").
+			Title("Base branch").Options(huh.NewOptions(m.baseBranches...)...))
+	}
+	if len(m.templates) > 1 {
+		fields = append(fields, huh.NewSelect[string]().Key("template").
+			Title("Template").Options(huh.NewOptions(m.templates...)...))
+	}
+	if len(m.models) > 0 {
+		fields = append(fields, huh.NewSelect[string]().Key("model").
+			Title("Model").Options(modelOptions(m.models)...))
+	}
+	return huh.NewForm(huh.NewGroup(fields...)).WithShowHelp(true).WithWidth(m.formWidth())
+}
+
+func (m createModel) formWidth() int {
+	w := 60
+	if m.width > 0 && m.width-12 < w {
+		w = m.width - 12
+	}
+	if w < 24 {
+		w = 24
+	}
+	return w
+}
+
+// readForm pulls the submitted values into the model fields. Reads a field only
+// when its select was present, so single-option defaults survive.
+func (m *createModel) readForm() {
+	if !m.seeded {
+		m.hint = m.form.GetString("hint")
+	}
+	if v := m.form.GetString("base"); v != "" {
+		m.baseBranch = v
+	}
+	if v := m.form.GetString("template"); v != "" {
+		m.template = v
+	}
+	if len(m.models) > 0 {
+		m.model = m.form.GetString("model") // "" (default) is a valid choice
+	}
+}
+
+func modelOptions(models []string) []huh.Option[string] {
+	opts := make([]huh.Option[string], len(models))
+	for i, mo := range models {
+		opts[i] = huh.NewOption(modelLabel(mo), mo)
+	}
+	return opts
+}
+
+// moveFront reorders xs so x is first (so a huh Select starts on the resolved
+// default). No-op if x isn't present.
+func moveFront(xs []string, x string) []string {
+	found := false
+	for _, v := range xs {
+		if v == x {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return xs
+	}
+	out := make([]string, 0, len(xs))
+	out = append(out, x)
+	for _, v := range xs {
+		if v != x {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// visibleTasks narrows + ranks tasks by the picker filter.
 func (m createModel) visibleTasks() []task.Task {
 	return filterTasks(m.tasks, m.taskFilter.query)
 }
@@ -86,20 +160,21 @@ func filterTasks(tasks []task.Task, query string) []task.Task {
 	return out
 }
 
-// withTask seeds the create form from a task chosen elsewhere (the Tasks tab):
-// same effect as picking it in the inline picker, so all creation logic is
-// reused. Lands on the base-branch step, or confirms straight away when there's
-// only one base.
+// withTask seeds the create form from a task (picked here or on the Tasks tab):
+// the task defines the hint, so the form drops the hint field. Single base →
+// confirm immediately; otherwise open the form focused for base/template/model.
 func (m createModel) withTask(t task.Task) createModel {
-	m.hint = fmt.Sprintf("#%s %s", t.ID, t.Title)
 	tt := t
 	m.selectedTask = &tt
+	m.hint = fmt.Sprintf("#%s %s", t.ID, t.Title)
+	m.seeded = true
 	if len(m.baseBranches) == 1 {
 		m.baseBranch = m.baseBranches[0]
 		m.confirmed = true
-	} else {
-		m.step = stepBase
+		return m
 	}
+	m.form = m.buildForm()
+	m.focused = true
 	return m
 }
 
@@ -113,36 +188,6 @@ func listTasksCmd(p task.Provider, repoRoot string) tea.Cmd {
 		tasks, err := p.List(context.Background(), repoRoot)
 		return taskLoadedMsg{tasks: tasks, err: err}
 	}
-}
-
-// cycleTemplate advances to the next available template.
-func (m *createModel) cycleTemplate() {
-	if len(m.templates) == 0 {
-		return
-	}
-	i := 0
-	for j, t := range m.templates {
-		if t == m.template {
-			i = j
-			break
-		}
-	}
-	m.template = m.templates[(i+1)%len(m.templates)]
-}
-
-// cycleModel advances to the next model choice.
-func (m *createModel) cycleModel() {
-	if len(m.models) == 0 {
-		return
-	}
-	i := 0
-	for j, mo := range m.models {
-		if mo == m.model {
-			i = j
-			break
-		}
-	}
-	m.model = m.models[(i+1)%len(m.models)]
 }
 
 // modelLabel renders the model for display ("default" when unset).
@@ -159,7 +204,7 @@ func newCreateModel(baseBranches []string) createModel {
 	}
 	return createModel{
 		baseBranches: baseBranches,
-		step:         stepHint,
+		baseBranch:   baseBranches[0], // default when there's no base select
 	}
 }
 
@@ -167,6 +212,9 @@ func (m createModel) Update(msg tea.Msg) (createModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.form != nil {
+			m.form = m.form.WithWidth(m.formWidth())
+		}
 		return m, nil
 	case taskLoadedMsg:
 		m.taskLoading = false
@@ -174,76 +222,50 @@ func (m createModel) Update(msg tea.Msg) (createModel, tea.Cmd) {
 		m.taskErr = msg.err
 		m.taskCursor = 0
 		return m, nil
-	case tea.KeyMsg:
-		if m.pickingTask {
-			return m.updateTaskPicker(msg.String())
-		}
-		switch m.step {
-		case stepHint:
-			if !m.focused {
-				// Idle: the tab is navigable until the user commits to typing.
-				switch msg.String() {
-				case "enter":
-					m.focused = true
-				case "t":
-					m.cycleTemplate()
-				case "M":
-					m.cycleModel()
-				case "T":
-					if m.taskProvider != nil {
-						m.pickingTask = true
-						m.taskLoading = true
-						return m, listTasksCmd(m.taskProvider, m.repoRoot)
-					}
-				}
-				return m, nil
-			}
-			switch msg.String() {
-			case "enter":
-				m.hint = m.hintInput
-				if len(m.baseBranches) == 1 {
-					m.baseBranch = m.baseBranches[0]
-					m.confirmed = true
-				} else {
-					m.step = stepBase
-				}
-			case "esc":
-				m.focused = false // back to idle; esc again leaves the tab
-			case "backspace":
-				if len(m.hintInput) > 0 {
-					m.hintInput = m.hintInput[:len(m.hintInput)-1]
-				}
-			case "space":
-				m.hintInput += " "
-			default:
-				s := msg.String()
-				if len(s) > 0 && !strings.HasPrefix(s, "ctrl+") && !strings.HasPrefix(s, "alt+") {
-					m.hintInput += s
-				}
-			}
-
-		case stepBase:
-			switch msg.String() {
-			case "up", "k":
-				m.baseCursor--
-				if m.baseCursor < 0 {
-					m.baseCursor = len(m.baseBranches) - 1
-				}
-			case "down", "j":
-				m.baseCursor++
-				if m.baseCursor >= len(m.baseBranches) {
-					m.baseCursor = 0
-				}
-			case "enter":
-				m.baseBranch = m.baseBranches[m.baseCursor]
-				m.confirmed = true
-			case "esc":
-				m.step = stepHint
-			}
-		}
 	}
 
-	return m, nil
+	if m.pickingTask {
+		if k, ok := msg.(tea.KeyMsg); ok {
+			return m.updateTaskPicker(k.String())
+		}
+		return m, nil
+	}
+
+	// Idle: navigable until the user commits. enter focuses the form; T opens
+	// the task picker. Tab/1-5 fall through to the App (capturing() is false).
+	if !m.focused {
+		if k, ok := msg.(tea.KeyMsg); ok {
+			switch k.String() {
+			case "enter":
+				m.focused = true
+				return m, m.form.Init()
+			case "T":
+				if m.taskProvider != nil {
+					m.pickingTask = true
+					m.taskLoading = true
+					return m, listTasksCmd(m.taskProvider, m.repoRoot)
+				}
+			}
+		}
+		return m, nil
+	}
+
+	// Focused: the huh form owns input.
+	form, cmd := m.form.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.form = f
+	}
+	switch m.form.State {
+	case huh.StateCompleted:
+		m.readForm()
+		m.confirmed = true
+	case huh.StateAborted:
+		// esc backs out to idle; rebuild so re-entry starts fresh.
+		m.focused = false
+		m.seeded = false
+		m.form = m.buildForm()
+	}
+	return m, cmd
 }
 
 func (m createModel) updateTaskPicker(s string) (createModel, tea.Cmd) {
@@ -285,18 +307,8 @@ func (m createModel) updateTaskPicker(s string) (createModel, tea.Cmd) {
 		}
 	case "enter":
 		if m.taskCursor < len(vis) {
-			t := vis[m.taskCursor]
-			// Seed the hint with #id + title so MakeBranch/EnrichBranchName
-			// produce <prefix>/#<id>/<slug> and the id flows into the session.
-			m.hint = fmt.Sprintf("#%s %s", t.ID, t.Title)
-			m.selectedTask = &t // baked into the worktree brief
 			m.pickingTask = false
-			if len(m.baseBranches) == 1 {
-				m.baseBranch = m.baseBranches[0]
-				m.confirmed = true
-			} else {
-				m.step = stepBase
-			}
+			m = m.withTask(vis[m.taskCursor])
 		}
 	}
 	return m, nil
@@ -304,7 +316,6 @@ func (m createModel) updateTaskPicker(s string) (createModel, tea.Cmd) {
 
 func (m createModel) View() string {
 	var b strings.Builder
-
 	b.WriteString(headerStyle.Render(kindTaskStyle.Render("New task")))
 	b.WriteString("\n")
 
@@ -328,8 +339,6 @@ func (m createModel) View() string {
 		case len(vis) == 0:
 			b.WriteString("   " + dimStyle.Render("no tasks match"))
 		default:
-			// Scroll the list inside the fixed box; fit title to width, show the
-			// list/folder group so scope is visible.
 			rows := m.height - 14
 			if rows < 3 {
 				rows = 3
@@ -363,57 +372,19 @@ func (m createModel) View() string {
 		return b.String()
 	}
 
-	switch m.step {
-	case stepHint:
-		if !m.focused {
-			b.WriteString(subtitleStyle.Render("Describe the task, then it becomes a worktree."))
-			b.WriteString("\n\n")
-			b.WriteString("   " + dimStyle.Render(m.hintInput))
-			if m.hintInput == "" {
-				b.WriteString(dimStyle.Render("press ⏎ to start typing"))
-			}
-			b.WriteString("\n\n")
-			if m.template != "" {
-				b.WriteString("   " + dimStyle.Render("template: ") + branchStyle.Render(m.template) + "\n")
-			}
-			if len(m.models) > 0 {
-				b.WriteString("   " + dimStyle.Render("model: ") + branchStyle.Render(modelLabel(m.model)) + "\n")
-			}
-			parts := []string{"⏎ type"}
-			if m.taskProvider != nil {
-				parts = append(parts, "T pick task")
-			}
-			parts = append(parts, "t template")
-			if len(m.models) > 0 {
-				parts = append(parts, "M model")
-			}
-			parts = append(parts, "Tab/1-4 switch tab")
-			b.WriteString(helpStyle.Render(strings.Join(parts, " · ")))
-			break
-		}
-		b.WriteString(subtitleStyle.Render("Hint (or enter to skip):"))
+	if !m.focused {
+		b.WriteString(subtitleStyle.Render("Spin up a worktree for a task."))
 		b.WriteString("\n\n")
-		cursor := cursorStyle.Render("▎")
-		b.WriteString("   " + m.hintInput + cursor)
-		b.WriteString("\n")
-		b.WriteString(helpStyle.Render("enter confirm  esc back"))
-
-	case stepBase:
-		b.WriteString(subtitleStyle.Render("Base branch:"))
-		b.WriteString("\n\n")
-		for i, br := range m.baseBranches {
-			cursor := "  "
-			if i == m.baseCursor {
-				cursor = cursorStyle.Render("> ")
-			}
-			label := branchStyle.Render(br)
-			if i == m.baseCursor {
-				label = selectedStyle.Render(br)
-			}
-			b.WriteString("  " + cursor + label + "\n")
+		parts := []string{"⏎ start"}
+		if m.taskProvider != nil {
+			parts = append(parts, "T pick task")
 		}
-		b.WriteString(helpStyle.Render("j/k navigate  enter select  esc back"))
+		parts = append(parts, "Tab/1-5 switch tab")
+		b.WriteString(helpStyle.Render(strings.Join(parts, " · ")))
+		return b.String()
 	}
 
+	b.WriteString("\n")
+	b.WriteString(m.form.View())
 	return b.String()
 }
