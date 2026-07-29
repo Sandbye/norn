@@ -22,6 +22,7 @@ type Worktree struct {
 	RemoteGone bool
 	Merged     bool   // branch is an ancestor of a base branch (work is done)
 	MergedInto string // which base it merged into (for display)
+	Dirty      bool   // has uncommitted/untracked changes (cached; drives clean's preview)
 }
 
 func RepoRoot() (string, error) {
@@ -183,6 +184,26 @@ func FetchPrune(repoRoot string) error {
 // CheckRemoteGone marks worktrees whose `origin/<branch>` ref is missing.
 // Read-only rev-parse calls are fanned out across goroutines (bounded to 8).
 // Caller is responsible for running FetchPrune first if fresh data is needed.
+// CheckDirty marks worktrees with uncommitted/untracked changes, in parallel,
+// so the clean view can preview per-row what a removal will actually do (dirty
+// worktrees get skipped) without a git call per render.
+func CheckDirty(worktrees []Worktree) []Worktree {
+	const maxParallel = 8
+	sem := make(chan struct{}, maxParallel)
+	var wg sync.WaitGroup
+	for i := range worktrees {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			worktrees[idx].Dirty = IsDirty(worktrees[idx].Path)
+		}(i)
+	}
+	wg.Wait()
+	return worktrees
+}
+
 func CheckRemoteGone(repoRoot string, worktrees []Worktree) []Worktree {
 	const maxParallel = 8
 	sem := make(chan struct{}, maxParallel)

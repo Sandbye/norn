@@ -15,9 +15,10 @@ type cleanModel struct {
 	cursor        int
 	selected      map[string]bool // keyed by worktree Path so filtering is safe
 	confirming    bool
-	dirtyCount    int // selected worktrees with uncommitted changes
-	unmergedCount int // selected worktrees not detected as merged/gone
+	dirtyCount    int // selected worktrees that will be SKIPPED (dirty)
+	unmergedCount int // selected, will-remove worktrees whose branch will be kept (unmerged)
 	done          bool
+	removing      bool // removal fired, running off the UI thread
 	toRemove      []git.Worktree
 	filter        filterState
 
@@ -82,6 +83,9 @@ func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
 	if m.showResults {
 		m.dismissed = true // any key returns to Threads
 		return m, nil
+	}
+	if m.removing {
+		return m, nil // removal in flight: ignore keys until it finishes
 	}
 
 	if m.confirming {
@@ -165,13 +169,17 @@ func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
 	case "d", "enter":
 		if len(m.selected) > 0 {
 			m.confirming = true
+			// Predict the real outcome from cached state so the confirm isn't
+			// blind: dirty rows get SKIPPED (git worktree remove refuses), and
+			// unmerged clean rows are removed but keep their branch.
 			m.dirtyCount, m.unmergedCount = 0, 0
 			for _, wt := range m.worktrees {
 				if !m.selected[wt.Path] {
 					continue
 				}
-				if git.IsDirty(wt.Path) {
-					m.dirtyCount++
+				if wt.Dirty {
+					m.dirtyCount++ // skipped; branch + files left intact
+					continue
 				}
 				if !wt.Merged && !wt.RemoteGone {
 					m.unmergedCount++
@@ -274,31 +282,39 @@ func (m cleanModel) View() string {
 			remoteStyle.Render(fitCell(remoteText, remoteW)) + " " +
 			commitMsgStyle.Render(fitCell(wt.CommitMsg, commitW))
 
+		if wt.Dirty {
+			line += " " + dirtyStyle.Render("dirty") // will be skipped on remove
+		}
+
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
 
-	if m.confirming {
-		count := len(m.selected)
-		var warn []string
+	switch {
+	case m.removing:
+		b.WriteString(confirmStyle.Render("Removing…"))
+	case m.confirming:
+		// Say exactly what will happen: dirty rows are skipped, so they don't
+		// count toward "remove"; call out kept branches. No post-hoc surprise.
+		remove := len(m.selected) - m.dirtyCount
+		var notes []string
 		if m.dirtyCount > 0 {
-			warn = append(warn, fmt.Sprintf("%d uncommitted", m.dirtyCount))
+			notes = append(notes, fmt.Sprintf("%d dirty skipped", m.dirtyCount))
 		}
 		if m.unmergedCount > 0 {
-			warn = append(warn, fmt.Sprintf("%d unmerged", m.unmergedCount))
+			notes = append(notes, fmt.Sprintf("%d keep branch (unmerged)", m.unmergedCount))
 		}
-		msg := fmt.Sprintf("Remove %d worktree(s)? (y/n)", count)
-		if len(warn) > 0 {
-			msg = fmt.Sprintf("Remove %d worktree(s) — %s? (y/n)", count, strings.Join(warn, ", "))
+		msg := fmt.Sprintf("Remove %d worktree(s)", remove)
+		if len(notes) > 0 {
+			msg += ", " + strings.Join(notes, ", ")
 		}
-		b.WriteString(confirmStyle.Render(msg))
-	} else if m.filter.active {
+		b.WriteString(confirmStyle.Render(msg + "? (y/n)"))
+	case m.filter.active:
 		b.WriteString(helpStyle.Render("type to filter  ↑/↓ move  space select  esc clear"))
-	} else {
-		var parts []string
-		parts = append(parts, "j/k navigate", "/ filter", "space select", "a all", "g select done")
+	default:
+		parts := []string{"j/k navigate", "/ filter", "space select", "a all", "g select done"}
 		if len(m.selected) > 0 {
 			parts = append(parts, "d delete")
 		}
