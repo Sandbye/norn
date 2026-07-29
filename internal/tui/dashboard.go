@@ -531,19 +531,21 @@ func (d Dashboard) renderHeader() string {
 		scope = d.scopeRepo
 	}
 	word := lipgloss.NewStyle().Bold(true).Foreground(colorLavender).Render("norn")
-	meta := word + "  " + dimStyle.Render(ThreadWord()+" · scope: "+scope)
+	ident := word + "\n" + dimStyle.Render(fmt.Sprintf("%s · scope: %s · %d live", ThreadWord(), scope, len(d.rows)))
 	switch {
 	case d.summarizing:
-		meta += "   " + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"…")
+		ident += "\n" + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"…")
 	case d.summaryErr != nil && d.readyBranch != "":
-		meta += errorStyle.Render("   ✗ summary failed: " + d.readyBranch + " (s retries)")
+		ident += "\n" + errorStyle.Render("✗ summary failed: "+d.readyBranch+" (s retries)")
 	case d.readyBranch != "":
-		meta += activeStyle.Render("   ✓ summary ready: " + d.readyBranch + " (press s)")
+		ident += "\n" + activeStyle.Render("✓ summary ready: "+d.readyBranch+" (press s)")
 	}
+	// Bottom-align the identity to the mascot's baseline so it doesn't float in
+	// the middle of the mascot's height.
 	if mark := ThemeSprite(); mark != "" && !active.Spin {
-		return lipgloss.JoinHorizontal(lipgloss.Center, mark, "  ", meta)
+		return lipgloss.JoinHorizontal(lipgloss.Bottom, mark, "  ", ident)
 	}
-	return meta
+	return ident
 }
 
 // renderSidebar lists the threads (state glyph + branch), cursor highlighted,
@@ -589,7 +591,7 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 	if r.Goal != "" {
 		b.WriteString("\n" + lipgloss.NewStyle().Width(w).Foreground(colorText).Render(r.Goal) + "\n")
 	}
-	b.WriteString("\n")
+	b.WriteString("\n" + dimStyle.Render(strings.Repeat("─", w)) + "\n\n")
 	row := func(k, v string) {
 		if v == "" {
 			return
