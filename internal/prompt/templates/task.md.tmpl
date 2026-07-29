@@ -40,4 +40,5 @@ _Provided above — no need to re-fetch it._
 {{- if .Verify}}
 - Before done: {{join .Verify " · "}}
 {{- end}}
+- Keep a `.state.md` at the root with at least a `next:` line (the one action to resume with). Update it as you work. norn surfaces it on the dashboard, and it's git-ignored so it never lands in a commit.
 - Disposable — clean up with `norn --clean` once it's merged.

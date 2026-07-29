@@ -118,6 +118,7 @@ type dashRow struct {
 	PRChecks      string            // ✓ / ✗ / · / ""
 	PRPending     bool              // currently being fetched
 	AgentState    claude.AgentState // live: working / waiting / idle / "" (ephemeral)
+	Next          string            // .state.md `next:` action, shown in place of TITLE (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -546,7 +547,7 @@ func (d Dashboard) View() string {
 	headers := []string{"BRANCH"}
 	if showTitle {
 		colWidths = append(colWidths, titleW)
-		headers = append(headers, "TITLE")
+		headers = append(headers, "NEXT")
 	}
 	if showState {
 		colWidths = append(colWidths, stateW)
@@ -566,7 +567,7 @@ func (d Dashboard) View() string {
 	for i, r := range vis {
 		cells := []string{r.Branch}
 		if showTitle {
-			cells = append(cells, r.Title)
+			cells = append(cells, nextOrTitle(r))
 		}
 		if showState {
 			cells = append(cells, stateCell(r.AgentState))
@@ -647,6 +648,27 @@ func worktreeTitle(wtPath string) string {
 	return prompt.ExtractTitle(string(data))
 }
 
+// worktreeNext reads the `next:` action from a worktree's .state.md (the live
+// state the last session left). "" when absent, so pre-contract threads fall
+// back to their title.
+func worktreeNext(wtPath string) string {
+	data, err := os.ReadFile(wtPath + "/.state.md")
+	if err != nil {
+		return ""
+	}
+	return prompt.ExtractNext(string(data))
+}
+
+// nextOrTitle is what the flexible middle column shows: the `next:` action when
+// the thread has one, otherwise the title (reconstructable from the branch, so
+// losing it to the fallback costs nothing).
+func nextOrTitle(r dashRow) string {
+	if r.Next != "" {
+		return r.Next
+	}
+	return r.Title
+}
+
 // loadCmd reloads the store and reconciles with live worktree list.
 // Fast path only — PR data is fetched async via fetchPRCmd after this returns.
 func (d Dashboard) loadCmd() tea.Cmd {
@@ -702,6 +724,7 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				continue
 			}
 			row := dashRow{Session: sess, WorktreeAlive: true}
+			row.Next = worktreeNext(sess.Path)
 			if useClaude {
 				row.AgentState, _ = claude.Probe(sess.Path)
 			}

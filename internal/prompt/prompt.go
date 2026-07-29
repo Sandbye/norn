@@ -338,6 +338,21 @@ func ExtractTitle(content string) string {
 	return ""
 }
 
+// nextRegex reads the `next:` line from a .state.md. Unlike .worktree.md,
+// .state.md is bare `key: value` lines (no `--- … ---` frontmatter), per the
+// state-file contract, so this matches a top-level `next:` anywhere in the body.
+var nextRegex = regexp.MustCompile(`(?m)^next:[ \t]*(.+?)[ \t]*$`)
+
+// ExtractNext pulls the single `next:` action out of a .state.md body so the
+// dashboard can show it without opening the file. Returns "" when the field is
+// absent or the file is malformed, so a missing state file degrades silently.
+func ExtractNext(content string) string {
+	if m := nextRegex.FindStringSubmatch(content); m != nil {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
+}
+
 func hintBlock(kind, hint string) string {
 	if hint == "" {
 		if kind == "review" {
