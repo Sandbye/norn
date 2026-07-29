@@ -404,7 +404,7 @@ func (m settingsModel) View() string {
 			tabs = append(tabs, dimStyle.Render(l.name))
 		}
 	}
-	header := titleStyle.Render("norn settings") + "   " + strings.Join(tabs, dimStyle.Render(" · "))
+	header := strings.Join(tabs, dimStyle.Render(" · "))
 	if len(m.layers) > 1 {
 		header += dimStyle.Render("   ←/→ layer")
 	}

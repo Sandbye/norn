@@ -117,6 +117,32 @@ const frameWidth = 118
 // full-screen fill. A tab with more content than this grows to fit (no clip).
 const frameHeight = 32
 
+// frameInnerHeight is the panel's fixed inner content height for a terminal of
+// the given height: capped at frameHeight, shrinking only on small terminals.
+// It is a pure function of the terminal size, never of content, so the box
+// stays a constant height and never jumps as views change.
+func frameInnerHeight(termHeight int) int {
+	inner := frameHeight
+	if termHeight > 0 && termHeight-6 < frameHeight {
+		inner = termHeight - 6
+	}
+	if inner < 6 {
+		inner = 6
+	}
+	return inner
+}
+
+// frameBodyRows is the rows a tab's body may use inside the fixed frame, below
+// the two-line masthead + its blank. Views size their scroll windows to this so
+// content fits the constant-height panel instead of stretching it.
+func frameBodyRows(termHeight int) int {
+	rows := frameInnerHeight(termHeight) - 3
+	if rows < 3 {
+		rows = 3
+	}
+	return rows
+}
+
 // frame wraps content in a rounded frost-bordered panel and floats it centered
 // on a Nord-filled screen — an arctic pane that gives norn's views identity.
 // Panel and screen share the nord0 background so styled spans never reveal a
@@ -132,22 +158,15 @@ func frame(content string, width, height int) string {
 		return centerScreen(content, width, height)
 	}
 	content = sealBackground(strings.Trim(content, "\n"), colorBase)
-	// Constant inner height, independent of content, so switching tabs doesn't
-	// resize/recenter the panel. Capped well below full-screen (full height felt
-	// too tall) but grown to fit any tab whose content is taller, so nothing
-	// clips. Long lists still want a scroll (see roadmap).
-	innerH := height - 6
-	if innerH > frameHeight {
-		innerH = frameHeight
-	}
-	if innerH < 6 {
-		innerH = 6
-	}
-	if lines := strings.Count(content, "\n") + 1; lines > innerH {
-		innerH = lines
-		if innerH > height-2 {
-			innerH = height - 2
-		}
+	// Fixed inner height: it never grows to fit content, so the panel never jumps
+	// as you switch tabs or the selected thread's detail changes size. It only
+	// changes when the terminal is resized. Views size their scroll windows to
+	// frameBodyRows so their content fits; anything taller is clipped here rather
+	// than stretching the box.
+	innerH := frameInnerHeight(height)
+	lines := strings.Split(content, "\n")
+	if len(lines) > innerH {
+		content = strings.Join(lines[:innerH], "\n")
 	}
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

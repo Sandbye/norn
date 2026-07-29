@@ -122,8 +122,6 @@ func (m tasksModel) Update(msg tea.Msg) (tasksModel, tea.Cmd) {
 
 func (m tasksModel) View() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render(kindTaskStyle.Render("Tasks")))
-	b.WriteString("\n")
 
 	scope := m.scope
 	if scope == "" {
@@ -181,7 +179,9 @@ func (m tasksModel) View() string {
 	}
 	previewW := max(avail-listW-2, 20)
 
-	rows := max(m.height-13, 3)
+	// Size the list to the fixed frame body (minus this view's own chrome:
+	// scope line, blank, filter, count, help) so the panel never grows/jumps.
+	rows := max(frameBodyRows(m.height)-6, 3)
 	start, end := scrollWindow(m.cursor, len(vis), rows)
 
 	// Right-align the id in a fixed field so ids of different digit-lengths

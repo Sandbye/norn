@@ -13,20 +13,8 @@ type palette struct {
 	ThreadWord string // plural noun for worktree sessions ("threads" / "lily pads")
 	TreeWord   string // the git-root metaphor ("tree" / "mushroom")
 
-	// Sprite is an optional pixel mascot shown by the dashboard, rendered with
-	// the upper-half-block trick (two pixels per text cell). Rows should be
-	// equal length; a rune absent from SpriteColors (by convention '.') is
-	// transparent. Purely data — a new theme adds a mascot with no code change.
-	Sprite       []string
-	SpriteColors map[rune]lipgloss.Color
-
-	// Spin, when true, shows a real 3D rotating torus above the logo (animated).
-	// Takes precedence over Sprite.
+	// Spin, when true, animates the header mark on a tick (reserved).
 	Spin bool
-
-	// MarkAbove stacks the sprite above the wordmark (centered) instead of
-	// inline to its left. Suits tall marks like the tree.
-	MarkAbove bool
 
 	Base    lipgloss.Color // darkest bg
 	Surface lipgloss.Color
@@ -78,10 +66,6 @@ var nordPalette = palette{
 	HunkBG:     lipgloss.Color("#333d4a"),
 	TokenHiRm:  lipgloss.Color("#5a3138"),
 	TokenHiAdd: lipgloss.Color("#3f5142"),
-
-	// norn's world tree, still, inline beside the wordmark.
-	Sprite:       treeGrid,
-	SpriteColors: treeColors,
 }
 
 // frogPalette — mossy forest greens with a warm accent. Ribbit.
@@ -110,9 +94,6 @@ var frogPalette = palette{
 	HunkBG:     lipgloss.Color("#243a2b"),
 	TokenHiRm:  lipgloss.Color("#54282c"),
 	TokenHiAdd: lipgloss.Color("#31491f"),
-
-	Sprite:       frogGrid,
-	SpriteColors: frogColors,
 }
 
 var themes = map[string]palette{

@@ -121,6 +121,8 @@ type dashRow struct {
 	AgentState    claude.AgentState // live: working / waiting / idle / "" (ephemeral)
 	Next          string            // .state.md `next:` action (ephemeral)
 	Goal          string            // .state.md `goal:` one-liner, shown in the detail pane (ephemeral)
+	Done          []string          // .state.md `done:` items — recent progress (ephemeral)
+	Blocked       string            // .state.md `blocked:` (non-"none"); "" when clear (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -492,14 +494,12 @@ func (d Dashboard) View() string {
 	// minus the header + footer + gaps, so the split fills the panel exactly:
 	// tall enough to pin the footer to the bottom, not so tall it overflows and
 	// clips the header. ~14 covers the mascot header, two gaps, and the footer.
-	innerH := frameHeight
-	if d.height > 0 && d.height-6 < frameHeight {
-		innerH = d.height - 6
-	}
+	innerH := frameInnerHeight(d.height)
 	bodyH := max(innerH-14, 6)
 
 	sidebar := lipgloss.NewStyle().
 		Width(sidebarW).
+		Height(bodyH). // full-height so the right border is a clean vertical rule
 		Border(lipgloss.NormalBorder(), false, true, false, false).
 		BorderForeground(colorSurface).
 		Render(d.renderSidebar(vis, sidebarW, bodyH))
@@ -533,16 +533,16 @@ func (d Dashboard) View() string {
 	return fmt.Sprintf("%s\n\n%s\n\n%s", header, body, d.dashKeyHelp())
 }
 
-// renderHeader is the compact command-center header: the theme mascot (small)
-// beside the wordmark + scope + any summary status. Replaces the big logo/torus
-// banner in this view so the sidebar/detail panes get the vertical room.
+// renderHeader is the command-center hero: the "ᚾᛟᚱᚾ" rune mark in white beside
+// a live gauge — one status glyph per thread (the same colored glyphs as the
+// sidebar) — over the scope/status line. The rune mark is the identity; the
+// gauge is the fleet at a glance; color only ever means status.
 func (d Dashboard) renderHeader() string {
 	scope := "all repos"
 	if d.scopeRepo != "" {
 		scope = d.scopeRepo
 	}
-	word := lipgloss.NewStyle().Bold(true).Foreground(colorLavender).Render("norn")
-	ident := word + "\n" + dimStyle.Render(fmt.Sprintf("%s · scope: %s · %d live", ThreadWord(), scope, len(d.rows)))
+	ident := dimStyle.Render(fmt.Sprintf("%s · scope: %s · %d live", ThreadWord(), scope, len(d.rows)))
 	switch {
 	case d.summarizing:
 		ident += "\n" + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"…")
@@ -551,39 +551,56 @@ func (d Dashboard) renderHeader() string {
 	case d.readyBranch != "":
 		ident += "\n" + activeStyle.Render("✓ summary ready: "+d.readyBranch+" (press s)")
 	}
-	// Bottom-align the identity to the mascot's baseline so it doesn't float in
-	// the middle of the mascot's height.
-	if mark := ThemeSprite(); mark != "" && !active.Spin {
-		return lipgloss.JoinHorizontal(lipgloss.Bottom, mark, "  ", ident)
+	runes := lipgloss.NewStyle().Bold(true).Foreground(colorText).Render("ᚾᛟᚱᚾ")
+	var dots []string
+	for _, r := range d.rows {
+		dots = append(dots, stateGlyph(r.AgentState))
 	}
-	return ident
+	hero := runes
+	if len(dots) > 0 {
+		hero += "   " + strings.Join(dots, " ")
+	}
+	return hero + "\n\n" + ident
 }
 
-// renderSidebar lists the threads (state glyph + branch), cursor highlighted,
-// scrolled to keep the cursor visible.
+// renderSidebar lists the threads (state glyph + branch + a right-aligned age),
+// cursor highlighted, scrolled to keep the cursor visible. The age carries
+// glanceable recency so the left rail reads as a live index, not a bare list.
 func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 	lines := []string{dimStyle.Render(fitCell("THREADS", w))}
 	listH := max(h-len(lines), 3)
 	start, end := scrollWindow(d.cursor, len(vis), listH)
+	const ageW = 3
+	branchW := max(w-ageW-3, 4) // glyph + two spaces + age column
 	for i := start; i < end; i++ {
 		r := vis[i]
+		age := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt))
 		if i == d.cursor {
-			row := fitCell(glyphRune(r.AgentState)+" "+r.Branch, w)
-			lines = append(lines, lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(row))
+			plain := glyphRune(r.AgentState) + " " + fitCell(r.Branch, branchW) + " " + age
+			lines = append(lines, lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(fitCell(plain, w)))
 			continue
 		}
-		branch := fitCell(r.Branch, w-2)
+		branch := fitCell(r.Branch, branchW)
 		if r.WorktreeAlive {
 			branch = branchStyle.Render(branch)
 		} else {
 			branch = dimStyle.Render(branch)
 		}
-		lines = append(lines, stateGlyph(r.AgentState)+" "+branch)
+		lines = append(lines, stateGlyph(r.AgentState)+" "+branch+" "+dimStyle.Render(age))
 	}
 	if len(vis) > listH {
 		lines = append(lines, dimStyle.Render(fmt.Sprintf("  %d/%d", d.cursor+1, len(vis))))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// compactAge is shortAge trimmed for the sidebar's narrow age column ("now"
+// instead of "just now").
+func compactAge(t time.Time) string {
+	if a := shortAge(t); a != "just now" {
+		return a
+	}
+	return "now"
 }
 
 // renderDetail is the pane for the selected thread: title + branch, then the
@@ -602,19 +619,59 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 	if r.Goal != "" {
 		b.WriteString("\n" + lipgloss.NewStyle().Width(w).Foreground(colorText).Render(r.Goal) + "\n")
 	}
+	// next: the one action to take. It's the field read first, so it's promoted
+	// above the rule and wrapped (never truncated) — a long next stays fully
+	// readable, hang-indented under a teal arrow.
+	if r.Next != "" {
+		arrow := lipgloss.NewStyle().Foreground(colorTeal).Bold(true).Render("→ ")
+		wrapped := lipgloss.NewStyle().Width(max(w-2, 8)).Foreground(colorText).Render(r.Next)
+		for i, ln := range strings.Split(wrapped, "\n") {
+			if i == 0 {
+				b.WriteString("\n" + arrow + ln + "\n")
+			} else {
+				b.WriteString("  " + ln + "\n")
+			}
+		}
+	}
 	b.WriteString("\n" + dimStyle.Render(strings.Repeat("─", w)) + "\n\n")
+	const labelW = 7
 	row := func(k, v string) {
 		if v == "" {
 			return
 		}
-		b.WriteString(dimStyle.Render(fitCell(k, 7)) + v + "\n")
+		b.WriteString(dimStyle.Render(fitCell(k, labelW)) + v + "\n")
+	}
+	// wrapRow is row() for values that can run long: wrapped, hang-indented under
+	// the label so a long blocker never overflows the pane.
+	wrapRow := func(k, v string, vstyle lipgloss.Style) {
+		if v == "" {
+			return
+		}
+		wrapped := vstyle.Width(max(w-labelW, 8)).Render(v)
+		for i, ln := range strings.Split(wrapped, "\n") {
+			if i == 0 {
+				b.WriteString(dimStyle.Render(fitCell(k, labelW)) + ln + "\n")
+			} else {
+				b.WriteString(strings.Repeat(" ", labelW) + ln + "\n")
+			}
+		}
 	}
 	row("state", glyphStyle(r.AgentState).Render(stateLabel(r.AgentState)))
-	row("next", truncate(r.Next, max(w-8, 8)))
+	wrapRow("blocked", r.Blocked, dirtyStyle)
 	row("pr", prDetail(r))
 	row("last", shortAge(r.LastActivityAt))
 	row("kind", r.Kind)
 	row("cu", r.ClickUpID)
+
+	// Recent progress from .state.md `done:` — the last few wins, so a returning
+	// session sees what already landed without opening the file.
+	if len(r.Done) > 0 {
+		start := max(len(r.Done)-3, 0)
+		b.WriteString("\n" + dimStyle.Render("recent") + "\n")
+		for _, item := range r.Done[start:] {
+			b.WriteString("  " + activeStyle.Render("✓") + " " + dimStyle.Render(truncate(item, max(w-4, 8))) + "\n")
+		}
+	}
 	return lipgloss.NewStyle().Width(w).Render(b.String())
 }
 
@@ -738,24 +795,28 @@ func renderMarkdown(md string, termWidth int) string {
 	return strings.TrimRight(out, "\n")
 }
 
-// worktreeNext reads the `next:` action from a worktree's .state.md (the live
-// state the last session left). "" when absent, so pre-contract threads fall
-// back to their title.
-func worktreeNext(wtPath string) string {
-	data, err := os.ReadFile(wtPath + "/.state.md")
-	if err != nil {
-		return ""
-	}
-	return prompt.ExtractNext(string(data))
+// stateFile is the live task state a worktree's .state.md carries, read once
+// per reconcile for the dashboard detail pane. Empty fields when absent, so
+// pre-contract threads degrade silently.
+type stateFile struct {
+	next, goal, blocked string
+	done                []string
 }
 
-// worktreeGoal reads the `goal:` one-liner from a worktree's .state.md.
-func worktreeGoal(wtPath string) string {
+// worktreeState reads a worktree's .state.md once and extracts every field the
+// dashboard shows (was two separate reads for next/goal).
+func worktreeState(wtPath string) stateFile {
 	data, err := os.ReadFile(wtPath + "/.state.md")
 	if err != nil {
-		return ""
+		return stateFile{}
 	}
-	return prompt.ExtractGoal(string(data))
+	s := string(data)
+	return stateFile{
+		next:    prompt.ExtractNext(s),
+		goal:    prompt.ExtractGoal(s),
+		blocked: prompt.ExtractBlocked(s),
+		done:    prompt.ExtractDone(s),
+	}
 }
 
 // loadCmd reloads the store and reconciles with live worktree list.
@@ -813,8 +874,8 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				continue
 			}
 			row := dashRow{Session: sess, WorktreeAlive: true}
-			row.Next = worktreeNext(sess.Path)
-			row.Goal = worktreeGoal(sess.Path)
+			st := worktreeState(sess.Path)
+			row.Next, row.Goal, row.Done, row.Blocked = st.next, st.goal, st.done, st.blocked
 			if useClaude {
 				row.AgentState, _ = claude.Probe(sess.Path)
 			}

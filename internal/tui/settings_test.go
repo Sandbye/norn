@@ -76,7 +76,7 @@ func TestSettingsTaskProvider(t *testing.T) {
 func TestSettingsViewRenders(t *testing.T) {
 	m := newTestSettings(t)
 	out := m.View()
-	for _, want := range []string{"norn settings", "Global", "command", "ai_naming", "template"} {
+	for _, want := range []string{"Global", "command", "ai_naming", "template"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("View missing %q", want)
 		}

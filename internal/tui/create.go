@@ -346,8 +346,6 @@ func (m createModel) updateTaskPicker(s string) (createModel, tea.Cmd) {
 
 func (m createModel) View() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render(kindTaskStyle.Render("New task")))
-	b.WriteString("\n")
 
 	if m.pickingTask {
 		b.WriteString(subtitleStyle.Render("Pick a task:"))
@@ -369,10 +367,7 @@ func (m createModel) View() string {
 		case len(vis) == 0:
 			b.WriteString("   " + dimStyle.Render("no tasks match"))
 		default:
-			rows := m.height - 14
-			if rows < 3 {
-				rows = 3
-			}
+			rows := max(frameBodyRows(m.height)-6, 3)
 			titleW := m.width - 40
 			if titleW < 18 {
 				titleW = 18
