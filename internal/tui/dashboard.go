@@ -459,39 +459,7 @@ func (d Dashboard) View() string {
 		return fmt.Sprintf("%s\n\n%s\n\n%s", title, body, dimStyle.Render("r refresh · any key to dismiss"))
 	}
 
-	// The norn wordmark, topped by the theme's mark: a real 3D spinning torus
-	// if the theme spins, else its pixel mascot inline to the left.
-	logo := Logo()
-	switch {
-	case active.Spin:
-		A := float64(d.markFrame) * 0.09
-		B := float64(d.markFrame) * 0.05
-		logo = lipgloss.JoinVertical(lipgloss.Center, render3DTorus(28, 14, A, B), "", logo)
-	case len(active.Sprite) > 0 && active.MarkAbove:
-		logo = lipgloss.JoinVertical(lipgloss.Center, ThemeSprite(), "", logo)
-	case len(active.Sprite) > 0:
-		logo = lipgloss.JoinHorizontal(lipgloss.Center, ThemeSprite(), "   ", logo)
-	}
-
-	scope := "all repos"
-	if d.scopeRepo != "" {
-		scope = d.scopeRepo
-	}
-	meta := dimStyle.Render(ThreadWord() + "   scope: " + scope)
-	// (No "refreshed Xs ago": the dashboard reloads on every action, so it was
-	// always "just now" — noise. Staleness that matters is the remote check,
-	// tracked separately if we ever surface it.)
-	// Non-modal summary status — dashboard stays usable while a summary runs.
-	switch {
-	case d.summarizing:
-		meta += "   " + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"…")
-	case d.summaryErr != nil && d.readyBranch != "":
-		meta += errorStyle.Render("   ✗ summary failed: " + d.readyBranch + " (s retries)")
-	case d.readyBranch != "":
-		meta += activeStyle.Render("   ✓ summary ready: " + d.readyBranch + " (press s)")
-	}
-
-	header := logo + "\n\n" + meta
+	header := d.renderHeader()
 
 	if len(d.rows) == 0 {
 		var body string
@@ -503,97 +471,36 @@ func (d Dashboard) View() string {
 		return fmt.Sprintf("%s\n\n%s\n\n%s", header, body, d.dashKeyHelp())
 	}
 
-	// Columns are rendered as fixed-width plain text, then the full line gets
-	// one outer style for cursor / dead state. This keeps padding correct —
-	// ANSI escape codes are invisible to rune counts.
-	const (
-		stateW    = 10
-		kindW     = 7
-		clickupW  = 11
-		prW       = 9
-		statusW   = 9
-		activityW = 9
-	)
-	// Size the table to the panel frame() renders into, NOT the full terminal:
-	// inner = min(frameWidth, width-8), minus the 3-col horizontal padding each
-	// side. Overshooting here makes every row wrap. The small columns are fixed;
-	// BRANCH and TITLE flex to fill exactly what's left, so the table always fits.
+	// Command center: a scannable sidebar of every thread + a detail pane for the
+	// selected one. Sized to the panel frame() renders into (min(frameWidth,
+	// width-8) minus padding), not the terminal, so it never overflows.
+	vis := d.visibleRows()
+
 	avail := frameWidth - 6
 	if d.width > 0 {
 		if inner := d.width - 8; inner < frameWidth {
 			avail = inner - 6
 		}
 	}
-	// STATE (live agent state) only makes sense for the claude agent, which is
-	// what writes the transcripts we read; drop the column otherwise.
-	showState := d.cfg.AgentCommand() == "claude"
-	smallFixed := kindW + clickupW + prW + statusW + activityW
-	if showState {
-		smallFixed += stateW
+	sidebarW := 30
+	if avail < 72 { // narrow panel: give the sidebar half, keep a usable detail
+		sidebarW = max(avail/2, 16)
 	}
-	remaining := max(avail-smallFixed, 8)
+	detailW := max(avail-sidebarW-3, 20) // 3 = right border + gap
+	bodyH := max(d.height-12, 6)
 
-	// Give TITLE the space beyond a 24-col branch when there's room for both;
-	// on a panel too narrow, drop TITLE and let BRANCH take the remainder.
-	branchW := remaining
-	titleW := 0
-	showTitle := remaining >= 24+10
-	if showTitle {
-		branchW = 24
-		titleW = remaining - 24
-	}
+	sidebar := lipgloss.NewStyle().
+		Width(sidebarW).
+		Border(lipgloss.NormalBorder(), false, true, false, false).
+		BorderForeground(colorSurface).
+		Render(d.renderSidebar(vis, sidebarW, bodyH))
 
-	// Column order: BRANCH · [TITLE] · [STATE] · KIND · CU · PR · STATUS · LAST.
-	colWidths := []int{branchW}
-	headers := []string{"BRANCH"}
-	if showTitle {
-		colWidths = append(colWidths, titleW)
-		headers = append(headers, "NEXT")
-	}
-	if showState {
-		colWidths = append(colWidths, stateW)
-		headers = append(headers, "STATE")
-	}
-	colWidths = append(colWidths, kindW, clickupW, prW, statusW, activityW)
-	headers = append(headers, "KIND", "CU", "PR", "STATUS", "LAST")
-
-	hdrStyle := lipgloss.NewStyle().Bold(true).Foreground(colorText)
-	headerLine := joinCells(headers, colWidths)
-	headerRow := hdrStyle.Render(headerLine)
-
-	vis := d.visibleRows()
-
-	var rows []string
-	rows = append(rows, headerRow)
-	for i, r := range vis {
-		cells := []string{r.Branch}
-		if showTitle {
-			cells = append(cells, nextOrTitle(r))
-		}
-		if showState {
-			cells = append(cells, stateCell(r.AgentState))
-		}
-		cells = append(cells,
-			r.Kind,
-			clickupCell(r.ClickUpID),
-			prCell(r),
-			statusCell(r),
-			shortAge(r.LastActivityAt),
-		)
-		line := joinCells(cells, colWidths)
-		switch {
-		case i == d.cursor:
-			line = lipgloss.NewStyle().
-				Foreground(colorBase).
-				Background(colorLavender).
-				Render(line)
-		case !r.WorktreeAlive:
-			line = dimStyle.Render(line)
-		}
-		rows = append(rows, line)
+	var detail string
+	if d.cursor >= 0 && d.cursor < len(vis) {
+		detail = d.renderDetail(vis[d.cursor], detailW)
 	}
 
-	body := strings.Join(rows, "\n")
+	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", detail)
 
 	// Filter line above the help.
 	if d.filter.active || d.filter.query != "" {
@@ -612,6 +519,146 @@ func (d Dashboard) View() string {
 	}
 
 	return fmt.Sprintf("%s\n\n%s\n\n%s", header, body, d.dashKeyHelp())
+}
+
+// renderHeader is the compact command-center header: the theme mascot (small)
+// beside the wordmark + scope + any summary status. Replaces the big logo/torus
+// banner in this view so the sidebar/detail panes get the vertical room.
+func (d Dashboard) renderHeader() string {
+	scope := "all repos"
+	if d.scopeRepo != "" {
+		scope = d.scopeRepo
+	}
+	word := lipgloss.NewStyle().Bold(true).Foreground(colorLavender).Render("norn")
+	meta := word + "  " + dimStyle.Render(ThreadWord()+" · scope: "+scope)
+	switch {
+	case d.summarizing:
+		meta += "   " + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"…")
+	case d.summaryErr != nil && d.readyBranch != "":
+		meta += errorStyle.Render("   ✗ summary failed: " + d.readyBranch + " (s retries)")
+	case d.readyBranch != "":
+		meta += activeStyle.Render("   ✓ summary ready: " + d.readyBranch + " (press s)")
+	}
+	if mark := ThemeSprite(); mark != "" && !active.Spin {
+		return lipgloss.JoinHorizontal(lipgloss.Center, mark, "  ", meta)
+	}
+	return meta
+}
+
+// renderSidebar lists the threads (state glyph + branch), cursor highlighted,
+// scrolled to keep the cursor visible.
+func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
+	lines := []string{dimStyle.Render(fitCell("THREADS", w))}
+	listH := max(h-len(lines), 3)
+	start, end := scrollWindow(d.cursor, len(vis), listH)
+	for i := start; i < end; i++ {
+		r := vis[i]
+		if i == d.cursor {
+			row := fitCell(glyphRune(r.AgentState)+" "+r.Branch, w)
+			lines = append(lines, lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(row))
+			continue
+		}
+		branch := fitCell(r.Branch, w-2)
+		if r.WorktreeAlive {
+			branch = branchStyle.Render(branch)
+		} else {
+			branch = dimStyle.Render(branch)
+		}
+		lines = append(lines, stateGlyph(r.AgentState)+" "+branch)
+	}
+	if len(vis) > listH {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("  %d/%d", d.cursor+1, len(vis))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderDetail is the pane for the selected thread: title + branch, then the
+// state / next / PR / activity / kind / CU, each on a labeled row.
+func (d Dashboard) renderDetail(r dashRow, w int) string {
+	if w < 1 {
+		return ""
+	}
+	title := r.Title
+	if title == "" {
+		title = r.Branch
+	}
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorText).Render(truncate(title, w)) + "\n")
+	b.WriteString(dimStyle.Render(truncate(r.Branch, w)) + "\n\n")
+	row := func(k, v string) {
+		if v == "" {
+			return
+		}
+		b.WriteString(dimStyle.Render(fitCell(k, 7)) + v + "\n")
+	}
+	row("state", glyphStyle(r.AgentState).Render(stateLabel(r.AgentState)))
+	row("next", truncate(r.Next, max(w-8, 8)))
+	row("pr", prDetail(r))
+	row("last", shortAge(r.LastActivityAt))
+	row("kind", r.Kind)
+	row("cu", r.ClickUpID)
+	return lipgloss.NewStyle().Width(w).Render(b.String())
+}
+
+// glyphRune / glyphStyle / stateGlyph render the live agent state as a small
+// colored dot for the sidebar + detail.
+func glyphRune(s claude.AgentState) string {
+	switch s {
+	case claude.StateWorking:
+		return "●"
+	case claude.StateWaiting:
+		return "◆"
+	case claude.StateIdle:
+		return "○"
+	case claude.StateStuck:
+		return "✗"
+	default:
+		return "·"
+	}
+}
+
+func glyphStyle(s claude.AgentState) lipgloss.Style {
+	switch s {
+	case claude.StateWorking:
+		return activeStyle
+	case claude.StateWaiting:
+		return dirtyStyle
+	case claude.StateStuck:
+		return goneStyle
+	default:
+		return dimStyle
+	}
+}
+
+func stateGlyph(s claude.AgentState) string { return glyphStyle(s).Render(glyphRune(s)) }
+
+func stateLabel(s claude.AgentState) string {
+	switch s {
+	case claude.StateWorking:
+		return "working"
+	case claude.StateWaiting:
+		return "waiting for you"
+	case claude.StateIdle:
+		return "idle"
+	case claude.StateStuck:
+		return "stuck"
+	default:
+		return "—"
+	}
+}
+
+func prDetail(r dashRow) string {
+	if r.PRNumber == 0 {
+		return "—"
+	}
+	s := fmt.Sprintf("#%d", r.PRNumber)
+	if r.PRState != "" {
+		s += " " + strings.ToLower(r.PRState)
+	}
+	if r.PRChecks != "" {
+		s += " " + r.PRChecks
+	}
+	return s
 }
 
 // dashKeyHelp is context-aware: only shows actions that are available for the
@@ -682,16 +729,6 @@ func worktreeNext(wtPath string) string {
 		return ""
 	}
 	return prompt.ExtractNext(string(data))
-}
-
-// nextOrTitle is what the flexible middle column shows: the `next:` action when
-// the thread has one, otherwise the title (reconstructable from the branch, so
-// losing it to the fallback costs nothing).
-func nextOrTitle(r dashRow) string {
-	if r.Next != "" {
-		return r.Next
-	}
-	return r.Title
 }
 
 // loadCmd reloads the store and reconciles with live worktree list.
@@ -818,75 +855,6 @@ func lookupPR(branch string) (prCacheEntry, bool) {
 
 // Cell helpers return plain text only. Coloring happens at line level so width
 // calculations stay correct.
-
-func clickupCell(id string) string {
-	if id == "" {
-		return "—"
-	}
-	return "CU-" + id
-}
-
-func prCell(r dashRow) string {
-	if r.PRPending && r.PRNumber == 0 {
-		return "…"
-	}
-	if r.PRNumber == 0 {
-		return "—"
-	}
-	s := fmt.Sprintf("#%d", r.PRNumber)
-	if r.PRChecks != "" {
-		s += " " + r.PRChecks
-	}
-	return s
-}
-
-func statusCell(r dashRow) string {
-	if !r.WorktreeAlive {
-		return "dead"
-	}
-	if r.PRState != "" {
-		return strings.ToLower(r.PRState)
-	}
-	return r.Status
-}
-
-// stateCell renders the live agent state as a plain glyph + label. Cells stay
-// plain (no ANSI) so joinCells' rune-width math holds; line-level styling colors
-// the row. Blank when unknown / no session.
-func stateCell(s claude.AgentState) string {
-	switch s {
-	case claude.StateWorking:
-		return "● working"
-	case claude.StateWaiting:
-		return "◆ waiting"
-	case claude.StateIdle:
-		return "○ idle"
-	case claude.StateStuck:
-		return "✗ stuck"
-	default:
-		return ""
-	}
-}
-
-// joinCells fits each cell to its column width: truncates with `…` if too long,
-// pads with spaces if too short. Operates on plain text only.
-func joinCells(cells []string, widths []int) string {
-	var b strings.Builder
-	for i, c := range cells {
-		w := widths[i]
-		runes := []rune(c)
-		switch {
-		case len(runes) > w-1 && w > 1:
-			c = string(runes[:w-2]) + "…"
-			runes = []rune(c)
-		}
-		b.WriteString(c)
-		if len(runes) < w {
-			b.WriteString(strings.Repeat(" ", w-len(runes)))
-		}
-	}
-	return b.String()
-}
 
 func shortAge(t time.Time) string {
 	if t.IsZero() {
