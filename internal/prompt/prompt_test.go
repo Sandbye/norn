@@ -119,6 +119,19 @@ func TestExtractNext(t *testing.T) {
 	}
 }
 
+func TestExtractGoal(t *testing.T) {
+	cases := []struct{ name, content, want string }{
+		{"state file", "task: x\ngoal: ship the SSO flow\nnext: run it\n", "ship the SSO flow"},
+		{"absent", "task: x\nnext: y\n", ""},
+		{"empty", "goal: \n", ""},
+	}
+	for _, c := range cases {
+		if got := ExtractGoal(c.content); got != c.want {
+			t.Errorf("%s: ExtractGoal = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestList(t *testing.T) {
 	names := List()
 	want := map[string]bool{"task": false, "review": false}

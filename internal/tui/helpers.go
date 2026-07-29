@@ -106,14 +106,16 @@ func centerScreen(content string, width, height int) string {
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
 }
 
-// frameWidth is the panel's fixed inner width (content box, padding included).
-// Fixed so the panel never resizes as the focused row's help line changes
-// length — otherwise the whole panel would jitter on every cursor move.
-const frameWidth = 104
+// frameWidth caps the panel's inner width (content box, padding included). The
+// panel shrinks to fit smaller terminals (min(frameWidth, width-8)); this is the
+// ceiling so a big terminal gets a roomy command center without stretching to
+// absurd widths. Capped (not full-width) so the panel doesn't jitter as the
+// focused row's help line changes length.
+const frameWidth = 118
 
 // frameHeight caps the panel's inner rows so it reads as a centered pane, not a
 // full-screen fill. A tab with more content than this grows to fit (no clip).
-const frameHeight = 24
+const frameHeight = 32
 
 // frame wraps content in a rounded frost-bordered panel and floats it centered
 // on a Nord-filled screen — an arctic pane that gives norn's views identity.
