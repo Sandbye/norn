@@ -114,9 +114,10 @@ const prCacheTTL = 60 * time.Second
 type dashRow struct {
 	state.Session
 	WorktreeAlive bool
-	PRState       string // OPEN / DRAFT / MERGED / CLOSED / ""
-	PRChecks      string // ✓ / ✗ / · / ""
-	PRPending     bool   // currently being fetched
+	PRState       string            // OPEN / DRAFT / MERGED / CLOSED / ""
+	PRChecks      string            // ✓ / ✗ / · / ""
+	PRPending     bool              // currently being fetched
+	AgentState    claude.AgentState // live: working / waiting / idle / "" (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -504,6 +505,7 @@ func (d Dashboard) View() string {
 	// one outer style for cursor / dead state. This keeps padding correct —
 	// ANSI escape codes are invisible to rune counts.
 	const (
+		stateW    = 10
 		kindW     = 7
 		clickupW  = 11
 		prW       = 9
@@ -520,7 +522,13 @@ func (d Dashboard) View() string {
 			avail = inner - 6
 		}
 	}
+	// STATE (live agent state) only makes sense for the claude agent, which is
+	// what writes the transcripts we read; drop the column otherwise.
+	showState := d.cfg.AgentCommand() == "claude"
 	smallFixed := kindW + clickupW + prW + statusW + activityW
+	if showState {
+		smallFixed += stateW
+	}
 	remaining := max(avail-smallFixed, 8)
 
 	// Give TITLE the space beyond a 24-col branch when there's room for both;
@@ -533,12 +541,19 @@ func (d Dashboard) View() string {
 		titleW = remaining - 24
 	}
 
-	colWidths := []int{branchW, kindW, clickupW, prW, statusW, activityW}
-	headers := []string{"BRANCH", "KIND", "CU", "PR", "STATUS", "LAST"}
+	// Column order: BRANCH · [TITLE] · [STATE] · KIND · CU · PR · STATUS · LAST.
+	colWidths := []int{branchW}
+	headers := []string{"BRANCH"}
 	if showTitle {
-		colWidths = []int{branchW, titleW, kindW, clickupW, prW, statusW, activityW}
-		headers = []string{"BRANCH", "TITLE", "KIND", "CU", "PR", "STATUS", "LAST"}
+		colWidths = append(colWidths, titleW)
+		headers = append(headers, "TITLE")
 	}
+	if showState {
+		colWidths = append(colWidths, stateW)
+		headers = append(headers, "STATE")
+	}
+	colWidths = append(colWidths, kindW, clickupW, prW, statusW, activityW)
+	headers = append(headers, "KIND", "CU", "PR", "STATUS", "LAST")
 
 	hdrStyle := lipgloss.NewStyle().Bold(true).Foreground(colorText)
 	headerLine := joinCells(headers, colWidths)
@@ -552,6 +567,9 @@ func (d Dashboard) View() string {
 		cells := []string{r.Branch}
 		if showTitle {
 			cells = append(cells, r.Title)
+		}
+		if showState {
+			cells = append(cells, stateCell(r.AgentState))
 		}
 		cells = append(cells,
 			r.Kind,
@@ -633,6 +651,8 @@ func worktreeTitle(wtPath string) string {
 // Fast path only — PR data is fetched async via fetchPRCmd after this returns.
 func (d Dashboard) loadCmd() tea.Cmd {
 	scope := d.scopeRepo
+	// Live agent state is a claude-only signal (reads Claude Code's transcripts).
+	useClaude := d.cfg.AgentCommand() == "claude"
 	return func() tea.Msg {
 		store, err := state.Load()
 		if err != nil || store == nil {
@@ -681,7 +701,11 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			if scope != "" && sess.Repo != scope {
 				continue
 			}
-			rows = append(rows, dashRow{Session: sess, WorktreeAlive: true})
+			row := dashRow{Session: sess, WorktreeAlive: true}
+			if useClaude {
+				row.AgentState, _ = claude.Probe(sess.Path)
+			}
+			rows = append(rows, row)
 		}
 		return dashLoadedMsg{rows: rows}
 	}
@@ -776,6 +800,24 @@ func statusCell(r dashRow) string {
 		return strings.ToLower(r.PRState)
 	}
 	return r.Status
+}
+
+// stateCell renders the live agent state as a plain glyph + label. Cells stay
+// plain (no ANSI) so joinCells' rune-width math holds; line-level styling colors
+// the row. Blank when unknown / no session.
+func stateCell(s claude.AgentState) string {
+	switch s {
+	case claude.StateWorking:
+		return "● working"
+	case claude.StateWaiting:
+		return "◆ waiting"
+	case claude.StateIdle:
+		return "○ idle"
+	case claude.StateStuck:
+		return "✗ stuck"
+	default:
+		return ""
+	}
 }
 
 // joinCells fits each cell to its column width: truncates with `…` if too long,
