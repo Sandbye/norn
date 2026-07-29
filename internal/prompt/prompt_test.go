@@ -119,6 +119,47 @@ func TestExtractNext(t *testing.T) {
 	}
 }
 
+func TestExtractBlocked(t *testing.T) {
+	cases := []struct{ name, content, want string }{
+		{"real blocker", "blocked: waiting on API keys\n", "waiting on API keys"},
+		{"none is empty", "blocked: none\n", ""},
+		{"None caps", "blocked: None\n", ""},
+		{"absent", "task: x\nnext: y\n", ""},
+		{"empty value", "blocked: \n", ""},
+	}
+	for _, c := range cases {
+		if got := ExtractBlocked(c.content); got != c.want {
+			t.Errorf("%s: ExtractBlocked = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestExtractDone(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{"two items", "done:\n  - wired the handler\n  - added a test\nblocked: none\n", []string{"wired the handler", "added a test"}},
+		{"stops at next key", "done:\n  - one\ndecisions:\n  - not this\n", []string{"one"}},
+		{"tolerates blank line", "done:\n  - one\n\n  - two\ntouched: x\n", []string{"one", "two"}},
+		{"absent", "task: x\nnext: y\n", nil},
+		{"empty block", "done:\nblocked: none\n", nil},
+	}
+	for _, c := range cases {
+		got := ExtractDone(c.content)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: ExtractDone = %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: ExtractDone[%d] = %q, want %q", c.name, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
 func TestExtractGoal(t *testing.T) {
 	cases := []struct{ name, content, want string }{
 		{"state file", "task: x\ngoal: ship the SSO flow\nnext: run it\n", "ship the SSO flow"},

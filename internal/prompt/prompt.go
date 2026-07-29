@@ -365,6 +365,54 @@ func ExtractNext(content string) string {
 	return ""
 }
 
+// blockedRegex reads the `blocked:` line from a .state.md.
+var blockedRegex = regexp.MustCompile(`(?m)^blocked:[ \t]*(.+?)[ \t]*$`)
+
+// ExtractBlocked pulls the `blocked:` value out of a .state.md body. The
+// contract uses "none" for the unblocked case, so that (and empty) return ""
+// and the dashboard only surfaces a real blocker.
+func ExtractBlocked(content string) string {
+	m := blockedRegex.FindStringSubmatch(content)
+	if m == nil {
+		return ""
+	}
+	v := strings.TrimSpace(m[1])
+	if strings.EqualFold(v, "none") {
+		return ""
+	}
+	return v
+}
+
+// doneItemRegex matches one indented "- item" list entry.
+var doneItemRegex = regexp.MustCompile(`^[ \t]+-[ \t]+(.+?)[ \t]*$`)
+
+// ExtractDone pulls the `done:` list items out of a .state.md body: the lines
+// indented under a `done:` header, in file order. Stops at the next top-level
+// key (an unindented line), so it never bleeds into `decisions:`/`touched:`.
+// Returns nil when there's no done block, so a missing field degrades silently.
+func ExtractDone(content string) []string {
+	lines := strings.Split(content, "\n")
+	var out []string
+	in := false
+	for _, ln := range lines {
+		if !in {
+			if strings.HasPrefix(ln, "done:") {
+				in = true
+			}
+			continue
+		}
+		if m := doneItemRegex.FindStringSubmatch(ln); m != nil {
+			out = append(out, strings.TrimSpace(m[1]))
+			continue
+		}
+		if strings.TrimSpace(ln) == "" {
+			continue // tolerate blank lines inside the block
+		}
+		break // an unindented, non-item line = next key
+	}
+	return out
+}
+
 func hintBlock(kind, hint string) string {
 	if hint == "" {
 		if kind == "review" {
