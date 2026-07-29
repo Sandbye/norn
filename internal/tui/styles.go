@@ -58,19 +58,19 @@ var nordPalette = palette{
 	Avatar:     "",
 	ThreadWord: "threads",
 	TreeWord:   "tree",
-	Base:     lipgloss.Color("#2e3440"), // nord0
-	Surface:  lipgloss.Color("#3b4252"), // nord1
-	Overlay:  lipgloss.Color("#4c566a"), // nord3
-	Text:     lipgloss.Color("#eceff4"), // nord6
-	Subtext:  lipgloss.Color("#d8dee9"), // nord4
-	Lavender: lipgloss.Color("#88c0d0"), // nord8 frost cyan
-	Blue:     lipgloss.Color("#81a1c1"), // nord9
-	Teal:     lipgloss.Color("#8fbcbb"), // nord7
-	Green:    lipgloss.Color("#a3be8c"), // nord14
-	Yellow:   lipgloss.Color("#ebcb8b"), // nord13
-	Peach:    lipgloss.Color("#d08770"), // nord12
-	Red:      lipgloss.Color("#bf616a"), // nord11
-	Pink:     lipgloss.Color("#b48ead"), // nord15
+	Base:       lipgloss.Color("#2e3440"), // nord0
+	Surface:    lipgloss.Color("#3b4252"), // nord1
+	Overlay:    lipgloss.Color("#4c566a"), // nord3
+	Text:       lipgloss.Color("#eceff4"), // nord6
+	Subtext:    lipgloss.Color("#d8dee9"), // nord4
+	Lavender:   lipgloss.Color("#88c0d0"), // nord8 frost cyan
+	Blue:       lipgloss.Color("#81a1c1"), // nord9
+	Teal:       lipgloss.Color("#8fbcbb"), // nord7
+	Green:      lipgloss.Color("#a3be8c"), // nord14
+	Yellow:     lipgloss.Color("#ebcb8b"), // nord13
+	Peach:      lipgloss.Color("#d08770"), // nord12
+	Red:        lipgloss.Color("#bf616a"), // nord11
+	Pink:       lipgloss.Color("#b48ead"), // nord15
 
 	// Diff washes — muted aurora over polar night, frost-tinted hunks.
 	RemovedBG:  lipgloss.Color("#3b2b30"),
@@ -90,19 +90,19 @@ var frogPalette = palette{
 	Avatar:     "🐸",
 	ThreadWord: "lily pads",
 	TreeWord:   "mushroom",
-	Base:     lipgloss.Color("#14261a"), // deep forest
-	Surface:  lipgloss.Color("#1d3324"),
-	Overlay:  lipgloss.Color("#5c8a4a"), // fern (dim/help)
-	Text:     lipgloss.Color("#eaf4e0"),
-	Subtext:  lipgloss.Color("#cfe1c0"),
-	Lavender: lipgloss.Color("#77c043"), // frog green — titles/border/cursor bg
-	Blue:     lipgloss.Color("#52b788"), // mint — branches
-	Teal:     lipgloss.Color("#95d5b2"), // cursor
-	Green:    lipgloss.Color("#90be6d"),
-	Yellow:   lipgloss.Color("#f2e8cf"),
-	Peach:    lipgloss.Color("#dda15e"),
-	Red:      lipgloss.Color("#bc4749"),
-	Pink:     lipgloss.Color("#b5838d"),
+	Base:       lipgloss.Color("#14261a"), // deep forest
+	Surface:    lipgloss.Color("#1d3324"),
+	Overlay:    lipgloss.Color("#5c8a4a"), // fern (dim/help)
+	Text:       lipgloss.Color("#eaf4e0"),
+	Subtext:    lipgloss.Color("#cfe1c0"),
+	Lavender:   lipgloss.Color("#77c043"), // frog green — titles/border/cursor bg
+	Blue:       lipgloss.Color("#52b788"), // mint — branches
+	Teal:       lipgloss.Color("#95d5b2"), // cursor
+	Green:      lipgloss.Color("#90be6d"),
+	Yellow:     lipgloss.Color("#f2e8cf"),
+	Peach:      lipgloss.Color("#dda15e"),
+	Red:        lipgloss.Color("#bc4749"),
+	Pink:       lipgloss.Color("#b5838d"),
 
 	// Diff washes — muted red/green over deep forest, mossy hunks.
 	RemovedBG:  lipgloss.Color("#3a2426"),
@@ -160,6 +160,7 @@ var (
 	dimStyle         lipgloss.Style
 	ageStyle         lipgloss.Style
 	goneStyle        lipgloss.Style
+	dirtyStyle       lipgloss.Style
 	activeStyle      lipgloss.Style
 	branchStyle      lipgloss.Style
 	kindTaskStyle    lipgloss.Style
@@ -225,6 +226,8 @@ func buildStyles() {
 	dimStyle = lipgloss.NewStyle().Foreground(colorOverlay)
 	ageStyle = lipgloss.NewStyle().Foreground(colorYellow)
 	goneStyle = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+
+	dirtyStyle = lipgloss.NewStyle().Foreground(colorPeach)
 	activeStyle = lipgloss.NewStyle().Foreground(colorGreen)
 	branchStyle = lipgloss.NewStyle().Foreground(colorBlue)
 	kindTaskStyle = lipgloss.NewStyle().Foreground(colorTeal)

@@ -292,6 +292,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.clean.autoSelectDone()
 		return a, nil
 
+	case cleanRemovedMsg:
+		// If we just removed the worktree we're standing in, don't strand the
+		// shell there: cd to the main checkout and exit.
+		if a.mainDir != "" && git.CheckoutClass(a.repoRoot) == "dead" {
+			a.quit = true
+			a.result = Result{Action: ResultCd, Path: a.mainDir}
+			return a, tea.Quit
+		}
+		a.clean = newCleanModel()
+		a.clean.showResults = true
+		a.clean.results = msg.outcomes
+		return a, nil
+
 	case worktreeCreatedMsg:
 		a.quit = true
 		a.result = Result{Action: ResultLaunch, Path: msg.path, Model: msg.model}
@@ -372,26 +385,12 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.clean = newCleanModel()
 			return a.gotoTab(ViewThreads)
 		}
-		if a.clean.done {
-			var outcomes []git.RemoveOutcome
-			for _, wt := range a.clean.toRemove {
-				// merged/gone → norn already confirmed the branch is safe to force-delete.
-				outcomes = append(outcomes, git.RemoveWorktree(a.repoRoot, wt.Path, wt.Branch, wt.Merged || wt.RemoteGone))
-			}
-			git.CleanEmptyDirs(a.cfg.WorktreeDir)
-			// If we just removed the worktree we're standing in, don't strand the
-			// shell there — cd to the main checkout and exit.
-			if a.mainDir != "" && git.CheckoutClass(a.repoRoot) == "dead" {
-				a.quit = true
-				a.result = Result{Action: ResultCd, Path: a.mainDir}
-				return a, tea.Quit
-			}
-			// Show the result summary in Clean (any key returns to Threads),
-			// instead of leaking git output under the TUI.
-			a.clean = newCleanModel()
-			a.clean.showResults = true
-			a.clean.results = outcomes
-			return a, nil
+		// Removal runs off the UI thread: fire once when confirmed, show a
+		// "Removing…" state, finish on cleanRemovedMsg. Inline removal froze the
+		// TUI for the duration of N worktree deletes.
+		if a.clean.done && !a.clean.removing {
+			a.clean.removing = true
+			return a, removeWorktreesCmd(a.repoRoot, a.cfg.WorktreeDir, a.clean.toRemove)
 		}
 
 	case ViewTasks:
@@ -565,7 +564,24 @@ func checkRemote(repoRoot string, wts []git.Worktree, bases []string) tea.Cmd {
 		_ = git.FetchPrune(repoRoot)
 		checked := git.CheckRemoteGone(repoRoot, wts)
 		checked = git.CheckMerged(repoRoot, checked, bases)
+		checked = git.CheckDirty(checked)
 		return remoteCheckedMsg{checked}
+	}
+}
+
+type cleanRemovedMsg struct{ outcomes []git.RemoveOutcome }
+
+// removeWorktreesCmd runs the (serial, git-lock-sensitive) removals off the UI
+// thread so the TUI stays responsive while it works.
+func removeWorktreesCmd(repoRoot, worktreeDir string, toRemove []git.Worktree) tea.Cmd {
+	return func() tea.Msg {
+		var outcomes []git.RemoveOutcome
+		for _, wt := range toRemove {
+			// merged/gone → norn already confirmed the branch is safe to force-delete.
+			outcomes = append(outcomes, git.RemoveWorktree(repoRoot, wt.Path, wt.Branch, wt.Merged || wt.RemoteGone))
+		}
+		git.CleanEmptyDirs(worktreeDir)
+		return cleanRemovedMsg{outcomes: outcomes}
 	}
 }
 
