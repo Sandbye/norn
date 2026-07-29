@@ -99,6 +99,26 @@ func TestExtractHint(t *testing.T) {
 	}
 }
 
+func TestExtractNext(t *testing.T) {
+	cases := []struct {
+		name, content, want string
+	}{
+		{"state file", "task: Fix login (CU-1)\ngoal: stop the loop\nnext: run the migration\ndone:\n", "run the migration"},
+		{"extra spaces", "next:     write the test\n", "write the test"},
+		{"tabs", "next:\tpush the branch\n", "push the branch"},
+		{"absent", "task: x\ngoal: y\n", ""},
+		{"empty next", "next: \n", ""},
+		{"empty file", "", ""},
+		{"first next wins", "next: first action\nnext: second\n", "first action"},
+	}
+	for _, c := range cases {
+		got := ExtractNext(c.content)
+		if got != c.want {
+			t.Errorf("%s: ExtractNext = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestList(t *testing.T) {
 	names := List()
 	want := map[string]bool{"task": false, "review": false}
