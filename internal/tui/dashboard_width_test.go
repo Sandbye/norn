@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/state"
 )
 
@@ -20,12 +21,12 @@ func TestDashboardTableFitsPanel(t *testing.T) {
 			ClickUpID: "86c6j6z55",
 			PRNumber:  3686,
 			Status:    state.StatusActive,
-		}, WorktreeAlive: true},
+		}, WorktreeAlive: true, AgentState: claude.StateWorking},
 		{Session: state.Session{
 			Branch: "review/pr-3991",
 			Kind:   "review",
 			Status: state.StatusActive,
-		}, WorktreeAlive: true},
+		}, WorktreeAlive: true, AgentState: claude.StateWaiting},
 	}
 
 	for _, w := range []int{200, 140, 120, 100, 80} {
