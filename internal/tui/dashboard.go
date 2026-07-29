@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
@@ -453,7 +454,7 @@ func (d Dashboard) View() string {
 		if d.summaryErr != nil {
 			body = errorStyle.Render("summarize failed: " + d.summaryErr.Error())
 		} else {
-			body = d.summary
+			body = renderMarkdown(d.summary, d.width)
 		}
 		return fmt.Sprintf("%s\n\n%s\n\n%s", title, body, dimStyle.Render("r refresh · any key to dismiss"))
 	}
@@ -646,6 +647,30 @@ func worktreeTitle(wtPath string) string {
 		return ""
 	}
 	return prompt.ExtractTitle(string(data))
+}
+
+// renderMarkdown renders markdown (the session summary) via glamour, wrapped to
+// the panel's inner width. Falls back to the raw text on any error so the
+// overlay never breaks.
+func renderMarkdown(md string, termWidth int) string {
+	w := frameWidth - 6
+	if termWidth > 0 {
+		if inner := termWidth - 8; inner < frameWidth {
+			w = inner - 6
+		}
+	}
+	if w < 20 {
+		w = 20
+	}
+	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(w))
+	if err != nil {
+		return md
+	}
+	out, err := r.Render(md)
+	if err != nil {
+		return md
+	}
+	return strings.TrimRight(out, "\n")
 }
 
 // worktreeNext reads the `next:` action from a worktree's .state.md (the live
