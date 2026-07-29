@@ -488,7 +488,15 @@ func (d Dashboard) View() string {
 		sidebarW = max(avail/2, 16)
 	}
 	detailW := max(avail-sidebarW-3, 20) // 3 = right border + gap
-	bodyH := max(d.height-12, 6)
+	// Body height tracks the panel frame()'s inner height (capped at frameHeight),
+	// minus the header + footer + gaps, so the split fills the panel exactly:
+	// tall enough to pin the footer to the bottom, not so tall it overflows and
+	// clips the header. ~14 covers the mascot header, two gaps, and the footer.
+	innerH := frameHeight
+	if d.height > 0 && d.height-6 < frameHeight {
+		innerH = d.height - 6
+	}
+	bodyH := max(innerH-14, 6)
 
 	sidebar := lipgloss.NewStyle().
 		Width(sidebarW).
@@ -501,7 +509,10 @@ func (d Dashboard) View() string {
 		detail = d.renderDetail(vis[d.cursor], detailW)
 	}
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", detail)
+	// Pin the split to a fixed height so the footer/help below doesn't jump as
+	// the selected thread's detail grows or shrinks (goal present, more fields…).
+	body := lipgloss.NewStyle().Height(bodyH).Render(
+		lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", detail))
 
 	// Filter line above the help.
 	if d.filter.active || d.filter.query != "" {
