@@ -201,11 +201,8 @@ func (m cleanModel) View() string {
 	sorted := m.visible()
 	var b strings.Builder
 
-	b.WriteString(headerStyle.Render("Clean worktrees"))
-	b.WriteString("\n")
-
 	if len(m.worktrees) == 0 {
-		b.WriteString(subtitleStyle.Render("No worktrees to clean — nothing merged or gone."))
+		b.WriteString(subtitleStyle.Render("No worktrees to clean. Nothing merged or gone."))
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("esc back"))
 		return b.String()
@@ -248,7 +245,12 @@ func (m cleanModel) View() string {
 	b.WriteString(dimStyle.Render("  " + strings.Repeat("─", total-2)))
 	b.WriteString("\n")
 
-	for i, wt := range sorted {
+	// Scroll the list within the fixed frame (chrome: header rule + selection
+	// bar + help), so a long list never stretches the panel.
+	listRows := max(frameBodyRows(0)-7, 3)
+	lo, hi := scrollWindow(m.cursor, len(sorted), listRows)
+	for i := lo; i < hi; i++ {
+		wt := sorted[i]
 		cursor := "  "
 		if i == m.cursor {
 			cursor = cursorStyle.Render("> ")
@@ -288,6 +290,9 @@ func (m cleanModel) View() string {
 
 		b.WriteString(line)
 		b.WriteString("\n")
+	}
+	if len(sorted) > listRows {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  %d/%d", m.cursor+1, len(sorted))) + "\n")
 	}
 
 	b.WriteString("\n")
@@ -329,7 +334,7 @@ func (m cleanModel) View() string {
 // the reasons are shown clearly in the TUI (no leaked git output).
 func (m cleanModel) resultsView() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Clean — done"))
+	b.WriteString(headerStyle.Render("Clean: done"))
 	b.WriteString("\n\n")
 
 	removed := 0
@@ -354,13 +359,13 @@ func (m cleanModel) resultsView() string {
 		b.WriteString(goneStyle.Render(fmt.Sprintf("Skipped %d (left intact):", len(skipped))))
 		b.WriteString("\n")
 		for _, r := range skipped {
-			b.WriteString("  " + branchStyle.Render(r.Branch) + dimStyle.Render(" — "+r.Reason) + "\n")
+			b.WriteString("  " + branchStyle.Render(r.Branch) + dimStyle.Render(": "+r.Reason) + "\n")
 		}
 	}
 
 	if len(kept) > 0 {
 		b.WriteString("\n")
-		b.WriteString(dimStyle.Render(fmt.Sprintf("Kept %d branch(es) (unmerged — delete manually if you're sure):", len(kept))))
+		b.WriteString(dimStyle.Render(fmt.Sprintf("Kept %d branch(es) (unmerged, delete manually if you're sure):", len(kept))))
 		b.WriteString("\n")
 		for _, r := range kept {
 			b.WriteString("  " + branchStyle.Render(r.Branch) + "\n")

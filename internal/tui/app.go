@@ -446,21 +446,57 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
-// renderTabs draws the top tab bar with the active tab highlighted. Both styles
-// are padding-free so the bar doesn't shift as the active tab moves. A dim hint
-// discloses tab-cycling + help.
-func renderTabs(current View) string {
-	activeTab := lipgloss.NewStyle().Foreground(colorLavender).Bold(true)
+// renderMasthead draws norn's shared crown: the wordmark + the top tab bar
+// (active tab highlighted) on one line, the tab/help hint pushed to the right
+// edge, and a divider rule under it. Every tab wears the same masthead so the
+// app reads as one product; the mascot stays the Threads hero signature. w is
+// the panel's inner content width, so the hint right-aligns and the rule spans
+// the pane. Padding-free tab styles keep the bar from shifting as focus moves.
+func renderMasthead(current View, w int) string {
+	// Pill nav: the active tab is a filled accent chip, the rest dim. Same
+	// padding on both so the bar never shifts as focus moves. The pill reads as
+	// a designed nav rather than a plain word list — norn's signature up top.
+	activePill := lipgloss.NewStyle().Background(colorLavender).Foreground(colorBase).Bold(true).Padding(0, 1)
+	restPill := lipgloss.NewStyle().Foreground(colorOverlay).Padding(0, 1)
 	var parts []string
 	for i, v := range appTabs {
 		name := fmt.Sprintf("%d %s", i+1, tabLabel(v))
 		if v == current {
-			parts = append(parts, activeTab.Render(name))
+			parts = append(parts, activePill.Render(name))
 		} else {
-			parts = append(parts, dimStyle.Render(name))
+			parts = append(parts, restPill.Render(name))
 		}
 	}
-	return strings.Join(parts, "   ") + dimStyle.Render("      ⇥ tab · ? help")
+	// Brand: an accent ribbon + wordmark, tying the bar to the mascot's color.
+	brand := lipgloss.NewStyle().Foreground(colorLavender).Render("▌") +
+		lipgloss.NewStyle().Bold(true).Foreground(colorText).Render(" norn ")
+	left := brand + " " + strings.Join(parts, " ")
+	hint := dimStyle.Render("⇥ tab · ? help")
+
+	gap := w - lipgloss.Width(left) - lipgloss.Width(hint)
+	if gap < 3 {
+		gap = 3
+	}
+	bar := left + strings.Repeat(" ", gap) + hint
+
+	rule := dimStyle.Render(strings.Repeat("─", max(w, 1)))
+	return bar + "\n" + rule
+}
+
+// mastheadWidth is the panel's inner content width (frame inner minus its
+// horizontal padding), so the masthead rule/hint line up with the pane edges.
+func mastheadWidth(width int) int {
+	inner := frameWidth
+	if width > 0 {
+		if max := width - 8; max < frameWidth {
+			inner = max
+		}
+	}
+	inner -= 6 // frame's Padding(1, 3)
+	if inner < 20 {
+		inner = 20
+	}
+	return inner
 }
 
 type keyHint struct{ key, desc string }
@@ -545,7 +581,7 @@ func (a App) View() string {
 	if a.current == ViewCd {
 		return frame(body, a.width, a.height)
 	}
-	return frame(renderTabs(a.current)+"\n\n"+body, a.width, a.height)
+	return frame(renderMasthead(a.current, mastheadWidth(a.width))+"\n\n"+body, a.width, a.height)
 }
 
 // Commands

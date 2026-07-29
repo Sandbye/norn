@@ -51,7 +51,7 @@ func (m cdModel) View() string {
 	b.WriteString("\n\n")
 
 	if len(m.worktrees) == 0 {
-		b.WriteString(dimStyle.Render("  no worktrees yet — create one with `norn \"hint\"`"))
+		b.WriteString(dimStyle.Render("  no worktrees yet, create one with `norn \"hint\"`"))
 		b.WriteString("\n\n")
 		b.WriteString(helpStyle.Render("esc back"))
 		return b.String()
@@ -71,4 +71,3 @@ func (m cdModel) View() string {
 	b.WriteString(helpStyle.Render("j/k navigate  enter select  esc quit"))
 	return b.String()
 }
-
