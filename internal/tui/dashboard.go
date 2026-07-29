@@ -119,7 +119,8 @@ type dashRow struct {
 	PRChecks      string            // ✓ / ✗ / · / ""
 	PRPending     bool              // currently being fetched
 	AgentState    claude.AgentState // live: working / waiting / idle / "" (ephemeral)
-	Next          string            // .state.md `next:` action, shown in place of TITLE (ephemeral)
+	Next          string            // .state.md `next:` action (ephemeral)
+	Goal          string            // .state.md `goal:` one-liner, shown in the detail pane (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -482,8 +483,8 @@ func (d Dashboard) View() string {
 			avail = inner - 6
 		}
 	}
-	sidebarW := 30
-	if avail < 72 { // narrow panel: give the sidebar half, keep a usable detail
+	sidebarW := max(min(avail/3, 40), 24) // ~a third, balanced, but bounded
+	if avail < 72 {                       // narrow panel: split in half, keep detail usable
 		sidebarW = max(avail/2, 16)
 	}
 	detailW := max(avail-sidebarW-3, 20) // 3 = right border + gap
@@ -584,7 +585,11 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 	}
 	var b strings.Builder
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorText).Render(truncate(title, w)) + "\n")
-	b.WriteString(dimStyle.Render(truncate(r.Branch, w)) + "\n\n")
+	b.WriteString(dimStyle.Render(truncate(r.Branch, w)) + "\n")
+	if r.Goal != "" {
+		b.WriteString("\n" + lipgloss.NewStyle().Width(w).Foreground(colorText).Render(r.Goal) + "\n")
+	}
+	b.WriteString("\n")
 	row := func(k, v string) {
 		if v == "" {
 			return
@@ -731,6 +736,15 @@ func worktreeNext(wtPath string) string {
 	return prompt.ExtractNext(string(data))
 }
 
+// worktreeGoal reads the `goal:` one-liner from a worktree's .state.md.
+func worktreeGoal(wtPath string) string {
+	data, err := os.ReadFile(wtPath + "/.state.md")
+	if err != nil {
+		return ""
+	}
+	return prompt.ExtractGoal(string(data))
+}
+
 // loadCmd reloads the store and reconciles with live worktree list.
 // Fast path only — PR data is fetched async via fetchPRCmd after this returns.
 func (d Dashboard) loadCmd() tea.Cmd {
@@ -787,6 +801,7 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			}
 			row := dashRow{Session: sess, WorktreeAlive: true}
 			row.Next = worktreeNext(sess.Path)
+			row.Goal = worktreeGoal(sess.Path)
 			if useClaude {
 				row.AgentState, _ = claude.Probe(sess.Path)
 			}

@@ -338,6 +338,18 @@ func ExtractTitle(content string) string {
 	return ""
 }
 
+// goalRegex reads the `goal:` line from a .state.md (one-sentence task goal).
+var goalRegex = regexp.MustCompile(`(?m)^goal:[ \t]*(.+?)[ \t]*$`)
+
+// ExtractGoal pulls the `goal:` line out of a .state.md body (the one-sentence
+// goal of the task) for the dashboard detail pane. "" when absent/malformed.
+func ExtractGoal(content string) string {
+	if m := goalRegex.FindStringSubmatch(content); m != nil {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
+}
+
 // nextRegex reads the `next:` line from a .state.md. Unlike .worktree.md,
 // .state.md is bare `key: value` lines (no `--- … ---` frontmatter), per the
 // state-file contract, so this matches a top-level `next:` anywhere in the body.
