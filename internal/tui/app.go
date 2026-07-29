@@ -391,7 +391,14 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// TUI for the duration of N worktree deletes.
 		if a.clean.done && !a.clean.removing {
 			a.clean.removing = true
-			return a, removeWorktreesCmd(a.repoRoot, a.cfg.WorktreeDir, a.clean.toRemove)
+			// Run git from the main checkout, not repoRoot: if we're cleaning the
+			// worktree we're standing in, repoRoot gets deleted mid-loop and every
+			// later git call would fail from the dead cwd (partial clean + breakage).
+			base := a.mainDir
+			if base == "" {
+				base = a.repoRoot
+			}
+			return a, removeWorktreesCmd(base, a.cfg.WorktreeDir, a.clean.toRemove)
 		}
 
 	case ViewTasks:
