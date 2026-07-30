@@ -8,6 +8,7 @@ Derived from a 2026-06 landscape scan (worktree managers, agent orchestrators, C
 
 - **Headless Claude integration** — `internal/claude` (`Run`, `Available`), dashboard "summarize" (`s`), AI branch naming. Gated to the `claude` agent.
 - **PR review-since-stamp diff** — `norn diff <pr#> --since-review` overlays your own (even outdated) comments next to current code; split view.
+- **Local code review** — comment any local diff with conventional-comment labels (`c`, `v` range, `C` file), `R` writes `.norn/review.md` and resumes the agent against it. No PR, no public repo. Same keys still post a real review in PR mode.
 - **Rebrand `work` → `norn`** — module, GitHub repo, Nord theme, "many threads, one tree" identity, MIT license, README.
 - **Configurable agent** — `agent.command` (claude/opencode/…); headless features degrade for non-claude.
 - **Named templates** — `--template`, `norn --templates`, per-project override dir, `template:` default.
