@@ -7,6 +7,7 @@ package task
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,6 +76,88 @@ func (GitHub) List(ctx context.Context, repoRoot string) ([]Task, error) {
 		})
 	}
 	return tasks, nil
+}
+
+// GitHubIssue fetches one issue by number for the repo at repoRoot. Unlike
+// List it resolves owner/repo from the origin remote and passes it explicitly,
+// so it also works against a bare mirror, where gh has no checkout to infer the
+// repo from.
+func GitHubIssue(ctx context.Context, repoRoot string, number int) (Task, error) {
+	args := []string{"issue", "view", strconv.Itoa(number), "--json", "number,title,url,body,labels"}
+	if nwo := originNWO(repoRoot); nwo != "" {
+		args = append(args, "-R", nwo)
+	}
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		if ee := new(exec.ExitError); errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return Task{}, fmt.Errorf("gh issue view %d: %s", number, strings.TrimSpace(string(ee.Stderr)))
+		}
+		return Task{}, fmt.Errorf("gh issue view %d: %w", number, err)
+	}
+	var raw struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		URL    string `json:"url"`
+		Body   string `json:"body"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return Task{}, fmt.Errorf("parse gh issue: %w", err)
+	}
+	labels := make([]string, 0, len(raw.Labels))
+	for _, l := range raw.Labels {
+		labels = append(labels, l.Name)
+	}
+	return Task{
+		ID:          strconv.Itoa(raw.Number),
+		Title:       raw.Title,
+		URL:         raw.URL,
+		Kind:        kindFromLabels(raw.Labels),
+		Description: raw.Body,
+		Labels:      labels,
+	}, nil
+}
+
+// originNWO reads "owner/repo" out of the origin remote URL. "" when there's no
+// origin, or it isn't a remote URL we recognise (a local-path origin has no
+// owner) — the caller then lets gh detect the repo itself.
+func originNWO(repoRoot string) string {
+	out, err := exec.Command("git", "-C", repoRoot, "config", "--get", "remote.origin.url").Output()
+	if err != nil {
+		return ""
+	}
+	raw := strings.TrimSpace(string(out))
+
+	// Strip the transport + host, leaving the owner/repo path.
+	var path string
+	switch {
+	case strings.Contains(raw, "://"):
+		host := raw[strings.Index(raw, "://")+3:]
+		i := strings.Index(host, "/")
+		if i < 0 {
+			return ""
+		}
+		path = host[i+1:]
+	case strings.Contains(raw, ":"):
+		// scp-style: git@github.com:owner/repo
+		i := strings.Index(raw, ":")
+		if !strings.Contains(raw[:i], "@") {
+			return ""
+		}
+		path = raw[i+1:]
+	default:
+		return "" // local path clone — nothing to pass to gh
+	}
+
+	parts := strings.Split(strings.Trim(strings.TrimSuffix(strings.TrimSuffix(path, "/"), ".git"), "/"), "/")
+	if len(parts) < 2 || parts[len(parts)-2] == "" || parts[len(parts)-1] == "" {
+		return ""
+	}
+	return parts[len(parts)-2] + "/" + parts[len(parts)-1]
 }
 
 func kindFromLabels(labels []struct {
