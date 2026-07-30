@@ -21,6 +21,7 @@ Derived from a 2026-06 landscape scan (worktree managers, agent orchestrators, C
 - **Detached-HEAD guard** + **`text/template` prompt rendering** (both were open in the earlier robustness pass).
 - **Public launch (v0.1.0)** — VHS demo GIF + leaner README, Homebrew **cask** + tag-triggered release workflow, public repo + tap.
 - **CLI polish** — `--version`, explicit `norn create` verb, per-session model pick (`M`) + `agent.model`, `m` go-to-main, constant frame height, `$EDITOR` arg handling.
+- **`norn brief`** — headless JSON (branch name, rendered brief, resolved project config) for `--repo <checkout|worktree|bare mirror> --issue <n>|--hint <text>`. Creates nothing; lets external tools reuse norn's naming + policy instead of reimplementing them.
 
 ---
 
