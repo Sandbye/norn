@@ -33,6 +33,21 @@ func RepoRoot() (string, error) {
 	return out, nil
 }
 
+// RepoRootAt returns the repo root for an arbitrary directory — it need not be
+// the cwd, and need not have a checkout. A working tree resolves to its
+// toplevel; a bare repo (a mirror) resolves to the git dir itself. This is what
+// lets a headless caller point norn at a mirror it already holds.
+func RepoRootAt(dir string) (string, error) {
+	if top, err := cmdOutput(dir, "git", "rev-parse", "--show-toplevel"); err == nil && top != "" {
+		return top, nil
+	}
+	gitDir, err := cmdOutput(dir, "git", "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return "", fmt.Errorf("not a git repository: %s", dir)
+	}
+	return gitDir, nil
+}
+
 // OriginRepoName returns the basename of the *main* repo for a given directory.
 // Inside a worktree, this resolves to the upstream repo's name rather than the
 // worktree's own dir name — so per-project config (~/.config/work/projects/<name>.yaml)
@@ -44,17 +59,19 @@ func OriginRepoName(dir string) string {
 		if top, err2 := cmdOutput(dir, "git", "rev-parse", "--show-toplevel"); err2 == nil {
 			return filepath.Base(top)
 		}
-		return filepath.Base(dir)
+		return RepoNameFromGitDir(dir)
 	}
-	// CommonDir is the path to the main repo's .git dir (or .git/worktrees/...
-	// inside a worktree). Strip the trailing .git component to get the repo dir.
-	parent := filepath.Dir(common)
-	if filepath.Base(common) != ".git" {
-		// Worktree case: common ends in something like .git, but parent is repo.
-		// Walk up until we find a dir whose .git matches.
-		parent = filepath.Dir(common)
+	return RepoNameFromGitDir(common)
+}
+
+// RepoNameFromGitDir maps a git dir to the repo name: ".../<repo>/.git" → repo
+// (a normal checkout or any worktree of it), and ".../<repo>.git" → repo (a
+// bare mirror, which has no parent checkout to take the name from).
+func RepoNameFromGitDir(gitDir string) string {
+	if filepath.Base(gitDir) == ".git" {
+		return filepath.Base(filepath.Dir(gitDir))
 	}
-	return filepath.Base(parent)
+	return strings.TrimSuffix(filepath.Base(gitDir), ".git")
 }
 
 func CommonDir(dir string) (string, error) {
@@ -63,11 +80,13 @@ func CommonDir(dir string) (string, error) {
 		return "", err
 	}
 	if !filepath.IsAbs(common) {
-		top, err := cmdOutput(dir, "git", "rev-parse", "--show-toplevel")
+		// git prints it relative to its own cwd, which is dir. A bare repo
+		// reports "." and has no toplevel to resolve against.
+		abs, err := filepath.Abs(filepath.Join(dir, common))
 		if err != nil {
 			return "", err
 		}
-		common = filepath.Join(top, common)
+		common = abs
 	}
 	resolved, err := filepath.EvalSymlinks(common)
 	if err != nil {
