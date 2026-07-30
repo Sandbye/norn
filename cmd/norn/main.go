@@ -36,14 +36,7 @@ func main() {
 		os.Exit(1)
 	}
 	tui.ApplyTheme(cfg.Theme)
-	if d := cfg.Templates.Dir; d != "" {
-		if strings.HasPrefix(d, "~/") {
-			if home, err := os.UserHomeDir(); err == nil {
-				d = filepath.Join(home, d[2:])
-			}
-		}
-		prompt.SetTemplateDir(d)
-	}
+	applyTemplateDir(cfg)
 
 	args := os.Args[1:]
 
@@ -58,6 +51,9 @@ func main() {
 			return
 		case "--project-config":
 			cmdProjectConfig(cfg, repoRoot)
+			return
+		case "brief":
+			cmdBrief(repoRoot, args[1:])
 			return
 		case "context", "--context":
 			cmdContext(cfg, repoRoot)
@@ -191,6 +187,15 @@ func main() {
 	}
 
 	runApp(cfg, repoRoot, initialView)
+}
+
+// applyTemplateDir points prompt lookups at the configured template dir. Called
+// once at startup, and again by any command that re-resolves config for another
+// repo (that repo may set its own templates.dir).
+func applyTemplateDir(cfg config.Config) {
+	if d := cfg.Templates.Dir; d != "" {
+		prompt.SetTemplateDir(expandHome(d))
+	}
 }
 
 // runApp runs the unified tabbed TUI at the given view and performs whatever the
@@ -2139,6 +2144,11 @@ Usage:
   norn --list             List worktrees (git)
   norn --status           Show worktrees with details
   norn --project-config   Print resolved config as JSON
+  norn brief --repo <path> --issue <n>
+                          Print branch name + brief + resolved project config as
+                          JSON, creating nothing. Works on a bare mirror, from
+                          anywhere. --hint <text> instead of --issue; --type
+                          <feature|fix|hotfix|epic|chore> forces the prefix
   norn --templates        List prompt templates + the data they can use
   norn template new <name>  Scaffold a user template (from the task template)
   norn template edit [name]  Customize a template in $EDITOR (default: task)

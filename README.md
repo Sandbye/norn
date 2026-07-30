@@ -58,6 +58,17 @@ On a local diff, `R` writes `.norn/review.md`: comments grouped by file, anchore
 
 Add `.norn/` to the repo's `.gitignore` — the review is yours, not part of the change.
 
+### Headless: `norn brief`
+
+Other tools shouldn't have to reimplement branch naming or config resolution to start a task the way norn would. `norn brief` prints what norn knows, as JSON, and creates nothing — no worktree, no branch, no push, no agent:
+
+```sh
+norn brief --repo ~/mirrors/skuld.git --issue 7
+norn brief --repo . --hint "fix payout rounding" --type fix
+```
+
+It runs from anywhere, including outside a git repo, and `--repo` accepts a checkout, a worktree, or a bare mirror — so a bot holding only a mirror gets the same branch name, brief, and project policy (`verify`, `forbid`, `base_branches`, …) a human would. `config.sources` lists the config files that were actually read, so "no project config" is distinguishable from "project config with no verify commands". Exit is non-zero only on a real error (unresolvable repo, unknown issue).
+
 ## Configuration
 
 Zero config works. `norn init` scaffolds a per-project config in the current repo; global defaults live in `~/.config/work/config.yaml`. The **Settings** tab writes to the YAML surgically, so your comments and hand-added keys survive.

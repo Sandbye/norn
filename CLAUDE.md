@@ -17,6 +17,7 @@ This file documents the *codebase* (architecture, design decisions, roadmap), no
 
 ```
 cmd/work/main.go           Entry point, CLI arg routing
+cmd/norn/brief.go          `norn brief` — headless JSON (branch, brief, config), creates nothing
 internal/
   config/config.go          YAML config loading (global + per-project)
   git/git.go                Git operations (worktree CRUD, remote checks, branch utils)
