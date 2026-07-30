@@ -50,6 +50,14 @@ norn --help               # everything
 
 **`norn review <pr#>`** checks the PR's branch out into a worktree and launches the agent on the real code, so it can read, run, and comment on the actual change (fork PRs included). For a quick read without a worktree, the **diff** viewer does uncommitted changes, branch-vs-base, or any open PR, with split view and syntax highlighting; `norn diff <pr#> --since-review` overlays your own review comments next to the current code.
 
+### Reviewing the agent locally
+
+You don't need a PR (or a public repo) to review the agent's work. In any `norn diff`, `c` comments the focused line, `v` first for a range, `C` for the whole file. Each comment starts with a [conventional-comment](https://conventionalcomments.org) label picked with one key — `i` issue, `s` suggestion, `n` nitpick, `q` question, `t` todo, `p` praise, `h` thought, `o` chore — and `b` marks it blocking. `tab` re-picks the label while you type, `x` deletes, `R` finishes the review with a summary.
+
+On a local diff, `R` writes `.norn/review.md`: comments grouped by file, anchored `path:line`, blocking ones counted at the top. Then `⏎` resumes the agent in that worktree pointed at the file, so one pass replaces a dozen round-trips. On a PR diff the same keys post a real GitHub review instead.
+
+Add `.norn/` to the repo's `.gitignore` — the review is yours, not part of the change.
+
 ## Configuration
 
 Zero config works. `norn init` scaffolds a per-project config in the current repo; global defaults live in `~/.config/work/config.yaml`. The **Settings** tab writes to the YAML surgically, so your comments and hand-added keys survive.

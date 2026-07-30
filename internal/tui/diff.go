@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
+	"github.com/sandbye/norn/internal/review"
 )
 
 // DiffFile is one file in the change set, exposed so callers can construct
@@ -60,11 +61,11 @@ type DiffView struct {
 	files  []DiffFile
 	cursor int
 
-	mode       diffMode
-	parsed     []parsedDiffLine // populated when a file's diff loads
-	fileCursor int              // focused line index
-	fileScroll int              // top of visible viewport
-	visualStart int             // -1 when not in visual mode; else parsed index where selection began
+	mode        diffMode
+	parsed      []parsedDiffLine // populated when a file's diff loads
+	fileCursor  int              // focused line index
+	fileScroll  int              // top of visible viewport
+	visualStart int              // -1 when not in visual mode; else parsed index where selection began
 
 	width  int
 	height int
@@ -84,12 +85,24 @@ type DiffView struct {
 	// so per-file loading uses `git diff HEAD -- path` (two-dot) not target...HEAD.
 	workTree bool
 
-	// Review state (PR mode only)
+	// Review state. PR mode submits to GitHub; local mode writes .norn/review.md.
 	pending        []PendingComment
 	commentArea    textarea.Model
 	commentLineIdx int // index into d.parsed for the comment being authored, or -1 for file-level
 	commentEndIdx  int // for multi-line selection: last index in selection (== commentLineIdx for single)
 	editingIdx     int // index into d.pending we're editing, or -1 for new
+
+	// Conventional-comment state for the comment being authored. labelPick is
+	// the first step of the overlay (pick a label), before the body textarea
+	// takes keys — the label keys would otherwise collide with typing.
+	labelPick       bool
+	commentLabel    review.Label
+	commentBlocking bool
+
+	// Local-review handoff. reviewPath is the written .norn/review.md; handoff
+	// is set when the user chooses to hand it to the agent on quit.
+	reviewPath string
+	handoff    bool
 
 	reviewArea  textarea.Model
 	reviewEvent string // "COMMENT" | "APPROVE" | "REQUEST_CHANGES"
@@ -104,19 +117,20 @@ type DiffView struct {
 	jumpInput string
 
 	// Commit-scope state. scopeSHA == "" means full PR diff (default).
-	scopeSHA       string
-	commitCursor   int // cursor within the commit picker overlay
-	loadingScope   bool
+	scopeSHA     string
+	commitCursor int // cursor within the commit picker overlay
+	loadingScope bool
 }
 
 type diffMode int
 
 const (
-	modeList         diffMode = iota
+	modeList diffMode = iota
 	modeFile
-	modeComment                // overlay: writing a comment on the focused line
-	modeReview                 // overlay: composing the review submission
-	modeCommitPicker           // overlay: choose scope (full PR / specific commit)
+	modeComment      // overlay: writing a comment on the focused line
+	modeReview       // overlay: composing the review submission
+	modeCommitPicker // overlay: choose scope (full PR / specific commit)
+	modeHandoff      // overlay: local review written, hand it to the agent?
 )
 
 // PendingComment is one comment buffered before submitting a review.
@@ -133,6 +147,22 @@ type PendingComment struct {
 	StartSide   string // "LEFT" / "RIGHT" — empty when single-line
 	SubjectType string // "line" (default) or "file"
 	Body        string
+
+	// Conventional-comment metadata (conventionalcomments.org). Rendered into
+	// the body on submit, both for GitHub and for .norn/review.md.
+	Label    review.Label
+	Blocking bool
+}
+
+// heading renders the conventional-comment heading, e.g. "issue (blocking)".
+func (p PendingComment) heading() string {
+	c := review.Comment{Label: p.Label, Blocking: p.Blocking}
+	return c.Heading()
+}
+
+// renderedBody prefixes the body with the conventional heading.
+func (p PendingComment) renderedBody() string {
+	return fmt.Sprintf("**%s:** %s", p.heading(), p.Body)
 }
 
 // ExistingComment is one of the reviewer's own inline comments on the PR,
@@ -280,6 +310,8 @@ func (d DiffView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d.updateReviewMode(msg)
 		case modeCommitPicker:
 			return d.updateCommitPicker(msg)
+		case modeHandoff:
+			return d.updateHandoff(msg)
 		}
 	case tea.MouseMsg:
 		// Mouse reporting is enabled at the program level (WithMouseCellMotion)
@@ -308,6 +340,10 @@ func (d DiffView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			d.statusMsg = "✗ submit failed: " + msg.err.Error()
 			// Keep the user in review mode so they can retry / edit.
+		} else if msg.path != "" {
+			// Local review written — offer to hand it straight to the agent.
+			d.reviewPath = msg.path
+			d.mode = modeHandoff
 		} else {
 			d.statusMsg = fmt.Sprintf("✓ review posted (%d comment(s))", len(d.pending))
 			d.pending = nil
@@ -652,12 +688,14 @@ func splitDiffByFileInternal(diff string) ([]DiffFile, map[string]string) {
 
 type reviewSubmittedMsg struct {
 	err error
+	// path is set for a local review: where the markdown landed.
+	path string
 }
 
 func newCommentArea(width int) textarea.Model {
 	ta := textarea.New()
-	// Convention nudge — see ~/.claude/.../memory/review-comment-conventions.md
-	ta.Placeholder = "nit | suggestion | issue (blocking) | question | praise: body…"
+	// The label is picked before the body now, so the placeholder is just a nudge.
+	ta.Placeholder = "what's wrong, and what would you do instead…"
 	ta.Focus()
 	ta.ShowLineNumbers = false
 	if width > 8 {
@@ -680,9 +718,46 @@ func newReviewArea(width int) textarea.Model {
 }
 
 func (d DiffView) updateCommentMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Step one: pick the conventional-comment label. Single keystroke, so the
+	// textarea must not see these keys yet.
+	if d.labelPick {
+		key := msg.String()
+		switch key {
+		case "esc":
+			d.mode = modeFile
+			d.labelPick = false
+			return d, nil
+		case "b":
+			d.commentBlocking = !d.commentBlocking
+			return d, nil
+		case "enter":
+			d.labelPick = false
+			return d, textarea.Blink
+		}
+		if l, ok := review.Keys[key]; ok {
+			d.commentLabel = l
+			d.labelPick = false
+			return d, textarea.Blink
+		}
+		return d, nil
+	}
+
 	switch msg.String() {
 	case "esc":
 		d.mode = modeFile
+		return d, nil
+	case "tab":
+		// Cycle the label without leaving the body.
+		for i, l := range review.Labels {
+			if l == d.commentLabel {
+				d.commentLabel = review.Labels[(i+1)%len(review.Labels)]
+				return d, nil
+			}
+		}
+		d.commentLabel = review.Labels[0]
+		return d, nil
+	case "ctrl+b":
+		d.commentBlocking = !d.commentBlocking
 		return d, nil
 	case "ctrl+s":
 		body := strings.TrimSpace(d.commentArea.Value())
@@ -690,8 +765,10 @@ func (d DiffView) updateCommentMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 		pc := PendingComment{
-			Path: d.files[d.cursor].Path,
-			Body: body,
+			Path:     d.files[d.cursor].Path,
+			Body:     body,
+			Label:    d.commentLabel,
+			Blocking: d.commentBlocking,
 		}
 		if d.commentLineIdx < 0 {
 			pc.SubjectType = "file"
@@ -753,7 +830,11 @@ func (d DiffView) updateReviewMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		d.mode = modeFile
 		return d, nil
 	case "tab":
-		// Cycle COMMENT -> APPROVE -> REQUEST_CHANGES
+		// Cycle COMMENT -> APPROVE -> REQUEST_CHANGES. PR-only: a local review
+		// has nothing to approve.
+		if d.prMeta == nil {
+			return d, nil
+		}
 		switch d.reviewEvent {
 		case "COMMENT":
 			d.reviewEvent = "APPROVE"
@@ -765,6 +846,23 @@ func (d DiffView) updateReviewMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return d, nil
 	case "ctrl+s":
 		body := strings.TrimSpace(d.reviewArea.Value())
+		if d.prMeta == nil {
+			// Local review: no PR, so write it to .norn/review.md instead.
+			if body == "" && len(d.pending) == 0 {
+				d.statusMsg = "nothing to write — add a comment or a summary"
+				return d, nil
+			}
+			d.submitting = true
+			d.statusMsg = ""
+			sp := spinner.New()
+			sp.Spinner = spinner.Dot
+			sp.Style = lipgloss.NewStyle().Foreground(colorBlue)
+			d.spinner = sp
+			return d, tea.Batch(
+				d.spinner.Tick,
+				writeReviewCmd(d.repoRoot, d.baseLabel(), body, d.pending),
+			)
+		}
 		// GitHub rules:
 		//   APPROVE       — body + comments both optional
 		//   COMMENT       — needs at least body OR comments
@@ -823,7 +921,7 @@ func submitReviewCmd(prNum int, summary, event string, comments []PendingComment
 			Event: event,
 		}
 		for _, c := range comments {
-			a := apiComment{Path: c.Path, Body: c.Body}
+			a := apiComment{Path: c.Path, Body: c.renderedBody()}
 			if c.SubjectType == "file" {
 				a.SubjectType = "file"
 			} else {
@@ -857,6 +955,69 @@ func submitReviewCmd(prNum int, summary, event string, comments []PendingComment
 		return reviewSubmittedMsg{}
 	}
 }
+
+// updateHandoff handles the post-write prompt: hand the review to the agent
+// (quit, caller launches it) or stay in the diff.
+func (d DiffView) updateHandoff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		d.handoff = true
+		return d, tea.Quit
+	case "esc":
+		// Written comments live in the file now; clear the buffer so a second
+		// review doesn't duplicate them.
+		d.pending = nil
+		d.mode = modeFile
+		d.statusMsg = "wrote " + review.File
+		return d, nil
+	case "q", "ctrl+c":
+		return d, tea.Quit
+	}
+	return d, nil
+}
+
+// writeReviewCmd writes a local review to <root>/.norn/review.md. The no-PR
+// counterpart of submitReviewCmd: same authoring flow, different sink.
+func writeReviewCmd(root, base, summary string, comments []PendingComment) tea.Cmd {
+	return func() tea.Msg {
+		out := make([]review.Comment, 0, len(comments))
+		for _, c := range comments {
+			out = append(out, review.Comment{
+				Path:      c.Path,
+				Line:      c.Line,
+				StartLine: c.StartLine,
+				OldSide:   c.Side == "LEFT",
+				FileLevel: c.SubjectType == "file",
+				Label:     c.Label,
+				Blocking:  c.Blocking,
+				Body:      c.Body,
+			})
+		}
+		path, err := review.Write(root, base, summary, out)
+		if err != nil {
+			return reviewSubmittedMsg{err: err}
+		}
+		return reviewSubmittedMsg{path: path}
+	}
+}
+
+// baseLabel describes what the diff is against, for the review header.
+func (d DiffView) baseLabel() string {
+	if d.workTree {
+		return "HEAD (uncommitted)"
+	}
+	if d.prMeta != nil {
+		return fmt.Sprintf("PR #%d", d.prMeta.Number)
+	}
+	return strings.TrimPrefix(d.target, "origin/")
+}
+
+// Handoff reports whether the user asked to hand the written review to the
+// agent. Read by the caller after the program exits.
+func (d DiffView) Handoff() bool { return d.handoff }
+
+// ReviewPath is the local review file written this session ("" when none).
+func (d DiffView) ReviewPath() string { return d.reviewPath }
 
 func (d DiffView) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -896,11 +1057,9 @@ func (d DiffView) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "R":
 		// Submit a review from the list view too — useful when there are
 		// pending comments and you don't need to re-open any file.
-		if d.prMeta != nil {
-			d.mode = modeReview
-			d.reviewArea = newReviewArea(d.width)
-			return d, textarea.Blink
-		}
+		d.mode = modeReview
+		d.reviewArea = newReviewArea(d.width)
+		return d, textarea.Blink
 	}
 	return d, nil
 }
@@ -955,7 +1114,7 @@ func (d DiffView) updateFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Line- or range-level comment. If a pending comment already exists on
 		// this line/range, open the overlay pre-filled to edit. If visualStart
 		// is set, comment spans visualStart..fileCursor.
-		if d.prMeta == nil || d.fileCursor >= len(d.parsed) {
+		if d.fileCursor >= len(d.parsed) {
 			return d, nil
 		}
 		row := d.parsed[d.fileCursor]
@@ -973,48 +1132,46 @@ func (d DiffView) updateFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Look for an existing pending comment to edit.
 		d.editingIdx = d.findPendingForCursor()
 		d.commentArea = newCommentArea(d.width)
+		d.labelPick = true
+		d.commentLabel = review.LabelIssue
+		d.commentBlocking = false
 		if d.editingIdx >= 0 {
 			d.commentArea.SetValue(d.pending[d.editingIdx].Body)
+			d.commentLabel = d.pending[d.editingIdx].Label
+			d.commentBlocking = d.pending[d.editingIdx].Blocking
 		}
 		return d, textarea.Blink
 	case "C":
 		// File-level comment.
-		if d.prMeta != nil {
-			d.mode = modeComment
-			d.commentLineIdx = -1
-			d.commentEndIdx = -1
-			d.editingIdx = -1
-			d.commentArea = newCommentArea(d.width)
-			return d, textarea.Blink
-		}
-		return d, nil
+		d.mode = modeComment
+		d.commentLineIdx = -1
+		d.commentEndIdx = -1
+		d.editingIdx = -1
+		d.commentArea = newCommentArea(d.width)
+		d.labelPick = true
+		d.commentLabel = review.LabelIssue
+		d.commentBlocking = false
+		return d, textarea.Blink
 	case "D", "x":
 		// Delete pending comment on the focused row (or file-level pending if
 		// that's all the file has at this position).
-		if d.prMeta != nil {
-			if idx := d.findPendingForCursor(); idx >= 0 {
-				d.pending = append(d.pending[:idx], d.pending[idx+1:]...)
-				d.statusMsg = "deleted comment"
-			}
+		if idx := d.findPendingForCursor(); idx >= 0 {
+			d.pending = append(d.pending[:idx], d.pending[idx+1:]...)
+			d.statusMsg = "deleted comment"
 		}
 		return d, nil
 	case "v":
 		// Toggle visual mode — anchor a multi-line selection at the cursor.
-		if d.prMeta != nil {
-			if d.visualStart < 0 {
-				d.visualStart = d.fileCursor
-			} else {
-				d.visualStart = -1
-			}
+		if d.visualStart < 0 {
+			d.visualStart = d.fileCursor
+		} else {
+			d.visualStart = -1
 		}
 		return d, nil
 	case "R":
-		if d.prMeta != nil {
-			d.mode = modeReview
-			d.reviewArea = newReviewArea(d.width)
-			return d, textarea.Blink
-		}
-		return d, nil
+		d.mode = modeReview
+		d.reviewArea = newReviewArea(d.width)
+		return d, textarea.Blink
 	case "m":
 		if d.prMeta != nil && len(d.prMeta.CommitList) > 0 {
 			d.mode = modeCommitPicker
@@ -1092,8 +1249,53 @@ func (d DiffView) View() string {
 		return d.renderReviewOverlay()
 	case modeCommitPicker:
 		return d.renderCommitPicker()
+	case modeHandoff:
+		return d.renderHandoff()
 	}
 	return ""
+}
+
+// renderLabelPicker renders the label row of the comment overlay, marking the
+// current pick and the blocking decoration.
+func (d DiffView) renderLabelPicker() string {
+	var parts []string
+	for _, l := range review.Labels {
+		cell := fmt.Sprintf("%s %s", review.Key(l), string(l))
+		if l == d.commentLabel {
+			parts = append(parts, selectedStyle.Render("["+cell+"]"))
+		} else {
+			parts = append(parts, dimStyle.Render(" "+cell+" "))
+		}
+	}
+	row := "  " + strings.Join(parts, " ")
+	dec := dimStyle.Render("  non-blocking")
+	if d.commentBlocking {
+		dec = errorStyle.Render("  blocking")
+	}
+	return row + "\n" + "  " + dec + "\n"
+}
+
+// renderHandoff renders the post-write prompt for a local review.
+func (d DiffView) renderHandoff() string {
+	var b strings.Builder
+	b.WriteString("\n" + titleStyle.Render("norn") + " " + subtitleStyle.Render("review written") + "\n\n")
+	b.WriteString("  " + activeStyle.Render("✓ "+d.reviewPath) + "\n\n")
+
+	blocking := 0
+	for _, c := range d.pending {
+		if c.Blocking {
+			blocking++
+		}
+	}
+	line := fmt.Sprintf("%d comment(s)", len(d.pending))
+	if blocking > 0 {
+		line += fmt.Sprintf(" · %d blocking", blocking)
+	}
+	b.WriteString("  " + dimStyle.Render(line) + "\n\n")
+	b.WriteString("  " + lipgloss.NewStyle().Foreground(colorText).
+		Render("Hand it to the agent in this worktree?") + "\n\n")
+	b.WriteString(helpStyle.Render("enter hand to agent · esc stay in diff · q quit"))
+	return b.String()
 }
 
 func (d DiffView) renderCommentOverlay() string {
@@ -1122,8 +1324,16 @@ func (d DiffView) renderCommentOverlay() string {
 		b.WriteString("\n")
 	}
 
+	b.WriteString(d.renderLabelPicker())
+
+	if d.labelPick {
+		b.WriteString("\n" + helpStyle.Render("pick a label (single key) · b blocking · enter keep · esc cancel"))
+		return b.String()
+	}
+
+	b.WriteString("\n")
 	b.WriteString(boxStyle.Render(d.commentArea.View()))
-	b.WriteString("\n" + helpStyle.Render("ctrl+s save · esc cancel"))
+	b.WriteString("\n" + helpStyle.Render("ctrl+s save · tab label · ctrl+b blocking · esc cancel"))
 	return b.String()
 }
 
@@ -1161,20 +1371,24 @@ func (d DiffView) renderReviewOverlay() string {
 	b.WriteString("\n" + titleStyle.Render("work") + " " + subtitleStyle.Render("review"))
 	if d.prMeta != nil {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("   PR #%d · %d pending comment(s)", d.prMeta.Number, len(d.pending))))
+	} else {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("   local · %s · %d comment(s)", d.baseLabel(), len(d.pending))))
 	}
 	b.WriteString("\n\n")
 
-	// Event picker (tab to cycle)
-	events := []string{"COMMENT", "APPROVE", "REQUEST_CHANGES"}
-	var pickerParts []string
-	for _, e := range events {
-		if e == d.reviewEvent {
-			pickerParts = append(pickerParts, selectedStyle.Render("["+e+"]"))
-		} else {
-			pickerParts = append(pickerParts, dimStyle.Render(" "+e+" "))
+	// Event picker (tab to cycle). PR-only — a local review has no event.
+	if d.prMeta != nil {
+		events := []string{"COMMENT", "APPROVE", "REQUEST_CHANGES"}
+		var pickerParts []string
+		for _, e := range events {
+			if e == d.reviewEvent {
+				pickerParts = append(pickerParts, selectedStyle.Render("["+e+"]"))
+			} else {
+				pickerParts = append(pickerParts, dimStyle.Render(" "+e+" "))
+			}
 		}
+		b.WriteString("  " + strings.Join(pickerParts, "  ") + "\n\n")
 	}
-	b.WriteString("  " + strings.Join(pickerParts, "  ") + "\n\n")
 
 	// Pending comments preview
 	if len(d.pending) > 0 {
@@ -1191,7 +1405,7 @@ func (d DiffView) renderReviewOverlay() string {
 			if c.SubjectType == "file" {
 				loc = fmt.Sprintf("%s (file-level)", c.Path)
 			}
-			b.WriteString(fmt.Sprintf("  • %s  %s\n", loc, snippet))
+			b.WriteString(fmt.Sprintf("  • %s  %s: %s\n", loc, c.heading(), snippet))
 		}
 		b.WriteString("\n")
 	}
@@ -1200,13 +1414,21 @@ func (d DiffView) renderReviewOverlay() string {
 	b.WriteString("\n")
 
 	if d.submitting {
+		what := " submitting review to GitHub…"
+		if d.prMeta == nil {
+			what = " writing " + review.File + "…"
+		}
 		b.WriteString(lipgloss.NewStyle().Foreground(colorBlue).Bold(true).PaddingLeft(1).
-			Render(d.spinner.View()+" submitting review to GitHub…") + "\n")
+			Render(d.spinner.View()+what) + "\n")
 	} else if d.statusMsg != "" {
 		// Surface failures (or any leftover hint) just above the help line.
 		b.WriteString(helpStyle.Render(d.statusMsg) + "\n")
 	}
-	b.WriteString(helpStyle.Render("tab cycle event · ctrl+s submit · esc cancel"))
+	if d.prMeta == nil {
+		b.WriteString(helpStyle.Render("ctrl+s write review · esc cancel"))
+	} else {
+		b.WriteString(helpStyle.Render("tab cycle event · ctrl+s submit · esc cancel"))
+	}
 	return b.String()
 }
 
@@ -1273,7 +1495,7 @@ func (d DiffView) renderList() string {
 		}
 		b.WriteString(line + "\n")
 	}
-	listHelp := "j/k move · enter/l view file · q quit"
+	listHelp := "j/k move · enter/l view file · R review · q quit"
 	if d.prMeta != nil {
 		listHelp = "j/k move · enter/l view file · m scope · R review · q quit"
 	}
@@ -1383,7 +1605,7 @@ func (d DiffView) renderFile() string {
 	switch {
 	case d.jumping:
 		help = fmt.Sprintf(":%s    (enter jump · esc cancel)", d.jumpInput)
-	case d.prMeta != nil && d.visualStart >= 0:
+	case d.visualStart >= 0:
 		// In visual mode, surface that prominently and show the relevant keys.
 		help = "-- VISUAL --  j/k extend · c comment range · v cancel · q quit"
 	case d.prMeta != nil:
@@ -1391,7 +1613,9 @@ func (d DiffView) renderFile() string {
 			"j/k · d/u · :<line> · t split · n/p file · m scope · v range · c comment · C file · D delete · R review (%d) · esc · q",
 			len(d.pending))
 	default:
-		help = "j/k line · d/u page · :<line> jump · t split · g/G top/bottom · n/p file · esc back · q quit"
+		help = fmt.Sprintf(
+			"j/k · d/u · :<line> · t split · g/G · n/p file · v range · c comment · C file · x delete · R review (%d) · esc · q",
+			len(d.pending))
 	}
 	b.WriteString("\n" + helpStyle.Render(help))
 	if d.statusMsg != "" {
