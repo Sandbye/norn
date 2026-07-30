@@ -26,15 +26,29 @@ func originRepoName(dir string) string {
 		common = abs
 	}
 	// common typically looks like ".../<repo>/.git". Repo dir is the parent.
-	return filepath.Base(filepath.Dir(common))
+	if filepath.Base(common) == ".git" {
+		return filepath.Base(filepath.Dir(common))
+	}
+	// A bare repo (a mirror) reports the repo dir itself: ".../<repo>.git".
+	return strings.TrimSuffix(filepath.Base(common), ".git")
+}
+
+// RepoName is the name project config is keyed by for a repo root — the origin
+// repo's name, stable across worktrees and correct for a bare mirror. Exported
+// so callers can report which project config Load resolved.
+func RepoName(repoRoot string) string {
+	if repoRoot == "" {
+		return ""
+	}
+	return originRepoName(repoRoot)
 }
 
 type Config struct {
-	WorktreeDir  string       `yaml:"worktree_dir" json:"worktree_dir"`
-	ClickUp      *ClickUp     `yaml:"clickup,omitempty" json:"clickup,omitempty"`
-	Verify       []string     `yaml:"verify,omitempty" json:"verify,omitempty"`
-	Setup        string       `yaml:"setup,omitempty" json:"setup,omitempty"`
-	BaseBranches []string     `yaml:"base_branches" json:"base_branches"`
+	WorktreeDir  string   `yaml:"worktree_dir" json:"worktree_dir"`
+	ClickUp      *ClickUp `yaml:"clickup,omitempty" json:"clickup,omitempty"`
+	Verify       []string `yaml:"verify,omitempty" json:"verify,omitempty"`
+	Setup        string   `yaml:"setup,omitempty" json:"setup,omitempty"`
+	BaseBranches []string `yaml:"base_branches" json:"base_branches"`
 
 	// AINaming: when a new worktree's name would lack a descriptive slug (e.g.
 	// created from a bare ClickUp id), ask Claude to generate one. Requires the
@@ -75,7 +89,7 @@ type Config struct {
 
 	// HotfixPrefix is the branch-name prefix that triggers the hotfix routing.
 	// Defaults to "hotfix/" if unset.
-	HotfixPrefix string `yaml:"hotfix_prefix,omitempty" json:"hotfix_prefix,omitempty"`
+	HotfixPrefix string       `yaml:"hotfix_prefix,omitempty" json:"hotfix_prefix,omitempty"`
 	User         User         `yaml:"user" json:"user"`
 	Templates    TemplatesDir `yaml:"templates,omitempty" json:"templates,omitempty"`
 
@@ -210,24 +224,8 @@ func Load(repoRoot string) (Config, error) {
 		return cfg, err
 	}
 
-	// Global config
-	globalPath := filepath.Join(home, ".config", "work", "config.yaml")
-	if err := mergeFromFile(&cfg, globalPath); err != nil && !os.IsNotExist(err) {
-		return cfg, err
-	}
-
-	// Project config: repo root first, then ~/.config/work/projects/<repo-name>.yaml
-	if repoRoot != "" {
-		projectPath := filepath.Join(repoRoot, ".work.yaml")
-		if err := mergeFromFile(&cfg, projectPath); err != nil && !os.IsNotExist(err) {
-			return cfg, err
-		}
-
-		// Use the *origin* repo name (not the worktree basename) so the same
-		// config matches whether we're in the main checkout or any worktree.
-		repoName := originRepoName(repoRoot)
-		localProjectPath := filepath.Join(home, ".config", "work", "projects", repoName+".yaml")
-		if err := mergeFromFile(&cfg, localProjectPath); err != nil && !os.IsNotExist(err) {
+	for _, path := range sourcePaths(home, repoRoot) {
+		if err := mergeFromFile(&cfg, path); err != nil && !os.IsNotExist(err) {
 			return cfg, err
 		}
 	}
@@ -238,6 +236,38 @@ func Load(repoRoot string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// sourcePaths lists the config files in merge order — global, then the repo's
+// committed .work.yaml, then the personal per-project file — whether or not
+// they exist. The per-project file is keyed by the *origin* repo name (not the
+// worktree basename) so the same config matches from any worktree.
+func sourcePaths(home, repoRoot string) []string {
+	paths := []string{filepath.Join(home, ".config", "work", "config.yaml")}
+	if repoRoot != "" {
+		paths = append(paths,
+			filepath.Join(repoRoot, ".work.yaml"),
+			filepath.Join(home, ".config", "work", "projects", originRepoName(repoRoot)+".yaml"),
+		)
+	}
+	return paths
+}
+
+// Sources returns the config files Load actually read for repoRoot, in merge
+// order. Headless callers use it to report which config backed a result (and
+// to tell "no project config" from "project config with no verify commands").
+func Sources(repoRoot string) []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	var found []string
+	for _, path := range sourcePaths(home, repoRoot) {
+		if _, err := os.Stat(path); err == nil {
+			found = append(found, path)
+		}
+	}
+	return found
 }
 
 func mergeFromFile(cfg *Config, path string) error {
