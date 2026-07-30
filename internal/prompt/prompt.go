@@ -80,6 +80,17 @@ type Data struct {
 // drives the hint block and workflow data regardless of which file renders.
 // `base` is the branch the worktree was forked from — agents must diff against
 // it, not assume `master`.
+// clickupWithoutToken copies the ClickUp config with the credential stripped.
+// Templates render into .worktree.md, which is a plain file in the worktree.
+func clickupWithoutToken(c *config.ClickUp) *config.ClickUp {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	cp.Token = ""
+	return &cp
+}
+
 func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef) (string, error) {
 	if tmpl == "" {
 		tmpl = kind
@@ -91,7 +102,7 @@ func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef) 
 		Hint:      hint,
 		HintBlock: hintBlock(kind, hint),
 		User:      cfg.User,
-		ClickUp:   cfg.ClickUp,
+		ClickUp:   clickupWithoutToken(cfg.ClickUp),
 		Verify:    cfg.Verify,
 		Setup:     cfg.Setup,
 		Base:      base,
@@ -115,7 +126,7 @@ func RenderReview(cfg config.Config, tmpl string, pr *PRRef) (string, error) {
 		Hint:      pr.Title,
 		HintBlock: hintBlock("review", pr.Title),
 		User:      cfg.User,
-		ClickUp:   cfg.ClickUp,
+		ClickUp:   clickupWithoutToken(cfg.ClickUp),
 		Verify:    cfg.Verify,
 		Setup:     cfg.Setup,
 		Base:      pr.Base,
