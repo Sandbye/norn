@@ -30,6 +30,7 @@ internal/
   prompt/
     prompt.go               Template rendering (text/template): Render, Resolve, List, NewTemplate
     templates/*.md.tmpl     Built-in templates (task, review); user overrides in ~/.config/work/templates
+  review/review.go          Local review model + .norn/review.md rendering (conventional comments)
 ```
 
 ## Stack
@@ -70,6 +71,7 @@ base_branches: [main, develop]
 4. **Direct create shortcut** — `work "hint"` skips TUI entirely for fast worktree creation (picks first base branch).
 5. **ExecProcess for Claude** — Bubble Tea hands off terminal control to Claude via `tea.ExecProcess`. Alt screen exits cleanly.
 6. **Prompt generation via `text/template`** — `internal/prompt` renders `.worktree.md` from config + the selected template. Precedence: `--template` flag → `cfg.template` (task) → kind. User overrides live in `~/.config/work/templates` (or `templates.dir`); `norn template new <name>` scaffolds one.
+7. **One review flow, two sinks** — the diff view's comment/review machinery is shared: PR mode POSTs to GitHub, local mode writes `.norn/review.md` and offers to resume the agent with it. Comments carry a conventional-comment label + blocking flag, rendered into the body for both sinks.
 
 ## Current State (v0.1)
 

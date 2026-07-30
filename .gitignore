@@ -1,6 +1,9 @@
 # Compiled binary
 /work
 
+# norn's own per-worktree scratch (local reviews, state)
+.norn/
+
 # macOS
 .DS_Store
 
