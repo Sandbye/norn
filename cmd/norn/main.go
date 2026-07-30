@@ -1002,10 +1002,12 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 		}
 		dv := tui.NewDiffView(repoRoot, "HEAD", 0, files, "").WithWorkingTree()
 		p := tea.NewProgram(dv, tea.WithAltScreen(), tea.WithMouseCellMotion())
-		if _, err := p.Run(); err != nil {
+		final, err := p.Run()
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "diff TUI error: %v\n", err)
 			os.Exit(1)
 		}
+		handOffReview(cfg, repoRoot, final)
 		return
 	}
 
@@ -1069,9 +1071,37 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 
 	dv := tui.NewDiffView(repoRoot, ref, commitCount, files, warn)
 	p := tea.NewProgram(dv, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	if _, err := p.Run(); err != nil {
+	final, err := p.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "diff TUI error: %v\n", err)
 		os.Exit(1)
+	}
+	handOffReview(cfg, repoRoot, final)
+}
+
+// handOffReview picks up a local review written in the diff TUI. When the user
+// chose the handoff, the agent is resumed in this worktree with the review as
+// its next message; otherwise the path is just printed.
+func handOffReview(cfg config.Config, repoRoot string, final tea.Model) {
+	dv, ok := final.(tui.DiffView)
+	if !ok || dv.ReviewPath() == "" {
+		return
+	}
+	rel, err := filepath.Rel(repoRoot, dv.ReviewPath())
+	if err != nil {
+		rel = dv.ReviewPath()
+	}
+	if !dv.Handoff() {
+		fmt.Printf("Review written to %s\n", rel)
+		return
+	}
+	prompt := fmt.Sprintf(
+		"I reviewed your work locally. Read %s: it holds my review comments in "+
+			"conventional-comment form, each anchored to a file:line. Address every "+
+			"blocking comment, then the rest. Ask before acting on anything ambiguous, "+
+			"and tell me what you skipped and why.", rel)
+	if !tui.LaunchAgentPrompt(cfg.Agent, repoRoot, "", prompt) {
+		fmt.Printf("Review written to %s — hand it to %s yourself.\n", rel, cfg.AgentCommand())
 	}
 }
 

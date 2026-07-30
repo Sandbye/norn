@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
 )
 
@@ -305,4 +306,30 @@ func fitCell(s string, w int) string {
 // default for this launch (empty → default); ignored on resume and non-claude.
 func LaunchAgent(agent config.AgentConfig, wtPath string, resume bool, model string) {
 	makeAgentCmd(agent, wtPath, resume, model).Run()
+}
+
+// LaunchAgentPrompt runs the agent in wtPath with prompt as its next message,
+// continuing the existing session when there is one. Blocks until it exits.
+// Reports whether it launched: only claude takes a prompt argument, so other
+// agents are left to the caller.
+func LaunchAgentPrompt(agent config.AgentConfig, wtPath, model, prompt string) bool {
+	command := agent.Command
+	if command == "" {
+		command = "claude"
+	}
+	if command != "claude" {
+		return false
+	}
+	if model == "" {
+		model = agent.Model
+	}
+	args := []string{}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if claude.HasSession(wtPath) {
+		args = append(args, "-c")
+	}
+	wireStdio(exec.Command("claude", append(args, prompt)...), wtPath).Run()
+	return true
 }

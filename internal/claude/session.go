@@ -64,6 +64,12 @@ func Probe(worktreePath string) (AgentState, time.Time) {
 	return resolve(state, ts, time.Now()), ts
 }
 
+// HasSession reports whether a worktree has a transcript Claude can continue,
+// i.e. whether `claude -c` in that directory would resume something.
+func HasSession(worktreePath string) bool {
+	return newestTranscript(filepath.Join(projectsDir(), slugFor(worktreePath))) != ""
+}
+
 // resolve applies the idle overlay: stale activity (working or waiting) decays
 // to idle. A fresh end_turn stays "waiting" so it reads as "needs you now"; an
 // old one becomes a dormant "idle". Split out so it's unit-testable.
