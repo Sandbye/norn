@@ -220,9 +220,10 @@ func EditorCommand(path string) *exec.Cmd {
 }
 
 // Save writes the edited tree back to disk atomically (tmp+rename), matching
-// the 2-space indent norn's configs use.
+// the 2-space indent norn's configs use. Mode is 0600: the global config holds
+// the ClickUp token, and the tmp file would otherwise expose it before rename.
 func (e *Editor) Save() error {
-	if err := os.MkdirAll(filepath.Dir(e.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(e.path), 0o700); err != nil {
 		return err
 	}
 	var buf bytes.Buffer
@@ -235,7 +236,7 @@ func (e *Editor) Save() error {
 		return err
 	}
 	tmp := e.path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, e.path)

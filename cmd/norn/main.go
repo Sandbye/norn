@@ -58,7 +58,7 @@ func main() {
 			return
 		case "--project-config":
 			cmdProjectConfig(cfg, repoRoot)
-
+			return
 		case "context", "--context":
 			cmdContext(cfg, repoRoot)
 			return
@@ -2076,6 +2076,14 @@ func cmdTemplates(cfg config.Config) {
 func cmdProjectConfig(cfg config.Config, repoRoot string) {
 	// Emit the fully-resolved config as JSON. Used by hooks + skills that need
 	// per-project policy (forbid/format/review), verify cmds, clickup lists.
+	// The ClickUp token is a live credential and this output ends up in hook
+	// stdout and agent transcripts, so never emit it. Copy before masking so
+	// the caller's config keeps the real value.
+	if cfg.ClickUp != nil && cfg.ClickUp.Token != "" {
+		redacted := *cfg.ClickUp
+		redacted.Token = "<redacted>"
+		cfg.ClickUp = &redacted
+	}
 	out := map[string]any{
 		"repo_root": repoRoot,
 		"config":    cfg,
@@ -2085,6 +2093,7 @@ func cmdProjectConfig(cfg config.Config, repoRoot string) {
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false) // keep <, > and & literal — forbid patterns read as written
 	_ = enc.Encode(out)
 }
 
