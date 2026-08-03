@@ -315,23 +315,117 @@ func aiResolveBranch(cfg config.Config, repoRoot, kind, hint string) string {
 	return branch
 }
 
-// runCreate handles `norn create [--from x] [--template y] "hint"`. createArgs
-// is everything after the `create` verb. A bare `norn create` (no hint) opens
-// the New tab instead of creating blindly. (PR review is its own verb: `norn
-// review <pr#>`.)
+// runCreate handles `norn create [--from x] [--template y] [--branch b] "hint"`.
+// createArgs is everything after the `create` verb. A bare `norn create` (no
+// hint) opens the New tab instead of creating blindly. (PR review is its own
+// verb: `norn review <pr#>`.)
 func runCreate(cfg config.Config, repoRoot string, createArgs []string) {
 	if repoRoot == "" {
 		fmt.Fprintln(os.Stderr, "error: not inside a git repository")
 		os.Exit(1)
 	}
-	baseOverride, templateOverride, rest := extractCreateFlags(createArgs)
-	hint := strings.Join(rest, " ")
+	flags := extractCreateFlags(createArgs)
+	// A leftover dashed token is a typo or a flag missing its value — without
+	// this it silently becomes part of the hint (and thus the branch name).
+	for _, a := range flags.rest {
+		if strings.HasPrefix(a, "-") {
+			fmt.Fprintf(os.Stderr, "error: unknown or incomplete flag %q\n(see `norn --help`)\n", a)
+			os.Exit(1)
+		}
+	}
+	hint := strings.Join(flags.rest, " ")
+
+	// `--branch <b>` is the "run this exact ref" path: check an existing branch
+	// out, don't resolve a task and don't cut a new branch.
+	if flags.branch != "" {
+		if strings.TrimSpace(hint) != "" {
+			fmt.Fprintf(os.Stderr, "note: --branch checks out an existing branch — ignoring hint %q\n", hint)
+		}
+		if flags.base != "" {
+			fmt.Fprintln(os.Stderr, "note: --from is ignored with --branch (nothing is forked)")
+		}
+		checkoutBranch(cfg, repoRoot, flags.branch, flags.template)
+		return
+	}
+
 	if strings.TrimSpace(hint) == "" {
 		// No hint given → let the user compose it in the New tab.
 		runApp(cfg, repoRoot, tui.ViewCreate)
 		return
 	}
-	directCreate(cfg, repoRoot, "task", hint, baseOverride, templateOverride)
+	directCreate(cfg, repoRoot, "task", hint, flags.base, flags.template)
+}
+
+// checkoutBranch puts an existing branch into a worktree and launches the agent
+// there. No task lookup, no branch naming, no new branch: the point is to run
+// the exact ref (typically one another agent or colleague produced), which a
+// fresh branch forked off it would not be. Everything else create does —
+// project config, .env symlinks, brief, session row, cd target — still happens.
+func checkoutBranch(cfg config.Config, repoRoot, branch, templateOverride string) {
+	branch = strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
+	remote := "origin"
+	// `--branch origin/foo` means the same branch as `--branch foo`; the local
+	// worktree gets the plain name either way.
+	if b, ok := strings.CutPrefix(branch, remote+"/"); ok {
+		branch = b
+	}
+	if branch == "" {
+		fmt.Fprintln(os.Stderr, "usage: norn create --branch <existing-branch>")
+		os.Exit(1)
+	}
+
+	var (
+		wtPath string
+		err    error
+	)
+	switch {
+	case git.WorktreePathForBranch(repoRoot, branch) != "":
+		// Already checked out somewhere (including a dropped-but-kept thread) —
+		// reuse it rather than failing on git's one-worktree-per-branch rule.
+		wtPath = git.WorktreePathForBranch(repoRoot, branch)
+		fmt.Printf("Branch %s is already checked out at %s\n", branch, wtPath)
+	case git.BranchExists(repoRoot, branch):
+		fmt.Printf("Checking out existing branch: %s\n", branch)
+		wtPath, err = git.AddWorktreeFromRef(repoRoot, cfg.WorktreeDir, branch)
+	case git.RemoteBranchExists(repoRoot, remote, branch):
+		fmt.Printf("Checking out %s/%s (local branch tracks it, same tip)\n", remote, branch)
+		wtPath, err = git.AddWorktreeTracking(repoRoot, cfg.WorktreeDir, branch, remote+"/"+branch)
+	default:
+		fmt.Fprintf(os.Stderr, "error: no branch %q locally or on %s\n(fetch it first, or `norn create \"hint\"` to cut a new branch)\n", branch, remote)
+		os.Exit(1)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	_ = git.SymlinkEnvFiles(repoRoot, wtPath)
+
+	// Brief carries the project config (setup + verify) the agent needs. Keep an
+	// existing one: on a reused worktree it may hold work in progress.
+	briefPath := filepath.Join(wtPath, ".worktree.md")
+	if _, statErr := os.Stat(briefPath); statErr != nil {
+		// The `checkout` template, not `task`: there is no task, and the brief has
+		// to say the branch is pre-existing work rather than a fresh fork.
+		tmpl := prompt.Resolve(cfg, "checkout", templateOverride)
+		if templateOverride != "" && !prompt.Has(templateOverride) {
+			fmt.Fprintf(os.Stderr, "warning: template %q not found, using %q\n", templateOverride, tmpl)
+		}
+		base := resolveBranchBase(cfg, repoRoot, "")
+		promptText, rerr := prompt.Render(cfg, "checkout", branch, base, tmpl, nil)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not render prompt: %v\n", rerr)
+		}
+		if werr := os.WriteFile(briefPath, []byte(promptText), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write prompt: %v\n", werr)
+		}
+	}
+
+	upsertSession(repoRoot, "task", branch, wtPath, branch)
+	writeCdTarget(wtPath)
+
+	clearScreen()
+	tui.LaunchAgent(cfg.Agent, wtPath, false, "") // config default model
 }
 
 func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templateOverride string) {
@@ -590,30 +684,46 @@ func cmdContext(cfg config.Config, repoRoot string) {
 // cmdActivityTick bumps last_activity_at for the session matching the current
 // repo + branch. Called by the activity-log.py hook on every Claude tool use.
 // Silent on no-op; never fails the caller.
-// extractFromFlag pulls `--from <branch>` or `-b <branch>` out of args. Returns
-// the chosen base (or "" if absent) and the remaining args in original order.
-// extractCreateFlags pulls `--from`/`-b <branch>` and `--template`/`-t <name>`
-// out of the create args so the remainder flows cleanly into the hint.
-func extractCreateFlags(args []string) (base, template string, rest []string) {
-	rest = make([]string, 0, len(args))
+// createFlags are the flags `norn create` understands. base is the branch to
+// fork from; branch is an existing branch to check out instead of cutting a new
+// one; rest is everything left over, joined into the hint.
+type createFlags struct {
+	base     string
+	template string
+	branch   string
+	rest     []string
+}
+
+// extractCreateFlags pulls `--from`/`-b <branch>`, `--template`/`-t <name>` and
+// `--branch <name>` out of the create args so the remainder flows cleanly into
+// the hint.
+func extractCreateFlags(args []string) createFlags {
+	f := createFlags{rest: make([]string, 0, len(args))}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case (a == "--from" || a == "-b") && i+1 < len(args):
-			base = args[i+1]
+			f.base = args[i+1]
 			i++ // skip the value
 		case strings.HasPrefix(a, "--from="):
-			base = strings.TrimPrefix(a, "--from=")
+			f.base = strings.TrimPrefix(a, "--from=")
 		case (a == "--template" || a == "-t") && i+1 < len(args):
-			template = args[i+1]
+			f.template = args[i+1]
 			i++ // skip the value
 		case strings.HasPrefix(a, "--template="):
-			template = strings.TrimPrefix(a, "--template=")
+			f.template = strings.TrimPrefix(a, "--template=")
+		case (a == "--branch" || a == "--checkout") && i+1 < len(args):
+			f.branch = args[i+1]
+			i++ // skip the value
+		case strings.HasPrefix(a, "--branch="):
+			f.branch = strings.TrimPrefix(a, "--branch=")
+		case strings.HasPrefix(a, "--checkout="):
+			f.branch = strings.TrimPrefix(a, "--checkout=")
 		default:
-			rest = append(rest, a)
+			f.rest = append(f.rest, a)
 		}
 	}
-	return base, template, rest
+	return f
 }
 
 // isAllDigits returns true if s consists solely of ASCII digits and is non-empty.
@@ -2137,6 +2247,9 @@ Usage:
                           Override base branch for this worktree
   norn create "hint" --template <name>, -t <name>
                           Use a specific prompt template for this worktree
+  norn create --branch <b>
+                          Check an existing branch out into a worktree: that exact
+                          ref, no task lookup, no new branch. Accepts origin/<b>
   norn review <pr#>       Check out a PR into a worktree + launch the agent to review it
   norn --clean            Open on the Clean tab
   norn settings           Open on the Settings tab

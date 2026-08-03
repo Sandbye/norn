@@ -1,0 +1,28 @@
+---
+branch: {{printf "%q" .Hint}}
+base: {{.Base}}
+created: {{.Generated}}
+---
+
+# Checkout · `{{.Hint}}`
+
+This worktree is an existing branch, checked out as-is: nothing was forked, no branch was created, and the commits here are work that already existed (another agent, a colleague, an earlier session). **Follow this repo's own conventions** — its `AGENTS.md` / `CLAUDE.md` / README, if present. Below is just the context norn added.
+
+## What's here
+
+Read the work before touching it:
+
+    git log --oneline {{.Base}}..HEAD
+    git diff {{.Base}}...HEAD
+
+Ask what's wanted from this branch — running it, testing it, reviewing it, continuing it — rather than assuming a task.
+
+## This worktree
+{{if .Setup}}
+- Setup: run `{{.Setup}}`.
+{{- end}}
+{{- if .Verify}}
+- Checks: {{join .Verify " · "}}
+{{- end}}
+- Keep a `.state.md` at the root with at least a `next:` line (the one action to resume with). Update it as you work. norn surfaces it on the dashboard, and it's git-ignored so it never lands in a commit.
+- The worktree is disposable, the branch is not — `norn --clean` removes the checkout when you're done with it.

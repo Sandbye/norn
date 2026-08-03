@@ -447,6 +447,28 @@ func AddWorktreeFromRef(repoRoot, worktreeDir, branch string) (string, error) {
 	return wtPath, nil
 }
 
+// AddWorktreeTracking adds a worktree for a branch that only exists on the
+// remote: it creates the local branch at the remote ref's tip and sets it to
+// track it. Not a divergent copy — the new local ref points at exactly
+// `remoteRef`, which is what checking out someone else's branch has to mean.
+func AddWorktreeTracking(repoRoot, worktreeDir, branch, remoteRef string) (string, error) {
+	wtPath := filepath.Join(worktreeDir, branch)
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := cmdRun(repoRoot, "git", "worktree", "add", "--track", "-b", branch, wtPath, remoteRef); err != nil {
+		return "", fmt.Errorf("worktree add (tracking %s) failed: %w", remoteRef, err)
+	}
+	excludeLocalMeta(wtPath)
+	return wtPath, nil
+}
+
+// RemoteBranchExists reports whether a remote-tracking branch of that name
+// exists (`refs/remotes/<remote>/<branch>`).
+func RemoteBranchExists(repoRoot, remote, branch string) bool {
+	return cmdRun(repoRoot, "git", "rev-parse", "--verify", "--quiet", "refs/remotes/"+remote+"/"+branch) == nil
+}
+
 // IsDirty reports whether the worktree has uncommitted changes.
 func IsDirty(wtPath string) bool {
 	out, err := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output()

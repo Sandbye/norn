@@ -30,7 +30,7 @@ internal/
     helpers.go              Claude launch, prompt generation, file utils
   prompt/
     prompt.go               Template rendering (text/template): Render, Resolve, List, NewTemplate
-    templates/*.md.tmpl     Built-in templates (task, review); user overrides in ~/.config/work/templates
+    templates/*.md.tmpl     Built-in templates (task, review, checkout); user overrides in ~/.config/work/templates
   review/review.go          Local review model + .norn/review.md rendering (conventional comments)
 ```
 
