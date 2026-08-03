@@ -337,9 +337,9 @@ func runCreate(cfg config.Config, repoRoot string, createArgs []string) {
 
 	// `--branch <b>` is the "run this exact ref" path: check an existing branch
 	// out, don't resolve a task and don't cut a new branch.
-	if flags.branch != "" {
+	if flags.branchSet {
 		if strings.TrimSpace(hint) != "" {
-			fmt.Fprintf(os.Stderr, "note: --branch checks out an existing branch — ignoring hint %q\n", hint)
+			fmt.Fprintf(os.Stderr, "note: --branch checks out an existing branch, ignoring hint %q\n", hint)
 		}
 		if flags.base != "" {
 			fmt.Fprintln(os.Stderr, "note: --from is ignored with --branch (nothing is forked)")
@@ -691,7 +691,10 @@ type createFlags struct {
 	base     string
 	template string
 	branch   string
-	rest     []string
+	// Whether --branch was given at all, so `--branch=` (present but empty) is
+	// rejected rather than read as absent and quietly opening the New tab.
+	branchSet bool
+	rest      []string
 }
 
 // extractCreateFlags pulls `--from`/`-b <branch>`, `--template`/`-t <name>` and
@@ -713,12 +716,12 @@ func extractCreateFlags(args []string) createFlags {
 		case strings.HasPrefix(a, "--template="):
 			f.template = strings.TrimPrefix(a, "--template=")
 		case (a == "--branch" || a == "--checkout") && i+1 < len(args):
-			f.branch = args[i+1]
+			f.branch, f.branchSet = args[i+1], true
 			i++ // skip the value
 		case strings.HasPrefix(a, "--branch="):
-			f.branch = strings.TrimPrefix(a, "--branch=")
+			f.branch, f.branchSet = strings.TrimPrefix(a, "--branch="), true
 		case strings.HasPrefix(a, "--checkout="):
-			f.branch = strings.TrimPrefix(a, "--checkout=")
+			f.branch, f.branchSet = strings.TrimPrefix(a, "--checkout="), true
 		default:
 			f.rest = append(f.rest, a)
 		}

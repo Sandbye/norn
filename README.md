@@ -43,7 +43,7 @@ norn is one tabbed TUI. `Tab` / `1`-`4` switch tabs, `?` shows keys, `esc` backs
 ```sh
 norn                      # the TUI
 norn create "add caching" # new worktree + branch, launch a session
-norn create --branch foo  # worktree on an existing branch (that ref, no new branch)
+norn create --branch foo  # worktree on an existing branch (that ref, no new branch; --checkout is an alias)
 norn review 42            # check out PR #42 into a worktree, agent reviews it
 norn diff                 # review uncommitted changes (or: --base, <pr#>)
 norn --help               # everything
