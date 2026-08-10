@@ -62,14 +62,14 @@ func TestRenderReview(t *testing.T) {
 		User: config.User{Name: "Test User", Email: "test@example.com"},
 	}
 
-	out, err := Render(cfg, "review", "CU-86c98r0j6", "master", "", nil)
+	out, err := Render(cfg, "review", "CU-86c00000", "master", "", nil)
 	if err != nil {
 		t.Fatalf("Render review: %v", err)
 	}
 
 	checks := []string{
-		`hint: "CU-86c98r0j6"`, // frontmatter
-		`Review hint: "CU-86c98r0j6"`,
+		`hint: "CU-86c00000"`, // frontmatter
+		`Review hint: "CU-86c00000"`,
 		"correctness",
 	}
 	for _, c := range checks {
@@ -86,7 +86,7 @@ func TestExtractHint(t *testing.T) {
 		{"frontmatter hint", "---\nhint: \"fix the export bug\"\nbase: master\n---\n# fix the export bug\n", "fix the export bug"},
 		{"frontmatter empty hint", "---\nhint: \"\"\nbase: master\n---\nbody\n", ""},
 		{"legacy task marker", "blah\n2. **Load context.** Hint: \"fix the export bug\"\nmore\n", "fix the export bug"},
-		{"legacy review marker", "1. **Load the task.** Review hint: \"CU-86c98r0j6\"\n", "CU-86c98r0j6"},
+		{"legacy review marker", "1. **Load the task.** Review hint: \"CU-86c00000\"\n", "CU-86c00000"},
 		{"no hint provided", "2. **Load context.** No hint provided. Ask the user what to work on.\n", ""},
 		{"empty file", "", ""},
 		{"unrelated text", "no markers anywhere here", ""},
