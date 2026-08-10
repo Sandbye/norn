@@ -3,13 +3,20 @@ package git
 import "testing"
 
 func TestBranchLacksSlug(t *testing.T) {
-	lacks := []string{"feature/#86caebh17", "fix/#86c9y34xd", "feature/20260701-084500", "chore/"}
+	lacks := []string{
+		"feature/#86caebh17", "fix/#86c9y34xd", "feature/20260701-084500", "chore/",
+		// Dashboard format — id last, `CU-` prefixed.
+		"feature/CU-86caebh17", "fix/86caebh17",
+	}
 	for _, b := range lacks {
 		if !BranchLacksSlug(b) {
 			t.Errorf("BranchLacksSlug(%q) = false, want true", b)
 		}
 	}
-	has := []string{"fix/#86caebh17/no-show-bookings", "feature/social-login", "chore/#86c/update-deps"}
+	has := []string{
+		"fix/#86caebh17/no-show-bookings", "feature/social-login", "chore/#86c/update-deps",
+		"feature/social-login/CU-86c41xu8m",
+	}
 	for _, b := range has {
 		if BranchLacksSlug(b) {
 			t.Errorf("BranchLacksSlug(%q) = true, want false", b)
@@ -33,12 +40,47 @@ func TestNormalizeSuggestedBranch(t *testing.T) {
 	}
 }
 
+func TestComposeBranch(t *testing.T) {
+	cases := []struct {
+		name, format, prefix, id, title, want string
+	}{
+		// Dashboard: coding-guidelines/branch-naming/dashboard.md — id last, `CU-`.
+		{"dashboard", "{prefix}/{title}/CU-{id}", "feature", "86c41xu8m", "social-login", "feature/social-login/CU-86c41xu8m"},
+		{"dashboard no id", "{prefix}/{title}/CU-{id}", "chore", "", "update-firebase", "chore/update-firebase"},
+		{"dashboard no title", "{prefix}/{title}/CU-{id}", "fix", "86c41xu9p", "", "fix/CU-86c41xu9p"},
+		// Android / baseline: id in the middle segment.
+		{"default", "", "fix", "86caebh17", "no-show-bookings", "fix/#86caebh17/no-show-bookings"},
+		{"default no id", "", "feature", "", "social-login", "feature/social-login"},
+	}
+	for _, c := range cases {
+		if got := ComposeBranch(c.format, c.prefix, c.id, c.title); got != c.want {
+			t.Errorf("%s: ComposeBranch(%q, %q, %q, %q) = %q, want %q", c.name, c.format, c.prefix, c.id, c.title, got, c.want)
+		}
+	}
+}
+
+func TestSuggestedBranchParts(t *testing.T) {
+	cases := []struct{ in, prefix, title string }{
+		{"feature/social-login", "feature", "social-login"},
+		// The model adds an id anyway — norn places ids, so drop it.
+		{"fix/#86caebh17/no-show-bookings", "fix", "no-show-bookings"},
+		{"feature/social-login/CU-86c41xu8m", "feature", "social-login"},
+		{"random text", "", ""},
+	}
+	for _, c := range cases {
+		prefix, title := SuggestedBranchParts(c.in)
+		if prefix != c.prefix || title != c.title {
+			t.Errorf("SuggestedBranchParts(%q) = (%q, %q), want (%q, %q)", c.in, prefix, title, c.prefix, c.title)
+		}
+	}
+}
+
 func TestMakeBranch(t *testing.T) {
 	cases := []struct {
 		kind, hint, want string
 	}{
-		// Per how-we-build/coding-guidelines/git-strategy.md (Conventional Branch):
-		// branch prefixes are feature | fix | hotfix | epic | chore; id is `#<id>`.
+		// Default format (git-strategy.md baseline): prefixes are
+		// feature | fix | hotfix | epic | chore; id is `#<id>` in the middle.
 		{"task", "fix CU-86ca3yt48 location settings issues", "fix/#86ca3yt48/location-settings-issues"},
 		{"task", "add e2e reusable workflow", "feature/e2e-reusable-workflow"},
 		// Refactors bucket into `chore` per SOP.
@@ -54,9 +96,23 @@ func TestMakeBranch(t *testing.T) {
 		{"task", "just a vague hint", "feature/just-a-vague-hint"},
 	}
 	for _, c := range cases {
-		got := MakeBranch(c.kind, c.hint)
+		got := MakeBranch(c.kind, c.hint, "")
 		if got != c.want {
 			t.Errorf("MakeBranch(%q, %q) = %q, want %q", c.kind, c.hint, got, c.want)
+		}
+	}
+}
+
+func TestMakeBranchDashboardFormat(t *testing.T) {
+	const format = "{prefix}/{title}/CU-{id}"
+	cases := []struct{ hint, want string }{
+		{"fix CU-86ca3yt48 location settings issues", "fix/location-settings-issues/CU-86ca3yt48"},
+		{"update firebase dependency", "chore/update-firebase"},
+		{"https://app.clickup.com/t/86c9hq28r", "feature/CU-86c9hq28r"},
+	}
+	for _, c := range cases {
+		if got := MakeBranch("task", c.hint, format); got != c.want {
+			t.Errorf("MakeBranch(task, %q, dashboard) = %q, want %q", c.hint, got, c.want)
 		}
 	}
 }
