@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sandbye/norn/internal/config"
+	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/prompt"
 )
 
@@ -37,6 +38,7 @@ func settingRows() []settingRow {
 		{"Worktrees", "worktree_dir", []string{"worktree_dir"}, kindString, nil},
 		{"Worktrees", "pr_base", []string{"pr_base"}, kindString, nil},
 		{"Worktrees", "branch_base", []string{"branch_base"}, kindString, nil},
+		{"Worktrees", "branch_format", []string{"branch_format"}, kindString, nil},
 		{"Templates", "template", []string{"template"}, kindPicker, nil},
 		{"Tasks", "provider", []string{"tasks", "provider"}, kindPicker, []string{"github", "clickup", "none"}},
 		{"Appearance", "theme", []string{"theme"}, kindPicker, nil},
@@ -182,6 +184,11 @@ func resolvedDisplay(cfg config.Config, r settingRow) string {
 		return orDash(cfg.PRBase)
 	case "branch_base":
 		return orDash(cfg.BranchBase)
+	case "branch_format":
+		if cfg.BranchFormat != "" {
+			return cfg.BranchFormat
+		}
+		return git.DefaultBranchFormat
 	case "template":
 		if cfg.Template != "" {
 			return cfg.Template

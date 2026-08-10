@@ -635,10 +635,41 @@ func Age(t time.Time) string {
 	}
 }
 
-// MakeBranch produces a branch name from a hint, following the team SOP at
-// how-we-build/coding-guidelines/git-strategy.md (Conventional Branch).
+// DefaultBranchFormat is the shape used when a project sets no branch_format:
+// the shared baseline in how-we-build/coding-guidelines/git-strategy.md, id in
+// the middle segment. Per-platform docs override it — Dashboard puts the id
+// last as `CU-<id>` (coding-guidelines/branch-naming/dashboard.md).
+const DefaultBranchFormat = "{prefix}/#{id}/{title}"
+
+// ComposeBranch renders a branch-name template. Tokens: {prefix}, {title},
+// {id} (bare id — the template supplies the `#` or `CU-` decoration). A
+// segment whose token is empty is dropped whole, so its decoration goes with
+// it rather than leaving `chore/#/foo`.
+func ComposeBranch(format, prefix, id, title string) string {
+	if format == "" {
+		format = DefaultBranchFormat
+	}
+	var parts []string
+	for _, seg := range strings.Split(format, "/") {
+		if id == "" && strings.Contains(seg, "{id}") {
+			continue
+		}
+		if title == "" && strings.Contains(seg, "{title}") {
+			continue
+		}
+		seg = strings.ReplaceAll(seg, "{prefix}", prefix)
+		seg = strings.ReplaceAll(seg, "{id}", id)
+		seg = strings.ReplaceAll(seg, "{title}", title)
+		if seg != "" {
+			parts = append(parts, seg)
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+// MakeBranch produces a branch name from a hint, in the repo's branch_format
+// (see ComposeBranch; empty format → DefaultBranchFormat).
 //
-//	Format: <prefix>/#<taskId>/<desc>  or  <prefix>/<desc>  (no id case)
 //	Prefixes:
 //	  feature — new feature (default)
 //	  fix     — production bug fix
@@ -647,10 +678,9 @@ func Age(t time.Time) string {
 //	  chore   — everything else (refactor, docs, deps, tooling, internal)
 //	  review  — work-only kind for review worktrees; not a real PR prefix
 //
-// CU id is parsed from `CU-<id>` literals or `clickup.com/t/<id>` URLs and
-// emitted as `#<id>` (no `CU-` prefix, per SOP). Both the type keyword and the
-// id are stripped from the hint before slugging.
-func MakeBranch(kind, hint string) string {
+// CU id is parsed from `CU-<id>` literals or `clickup.com/t/<id>` URLs. Both
+// the type keyword and the id are stripped from the hint before slugging.
+func MakeBranch(kind, hint, format string) string {
 	cuID, hintRest := extractCUID(hint)
 
 	var prefix string
@@ -660,20 +690,12 @@ func MakeBranch(kind, hint string) string {
 		prefix, hintRest = inferType(hintRest)
 	}
 
-	desc := slugify(hintRest)
-
-	parts := []string{prefix}
-	if cuID != "" {
-		parts = append(parts, "#"+cuID)
+	title := slugify(hintRest)
+	// Fallback if nothing distinguishing — use timestamp as the title.
+	if cuID == "" && title == "" {
+		title = time.Now().Format("20060102-150405")
 	}
-	if desc != "" {
-		parts = append(parts, desc)
-	}
-	// Fallback if nothing distinguishing — use timestamp as desc.
-	if len(parts) == 1 {
-		parts = append(parts, time.Now().Format("20060102-150405"))
-	}
-	return strings.Join(parts, "/")
+	return ComposeBranch(format, prefix, cuID, title)
 }
 
 var cuRegex = regexp.MustCompile(`(?i)(?:\bCU-|\S*\bclickup\.com/t/)([a-z0-9]+)\S*`)
@@ -800,18 +822,26 @@ func slugify(s string) string {
 }
 
 // BranchLacksSlug reports whether a branch name has no human-readable
-// description — e.g. `feature/#86caebh17` or a timestamp fallback. These are the
-// names worth enriching with an AI-generated slug.
+// description — e.g. `feature/#86caebh17`, `feature/CU-86caebh17` or a timestamp
+// fallback. These are the names worth enriching with an AI-generated slug. Which
+// segment holds the id depends on branch_format, so every segment is checked.
 func BranchLacksSlug(branch string) bool {
 	parts := strings.Split(branch, "/")
-	last := parts[len(parts)-1]
-	if last == "" || strings.HasPrefix(last, "#") {
-		return true
+	for _, p := range parts[1:] { // parts[0] is the type prefix
+		if p == "" || idSegment.MatchString(p) || timestampSlug.MatchString(p) {
+			continue
+		}
+		return false
 	}
-	return timestampSlug.MatchString(last)
+	return true
 }
 
 var timestampSlug = regexp.MustCompile(`^\d{8}-\d{6}$`)
+
+// idSegment matches a branch segment that is only a task id, in any of the
+// decorations the platform docs use: `#<id>`, `CU-<id>`, or bare (ClickUp ids
+// start `86`).
+var idSegment = regexp.MustCompile(`(?i)^(?:#|cu-)[0-9a-z]+$|^86[0-9a-z]{6,}$`)
 
 // validBranchPrefix matches the Conventional Branch prefixes norn allows.
 var validBranchPrefix = regexp.MustCompile(`^(feature|fix|hotfix|epic|chore|review)/`)
@@ -845,6 +875,25 @@ func NormalizeSuggestedBranch(s string) string {
 		return ""
 	}
 	return out
+}
+
+// SuggestedBranchParts splits an LLM branch suggestion into prefix and title,
+// dropping any id segment the model added on its own — the id is norn's to
+// place, per the repo's branch_format. Empty prefix means invalid suggestion.
+func SuggestedBranchParts(s string) (prefix, title string) {
+	nb := NormalizeSuggestedBranch(s)
+	if nb == "" {
+		return "", ""
+	}
+	parts := strings.Split(nb, "/")
+	var rest []string
+	for _, p := range parts[1:] {
+		if p == "" || idSegment.MatchString(p) {
+			continue
+		}
+		rest = append(rest, p)
+	}
+	return parts[0], strings.Join(rest, "-")
 }
 
 func branchAt(dir string) string {

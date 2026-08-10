@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sandbye/norn/internal/config"
+	"github.com/sandbye/norn/internal/git"
 )
 
 const tmplExt = ".md.tmpl"
@@ -35,7 +36,7 @@ func DataFields() []string {
 		".User.Name / .User.Email / .User.ClickUpUID",
 		".ClickUp.Lists (map name→id; nil-gate with {{if .ClickUp}})",
 		".Verify (commands)  .Setup (setup command)",
-		".Base (fork branch)  .PRBase (PR target)",
+		".Base (fork branch)  .PRBase (PR target)  .BranchFormat",
 		".HintBlock  .Kind  .Generated",
 		"funcs: plus1 · default · upper · lower · join",
 	}
@@ -70,9 +71,12 @@ type Data struct {
 	Setup     string
 	Base      string // branch this worktree was forked from (diff baseline)
 	PRBase    string // default PR target (cfg.pr_base — may equal Base or differ)
-	Task      *TaskRef
-	PR        *PRRef // set for review worktrees (norn review <pr#>)
-	Generated string
+	// BranchFormat is the repo's branch-name template, so a brief states the
+	// platform's actual shape instead of a hardcoded one that drifts.
+	BranchFormat string
+	Task         *TaskRef
+	PR           *PRRef // set for review worktrees (norn review <pr#>)
+	Generated    string
 }
 
 // Render renders template `tmpl` with cfg + hint. When `tmpl` is empty it
@@ -91,6 +95,15 @@ func clickupWithoutToken(c *config.ClickUp) *config.ClickUp {
 	return &cp
 }
 
+// branchFormat is the repo's branch template, defaulted so a brief never shows
+// an empty shape.
+func branchFormat(cfg config.Config) string {
+	if cfg.BranchFormat != "" {
+		return cfg.BranchFormat
+	}
+	return git.DefaultBranchFormat
+}
+
 func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef) (string, error) {
 	if tmpl == "" {
 		tmpl = kind
@@ -98,17 +111,18 @@ func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef) 
 	tmplName := tmpl + ".md.tmpl"
 
 	data := Data{
-		Kind:      kind,
-		Hint:      hint,
-		HintBlock: hintBlock(kind, hint),
-		User:      cfg.User,
-		ClickUp:   clickupWithoutToken(cfg.ClickUp),
-		Verify:    cfg.Verify,
-		Setup:     cfg.Setup,
-		Base:      base,
-		PRBase:    cfg.PRBase,
-		Task:      taskRef,
-		Generated: time.Now().Format("2006-01-02 15:04"),
+		Kind:         kind,
+		Hint:         hint,
+		HintBlock:    hintBlock(kind, hint),
+		User:         cfg.User,
+		ClickUp:      clickupWithoutToken(cfg.ClickUp),
+		Verify:       cfg.Verify,
+		Setup:        cfg.Setup,
+		Base:         base,
+		PRBase:       cfg.PRBase,
+		BranchFormat: branchFormat(cfg),
+		Task:         taskRef,
+		Generated:    time.Now().Format("2006-01-02 15:04"),
 	}
 
 	return renderNamed(tmplName, data)
@@ -122,17 +136,18 @@ func RenderReview(cfg config.Config, tmpl string, pr *PRRef) (string, error) {
 		tmpl = "review"
 	}
 	data := Data{
-		Kind:      "review",
-		Hint:      pr.Title,
-		HintBlock: hintBlock("review", pr.Title),
-		User:      cfg.User,
-		ClickUp:   clickupWithoutToken(cfg.ClickUp),
-		Verify:    cfg.Verify,
-		Setup:     cfg.Setup,
-		Base:      pr.Base,
-		PRBase:    cfg.PRBase,
-		PR:        pr,
-		Generated: time.Now().Format("2006-01-02 15:04"),
+		Kind:         "review",
+		Hint:         pr.Title,
+		HintBlock:    hintBlock("review", pr.Title),
+		User:         cfg.User,
+		ClickUp:      clickupWithoutToken(cfg.ClickUp),
+		Verify:       cfg.Verify,
+		Setup:        cfg.Setup,
+		Base:         pr.Base,
+		PRBase:       cfg.PRBase,
+		BranchFormat: branchFormat(cfg),
+		PR:           pr,
+		Generated:    time.Now().Format("2006-01-02 15:04"),
 	}
 	return renderNamed(tmpl+".md.tmpl", data)
 }
