@@ -83,11 +83,12 @@ type Config struct {
 	BranchBase string `yaml:"branch_base,omitempty" json:"branch_base,omitempty"`
 
 	// BranchFormat is the branch-name template for this repo. Tokens: {prefix},
-	// {title}, {id}. Branch naming is per-platform at Airwallet, so the shape
-	// belongs in project config, not the binary. Unset → git.DefaultBranchFormat.
+	// {title}, {id}. Teams disagree on where the task id goes, so the shape is
+	// per-repo config rather than baked into the binary. Unset →
+	// git.DefaultBranchFormat.
 	//
-	//	Dashboard: {prefix}/{title}/CU-{id}
-	//	Android:   {prefix}/#{id}/{title}
+	//	{prefix}/{title}/CU-{id}   id last
+	//	{prefix}/#{id}/{title}     id in the middle
 	BranchFormat string `yaml:"branch_format,omitempty" json:"branch_format,omitempty"`
 
 	// HotfixTarget is the PR target for branches whose name starts with
