@@ -82,6 +82,14 @@ type Config struct {
 	// unset, falls back to PRBase, then git's detected default.
 	BranchBase string `yaml:"branch_base,omitempty" json:"branch_base,omitempty"`
 
+	// BranchFormat is the branch-name template for this repo. Tokens: {prefix},
+	// {title}, {id}. Branch naming is per-platform at Airwallet, so the shape
+	// belongs in project config, not the binary. Unset → git.DefaultBranchFormat.
+	//
+	//	Dashboard: {prefix}/{title}/CU-{id}
+	//	Android:   {prefix}/#{id}/{title}
+	BranchFormat string `yaml:"branch_format,omitempty" json:"branch_format,omitempty"`
+
 	// HotfixTarget is the PR target for branches whose name starts with
 	// HotfixPrefix (default "hotfix/"). When set, /open-pr and `work diff`
 	// route hotfix branches to this branch instead of PRBase.

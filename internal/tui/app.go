@@ -639,9 +639,9 @@ func taskRefOf(t *task.Task) *prompt.TaskRef {
 
 func createWorktree(cfg config.Config, repoRoot, kind, hint, base, tmpl, model string, taskRef *prompt.TaskRef) tea.Cmd {
 	return func() tea.Msg {
-		branch := git.MakeBranch(kind, hint)
+		branch := git.MakeBranch(kind, hint, cfg.BranchFormat)
 		if cfg.AINaming && cfg.HeadlessClaude() && claude.Available() && git.BranchLacksSlug(branch) {
-			branch = claude.EnrichBranchName(context.Background(), repoRoot, hint, branch)
+			branch = claude.EnrichBranchName(context.Background(), repoRoot, hint, branch, cfg.BranchFormat)
 		}
 		wtPath, err := git.CreateWorktree(repoRoot, cfg.WorktreeDir, branch, base)
 		if err != nil {

@@ -229,7 +229,7 @@ func cmdBrief(cwdRepo string, args []string) {
 	out := briefOutput{
 		RepoRoot: repoRoot,
 		RepoName: config.RepoName(repoRoot),
-		Branch:   git.MakeBranch(kind, branchHint),
+		Branch:   git.MakeBranch(kind, branchHint, cfg.BranchFormat),
 		Base:     base,
 		Kind:     kind,
 		Hint:     hint,
