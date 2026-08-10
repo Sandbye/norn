@@ -636,9 +636,8 @@ func Age(t time.Time) string {
 }
 
 // DefaultBranchFormat is the shape used when a project sets no branch_format:
-// the shared baseline in how-we-build/coding-guidelines/git-strategy.md, id in
-// the middle segment. Per-platform docs override it — Dashboard puts the id
-// last as `CU-<id>` (coding-guidelines/branch-naming/dashboard.md).
+// task id in the middle segment. Set branch_format per repo where the
+// convention differs, e.g. `{prefix}/{title}/CU-{id}` for id-last.
 const DefaultBranchFormat = "{prefix}/#{id}/{title}"
 
 // ComposeBranch renders a branch-name template. Tokens: {prefix}, {title},
@@ -737,7 +736,7 @@ func extractCUID(hint string) (string, string) {
 // in the hint. Returns the prefix and the hint with that keyword stripped so
 // it doesn't pollute the slug. Default: feature.
 //
-// Prefixes (per how-we-build/coding-guidelines/git-strategy.md):
+// Prefixes:
 // feature | fix | hotfix | epic | chore. `chore` is the catch-all for refactor,
 // docs, deps, tooling, internal cleanup — those don't get their own branch
 // prefix even though they DO have their own commit-type.
@@ -822,7 +821,7 @@ func slugify(s string) string {
 }
 
 // BranchLacksSlug reports whether a branch name has no human-readable
-// description — e.g. `feature/#86caebh17`, `feature/CU-86caebh17` or a timestamp
+// description — e.g. `feature/#86c00000`, `feature/CU-86c00000` or a timestamp
 // fallback. These are the names worth enriching with an AI-generated slug. Which
 // segment holds the id depends on branch_format, so every segment is checked.
 func BranchLacksSlug(branch string) bool {
