@@ -307,10 +307,10 @@ func reapCdTargets() {
 // descriptive slug (e.g. created from a bare ClickUp id) it asks Claude for a
 // better one. Gated on config + `claude` availability; falls back silently.
 func aiResolveBranch(cfg config.Config, repoRoot, kind, hint string) string {
-	branch := git.MakeBranch(kind, hint)
+	branch := git.MakeBranch(kind, hint, cfg.BranchFormat)
 	if cfg.AINaming && cfg.HeadlessClaude() && claude.Available() && git.BranchLacksSlug(branch) {
 		fmt.Println("Naming the worktree via Claude…")
-		branch = claude.EnrichBranchName(context.Background(), repoRoot, hint, branch)
+		branch = claude.EnrichBranchName(context.Background(), repoRoot, hint, branch, cfg.BranchFormat)
 	}
 	return branch
 }

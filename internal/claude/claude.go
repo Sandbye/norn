@@ -48,29 +48,32 @@ func Available() bool {
 	return err == nil
 }
 
-// EnrichBranchName returns an AI-suggested branch name for the hint, or the
-// given fallback if Claude fails or returns something invalid. Callers gate on
+// EnrichBranchName returns an AI-named branch for the hint, composed in the
+// repo's branch_format, or the given fallback if Claude fails or returns
+// something invalid. Claude only supplies type + slug; the id and its placement
+// stay with git.ComposeBranch so the format lives in one place. Callers gate on
 // Available() + config + git.BranchLacksSlug before calling.
-func EnrichBranchName(ctx context.Context, dir, hint, fallback string) string {
+func EnrichBranchName(ctx context.Context, dir, hint, fallback, format string) string {
 	s, err := SuggestBranch(ctx, dir, hint)
 	if err != nil {
 		return fallback
 	}
-	if nb := git.NormalizeSuggestedBranch(s); nb != "" {
-		return nb
+	prefix, title := git.SuggestedBranchParts(s)
+	if prefix == "" || title == "" {
+		return fallback
 	}
-	return fallback
+	return git.ComposeBranch(format, prefix, git.ClickUpID(hint), title)
 }
 
-// SuggestBranch asks Claude for a Conventional Branch name for a task hint,
+// SuggestBranch asks Claude for a branch type and slug for a task hint,
 // resolving a ClickUp id/URL via the clickup MCP when present. Returns the raw
-// suggestion (caller sanitises with git.NormalizeSuggestedBranch). Short timeout
-// so a slow/hung lookup never stalls worktree creation for long.
+// suggestion (caller parses with git.SuggestedBranchParts). Short timeout so a
+// slow/hung lookup never stalls worktree creation for long.
 func SuggestBranch(ctx context.Context, dir, hint string) (string, error) {
 	prompt := "Name a git branch for this task. Hint: \"" + hint + "\". " +
 		"If it's a ClickUp task id or URL, look it up via the clickup MCP for its title and list. " +
-		"Output ONLY one line, no prose/quotes/backticks: a branch name of the form " +
-		"<type>/#<clickup-id>/<slug> (drop the #<id> segment if there is no ClickUp id). " +
+		"Output ONLY one line, no prose/quotes/backticks: <type>/<slug>. " +
+		"Do NOT include the ClickUp id — it is added afterwards. " +
 		"type is one of feature|fix|hotfix|epic|chore: fix for bugs/operations, feature for new features, " +
 		"chore for refactor/docs/deps, hotfix for urgent production fixes, epic for umbrella tasks. " +
 		"slug is 3-6 words, lowercase kebab-case, describing the task."
