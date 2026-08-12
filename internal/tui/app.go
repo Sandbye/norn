@@ -606,6 +606,10 @@ func loadWorktrees(worktreeDir, repoRoot string) tea.Cmd {
 func checkRemote(repoRoot string, wts []git.Worktree, bases []string) tea.Cmd {
 	return func() tea.Msg {
 		_ = git.FetchPrune(repoRoot)
+		// Retroactive: worktrees created before `.norn/` joined the exclude list
+		// would otherwise read as dirty forever. info/exclude is repo-shared, so
+		// one call covers them all.
+		git.ExcludeLocalMeta(repoRoot)
 		checked := git.CheckRemoteGone(repoRoot, wts)
 		checked = git.CheckMerged(repoRoot, checked, bases)
 		checked = git.CheckDirty(checked)
