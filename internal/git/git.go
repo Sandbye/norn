@@ -327,13 +327,14 @@ func WorktreePathForBranch(repoRoot, branch string) string {
 	return ""
 }
 
-// excludeLocalMeta hides norn's per-worktree metadata (`.worktree.md`,
-// `.state.md`) from git without touching the tracked `.gitignore`, so a fresh
-// worktree isn't dirty and these local artifacts can never reach a commit or
-// diff. Writes to the exclude file git actually consults for this worktree
-// (`git rev-parse --git-path info/exclude`, the shared common-dir file),
-// idempotently. Best-effort: never fails worktree creation.
-func excludeLocalMeta(wtPath string) {
+// ExcludeLocalMeta hides norn's per-worktree metadata (`.worktree.md`,
+// `.state.md`, `.norn/`) from git without touching the tracked `.gitignore`, so
+// a fresh worktree isn't dirty and these local artifacts can never reach a
+// commit or diff. Writes to the exclude file git actually consults for this
+// worktree (`git rev-parse --git-path info/exclude`, the shared common-dir
+// file), idempotently, so calling it on an existing worktree fixes the whole
+// repo. Best-effort: never fails worktree creation.
+func ExcludeLocalMeta(wtPath string) {
 	out, err := exec.Command("git", "-C", wtPath, "rev-parse", "--git-path", "info/exclude").Output()
 	if err != nil {
 		return
@@ -352,7 +353,7 @@ func excludeLocalMeta(wtPath string) {
 		have[strings.TrimSpace(ln)] = true
 	}
 	var add []string
-	for _, p := range []string{".worktree.md", ".state.md"} {
+	for _, p := range []string{".worktree.md", ".state.md", ".norn/"} {
 		if !have[p] {
 			add = append(add, p)
 		}
@@ -386,7 +387,7 @@ func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) 
 	// Reuse a dropped-but-not-deleted thread: dropping only delists a session,
 	// so the branch + its worktree survive on disk. Re-create then means reuse.
 	if existing := WorktreePathForBranch(repoRoot, branch); existing != "" {
-		excludeLocalMeta(existing)
+		ExcludeLocalMeta(existing)
 		return existing, nil
 	}
 	// Branch exists but isn't checked out anywhere (worktree removed, branch
@@ -395,7 +396,7 @@ func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) 
 		if err := cmdRun(repoRoot, "git", "worktree", "add", wtPath, branch); err != nil {
 			return "", fmt.Errorf("worktree add (existing branch) failed: %w", err)
 		}
-		excludeLocalMeta(wtPath)
+		ExcludeLocalMeta(wtPath)
 		return wtPath, nil
 	}
 
@@ -415,7 +416,7 @@ func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) 
 	// TUI, and the branch works locally until the next push.
 	_ = cmdRun(wtPath, "git", "push", "-u", "origin", branch, "--quiet")
 
-	excludeLocalMeta(wtPath)
+	ExcludeLocalMeta(wtPath)
 	return wtPath, nil
 }
 
@@ -443,7 +444,7 @@ func AddWorktreeFromRef(repoRoot, worktreeDir, branch string) (string, error) {
 	if err := cmdRun(repoRoot, "git", "worktree", "add", wtPath, branch); err != nil {
 		return "", fmt.Errorf("worktree add failed: %w", err)
 	}
-	excludeLocalMeta(wtPath)
+	ExcludeLocalMeta(wtPath)
 	return wtPath, nil
 }
 
@@ -459,7 +460,7 @@ func AddWorktreeTracking(repoRoot, worktreeDir, branch, remoteRef string) (strin
 	if err := cmdRun(repoRoot, "git", "worktree", "add", "--track", "-b", branch, wtPath, remoteRef); err != nil {
 		return "", fmt.Errorf("worktree add (tracking %s) failed: %w", remoteRef, err)
 	}
-	excludeLocalMeta(wtPath)
+	ExcludeLocalMeta(wtPath)
 	return wtPath, nil
 }
 
