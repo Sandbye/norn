@@ -523,25 +523,78 @@ type RemoveOutcome struct {
 	Removed    bool   // worktree checkout removed from disk
 	BranchKept bool   // worktree removed, but the branch was left (unmerged)
 	Skipped    bool   // nothing touched — worktree left fully intact
+	Stashed    bool   // uncommitted work was parked in the stash before removal
+	StashRef   string // stash commit sha (stash@{N} indices shift; the sha doesn't)
 	Reason     string // short human reason for Skipped / BranchKept
 }
 
-// RemoveWorktree removes a worktree SAFELY and reports the outcome. It never
-// forces destructively and never leaves half-deleted state:
+// RemoveRequest is one worktree to remove plus what norn already knows about it,
+// so RemoveWorktree can pick the right escalation without re-deriving state.
+type RemoveRequest struct {
+	Path           string
+	Branch         string
+	MergedUpstream bool // merged into a base branch, or its remote branch is gone
+	Force          bool // remove even when dirty; uncommitted work is stashed first
+}
+
+// StashWorktree parks everything uncommitted (untracked included) in the
+// repo-shared stash and returns the stash commit sha, short. The stash lives in
+// the common dir, so it outlives the worktree checkout. ("", nil) means there
+// was nothing to stash.
+func StashWorktree(wtPath, branch string) (string, error) {
+	out, err := captureRun(wtPath, "git", "stash", "push", "-u", "-m", "norn: "+branch)
+	if err != nil {
+		return "", fmt.Errorf("%s", removeFirstLine(out))
+	}
+	if strings.Contains(out, "No local changes to save") {
+		return "", nil
+	}
+	sha, err := cmdOutput(wtPath, "git", "rev-parse", "--short=12", "refs/stash")
+	if err != nil {
+		return "", nil // stashed, but the ref didn't resolve — don't block removal
+	}
+	return sha, nil
+}
+
+// RemoveWorktree removes a worktree and reports the outcome. Default is safe;
+// force is recoverable, never destructive:
 //   - `git worktree remove` (no --force). If it refuses (uncommitted / locked),
 //     the worktree is left FULLY intact and reported as Skipped — no dir nuke,
 //     no branch touch. This avoids orphaned folders + disk bloat.
+//   - req.Force stashes the dirty state first (repo-shared stash, recoverable by
+//     sha) and only then removes with --force. A failed stash aborts the removal:
+//     forcing past it would be the one destructive path here. Locked worktrees
+//     are still skipped — a lock is a deliberate mark, dirt isn't.
 //   - Branch delete only after the worktree is gone: `git branch -d` (safe). If
-//     that refuses, escalate to -D ONLY when mergedUpstream is true (norn
+//     that refuses, escalate to -D ONLY when MergedUpstream is true (norn
 //     already confirmed the branch merged / its remote is gone — git's -d
 //     HEAD-check is a false alarm there). Otherwise the branch is KEPT (a
 //     dangling ref is harmless; force-losing unmerged work is not).
 //
 // All git output is captured, never printed to the terminal.
-func RemoveWorktree(repoRoot, wtPath, branch string, mergedUpstream bool) RemoveOutcome {
+func RemoveWorktree(repoRoot string, req RemoveRequest) RemoveOutcome {
+	wtPath, branch := req.Path, req.Branch
 	res := RemoveOutcome{Branch: branch}
 
-	if out, err := captureRun(repoRoot, "git", "worktree", "remove", wtPath); err != nil {
+	args := []string{"worktree", "remove", wtPath}
+	if req.Force {
+		if IsDirty(wtPath) {
+			sha, err := StashWorktree(wtPath, branch)
+			if err != nil {
+				res.Skipped = true
+				res.Reason = "stash failed: " + err.Error()
+				return res
+			}
+			if sha != "" {
+				res.Stashed, res.StashRef = true, sha
+			}
+		}
+		// --force also clears ignored leftovers (node_modules, .env symlinks)
+		// that the stash deliberately doesn't carry.
+		args = append(args, "--force")
+	}
+
+	if out, err := captureRun(repoRoot, "git", args...); err != nil {
 		res.Skipped = true
 		res.Reason = removeReason(out)
 		return res
@@ -551,7 +604,7 @@ func RemoveWorktree(repoRoot, wtPath, branch string, mergedUpstream bool) Remove
 	_, _ = captureRun(repoRoot, "git", "worktree", "prune")
 
 	if _, err := captureRun(repoRoot, "git", "branch", "-d", branch); err != nil {
-		if mergedUpstream {
+		if req.MergedUpstream {
 			_, _ = captureRun(repoRoot, "git", "branch", "-D", branch) // remote-confirmed merged: safe
 		} else {
 			res.BranchKept = true
@@ -559,6 +612,17 @@ func RemoveWorktree(repoRoot, wtPath, branch string, mergedUpstream bool) Remove
 		}
 	}
 	return res
+}
+
+// removeFirstLine reduces captured git output to its first non-empty line, so a
+// reason stays one line in the TUI.
+func removeFirstLine(out string) string {
+	for _, ln := range strings.Split(out, "\n") {
+		if s := strings.TrimSpace(ln); s != "" {
+			return s
+		}
+	}
+	return "unknown error"
 }
 
 // removeReason turns a failed `git worktree remove` into a short reason.
