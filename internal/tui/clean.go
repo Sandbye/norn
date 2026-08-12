@@ -14,12 +14,14 @@ type cleanModel struct {
 	remoteChecked bool
 	cursor        int
 	selected      map[string]bool // keyed by worktree Path so filtering is safe
+	forced        map[string]bool // dirty rows to stash + force-remove instead of skip
 	confirming    bool
-	dirtyCount    int // selected worktrees that will be SKIPPED (dirty)
+	dirtyCount    int // selected dirty worktrees that will be SKIPPED
+	forceCount    int // selected dirty worktrees that will be stashed + removed
 	unmergedCount int // selected, will-remove worktrees whose branch will be kept (unmerged)
 	done          bool
 	removing      bool // removal fired, running off the UI thread
-	toRemove      []git.Worktree
+	toRemove      []git.RemoveRequest
 	filter        filterState
 
 	// After removal: show a summary of what happened (removed / skipped / branch
@@ -32,6 +34,7 @@ type cleanModel struct {
 func newCleanModel() cleanModel {
 	return cleanModel{
 		selected: make(map[string]bool),
+		forced:   make(map[string]bool),
 	}
 }
 
@@ -95,7 +98,12 @@ func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
 			m.toRemove = nil
 			for _, wt := range m.worktrees {
 				if m.selected[wt.Path] {
-					m.toRemove = append(m.toRemove, wt)
+					m.toRemove = append(m.toRemove, git.RemoveRequest{
+						Path:           wt.Path,
+						Branch:         wt.Branch,
+						MergedUpstream: wt.Merged || wt.RemoteGone,
+						Force:          m.forced[wt.Path],
+					})
 				}
 			}
 		case "n", "N", "esc", "q":
@@ -139,8 +147,28 @@ func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
 			p := vis[m.cursor].Path
 			if m.selected[p] {
 				delete(m.selected, p)
+				delete(m.forced, p)
 			} else {
 				m.selected[p] = true
+			}
+		}
+	case "f":
+		// Force this row: its dirty state gets stashed, then removed. Implies
+		// selection, so `f` alone is enough on a dirty row.
+		if m.cursor < len(vis) {
+			p := vis[m.cursor].Path
+			if m.forced[p] {
+				delete(m.forced, p)
+			} else {
+				m.forced[p] = true
+				m.selected[p] = true
+			}
+		}
+	case "F":
+		// Force every dirty row already selected — the "clear the backlog" key.
+		for _, wt := range m.worktrees {
+			if m.selected[wt.Path] && wt.Dirty {
+				m.forced[wt.Path] = true
 			}
 		}
 	case "a":
@@ -172,14 +200,17 @@ func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
 			// Predict the real outcome from cached state so the confirm isn't
 			// blind: dirty rows get SKIPPED (git worktree remove refuses), and
 			// unmerged clean rows are removed but keep their branch.
-			m.dirtyCount, m.unmergedCount = 0, 0
+			m.dirtyCount, m.forceCount, m.unmergedCount = 0, 0, 0
 			for _, wt := range m.worktrees {
 				if !m.selected[wt.Path] {
 					continue
 				}
-				if wt.Dirty {
+				if wt.Dirty && !m.forced[wt.Path] {
 					m.dirtyCount++ // skipped; branch + files left intact
 					continue
+				}
+				if wt.Dirty {
+					m.forceCount++ // stashed, then removed
 				}
 				if !wt.Merged && !wt.RemoteGone {
 					m.unmergedCount++
@@ -285,7 +316,11 @@ func (m cleanModel) View() string {
 			commitMsgStyle.Render(fitCell(wt.CommitMsg, commitW))
 
 		if wt.Dirty {
-			line += " " + dirtyStyle.Render("dirty") // will be skipped on remove
+			if m.forced[wt.Path] {
+				line += " " + confirmStyle.Render("dirty→stash") // work parked, then removed
+			} else {
+				line += " " + dirtyStyle.Render("dirty") // will be skipped on remove
+			}
 		}
 
 		b.WriteString(line)
@@ -305,6 +340,9 @@ func (m cleanModel) View() string {
 		// count toward "remove"; call out kept branches. No post-hoc surprise.
 		remove := len(m.selected) - m.dirtyCount
 		var notes []string
+		if m.forceCount > 0 {
+			notes = append(notes, fmt.Sprintf("%d dirty → stashed", m.forceCount))
+		}
 		if m.dirtyCount > 0 {
 			notes = append(notes, fmt.Sprintf("%d dirty skipped", m.dirtyCount))
 		}
@@ -319,7 +357,7 @@ func (m cleanModel) View() string {
 	case m.filter.active:
 		b.WriteString(helpStyle.Render("type to filter  ↑/↓ move  space select  esc clear"))
 	default:
-		parts := []string{"j/k navigate", "/ filter", "space select", "a all", "g select done"}
+		parts := []string{"j/k navigate", "/ filter", "space select", "a all", "g select done", "f force dirty"}
 		if len(m.selected) > 0 {
 			parts = append(parts, "d delete")
 		}
@@ -338,7 +376,7 @@ func (m cleanModel) resultsView() string {
 	b.WriteString("\n\n")
 
 	removed := 0
-	var skipped, kept []git.RemoveOutcome
+	var skipped, kept, stashed []git.RemoveOutcome
 	for _, r := range m.results {
 		if r.Removed {
 			removed++
@@ -349,10 +387,25 @@ func (m cleanModel) resultsView() string {
 		if r.BranchKept {
 			kept = append(kept, r)
 		}
+		if r.Stashed {
+			stashed = append(stashed, r)
+		}
 	}
 
 	b.WriteString(activeStyle.Render(fmt.Sprintf("Removed %d worktree(s).", removed)))
 	b.WriteString("\n")
+
+	if len(stashed) > 0 {
+		b.WriteString("\n")
+		b.WriteString(confirmStyle.Render(fmt.Sprintf("Stashed %d dirty worktree(s) before removal:", len(stashed))))
+		b.WriteString("\n")
+		for _, r := range stashed {
+			// `stash branch` restores the base commit too, so it recovers even
+			// when the branch was deleted with the worktree.
+			b.WriteString("  " + branchStyle.Render(r.Branch) +
+				dimStyle.Render("  git stash branch <name> "+r.StashRef) + "\n")
+		}
+	}
 
 	if len(skipped) > 0 {
 		b.WriteString("\n")
