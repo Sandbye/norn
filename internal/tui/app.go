@@ -621,12 +621,11 @@ type cleanRemovedMsg struct{ outcomes []git.RemoveOutcome }
 
 // removeWorktreesCmd runs the (serial, git-lock-sensitive) removals off the UI
 // thread so the TUI stays responsive while it works.
-func removeWorktreesCmd(repoRoot, worktreeDir string, toRemove []git.Worktree) tea.Cmd {
+func removeWorktreesCmd(repoRoot, worktreeDir string, toRemove []git.RemoveRequest) tea.Cmd {
 	return func() tea.Msg {
 		var outcomes []git.RemoveOutcome
-		for _, wt := range toRemove {
-			// merged/gone → norn already confirmed the branch is safe to force-delete.
-			outcomes = append(outcomes, git.RemoveWorktree(repoRoot, wt.Path, wt.Branch, wt.Merged || wt.RemoteGone))
+		for _, req := range toRemove {
+			outcomes = append(outcomes, git.RemoveWorktree(repoRoot, req))
 		}
 		git.CleanEmptyDirs(worktreeDir)
 		return cleanRemovedMsg{outcomes: outcomes}
