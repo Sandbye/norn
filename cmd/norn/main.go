@@ -446,25 +446,37 @@ func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templat
 		os.Exit(1)
 	}
 
-	_ = git.SymlinkEnvFiles(repoRoot, wtPath)
+	// Warnings are collected, not printed here: clearScreen() below would wipe
+	// them a line later and the agent would start on an unexplained half-setup.
+	var warnings []string
+	if err := git.SymlinkEnvFiles(repoRoot, wtPath); err != nil {
+		warnings = append(warnings, fmt.Sprintf("env symlinks incomplete: %v", err))
+	}
 
 	// Generate prompt
 	tmpl := prompt.Resolve(cfg, kind, templateOverride)
 	if templateOverride != "" && !prompt.Has(templateOverride) {
-		fmt.Fprintf(os.Stderr, "warning: template %q not found, using %q\n", templateOverride, tmpl)
+		warnings = append(warnings, fmt.Sprintf("template %q not found, using %q", templateOverride, tmpl))
 	}
+	// The brief is what the agent reads on arrival, so failing to write it is
+	// fatal: launching anyway is how a failure gets hidden behind the session.
 	promptText, err := prompt.Render(cfg, kind, hint, base, tmpl, nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not render prompt: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: could not render brief: %v\nworktree is at %s\n", err, wtPath)
+		os.Exit(1)
 	}
 	if err := os.WriteFile(wtPath+"/.worktree.md", []byte(promptText), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write prompt: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: could not write brief: %v\nworktree is at %s\n", err, wtPath)
+		os.Exit(1)
 	}
 
 	upsertSession(repoRoot, kind, branch, wtPath, hint)
 	writeCdTarget(wtPath)
 
 	clearScreen()
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
 	tui.LaunchAgent(cfg.Agent, wtPath, false, "") // config default model
 }
 
