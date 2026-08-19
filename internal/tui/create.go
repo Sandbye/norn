@@ -50,8 +50,11 @@ type createModel struct {
 
 	hint       string
 	baseBranch string
-	confirmed  bool
-	cancelled  bool
+	// confirmed is a one-shot: the app clears it the moment it fires the create,
+	// so a message arriving mid-create can't fire a second one on the same branch.
+	confirmed bool
+	creating  bool // create in flight; the form is gone, so the panel says so
+	cancelled bool
 
 	// Task picker (`T`): seed the hint from a real GitHub/ClickUp task.
 	taskProvider task.Provider
@@ -73,8 +76,13 @@ type createModel struct {
 func (m *createModel) buildForm() *huh.Form {
 	var fields []huh.Field
 	if !m.seeded {
-		fields = append(fields, huh.NewInput().Key("hint").
-			Title("Task").Placeholder("what are you working on?"))
+		in := huh.NewInput().Key("hint").
+			Title("Task").Placeholder("what are you working on?")
+		if m.hint != "" {
+			h := m.hint // retry after a failed create: don't make me retype it
+			in = in.Value(&h)
+		}
+		fields = append(fields, in)
 	}
 	if len(m.baseBranches) > 1 {
 		fields = append(fields, huh.NewSelect[string]().Key("base").
@@ -118,6 +126,31 @@ func (m *createModel) readForm() {
 	if len(m.models) > 0 {
 		m.model = m.form.GetString("model") // "" (default) is a valid choice
 	}
+}
+
+// startCreating latches the confirm so the create fires exactly once, and puts
+// the panel into its in-flight state.
+func (m createModel) startCreating() createModel {
+	m.confirmed = false
+	m.creating = true
+	return m
+}
+
+// createFailed returns to the form (values prefilled) so the app's error banner
+// has something to sit under and the create can be retried.
+func (m createModel) createFailed() createModel {
+	m.creating = false
+	m.focused = m.hasFormFields()
+	if m.focused {
+		m.form = m.buildForm()
+	}
+	return m
+}
+
+// hasFormFields reports whether buildForm would produce any field at all — a
+// task-seeded create with one base and no choices has nothing left to show.
+func (m createModel) hasFormFields() bool {
+	return !m.seeded || len(m.baseBranches) > 1 || len(m.templates) > 1 || len(m.models) > 0
 }
 
 func modelOptions(models []string) []huh.Option[string] {
@@ -394,6 +427,14 @@ func (m createModel) View() string {
 		}
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("j/k move · / filter · ⏎ select · o open · esc back"))
+		return b.String()
+	}
+
+	if m.creating {
+		b.WriteString(confirmStyle.Render("Creating worktree…"))
+		if m.hint != "" {
+			b.WriteString("\n\n" + dimStyle.Render("  "+truncate(m.hint, max(m.width-14, 20))))
+		}
 		return b.String()
 	}
 
