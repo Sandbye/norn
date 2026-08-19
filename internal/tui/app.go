@@ -313,10 +313,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		a.err = msg.err
+		if a.create.creating {
+			a.create = a.create.createFailed()
+		}
 		return a, nil
 
 	case tea.KeyMsg:
-		a.err = nil // any keystroke dismisses a stale error banner
+		if !a.create.creating {
+			a.err = nil // any keystroke dismisses a stale error banner
+		}
 		if a.showHelp {
 			if msg.String() == "ctrl+c" {
 				a.quit = true
@@ -412,6 +417,7 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.create = c
 			a.current = ViewCreate
 			if a.create.confirmed {
+				a.create = a.create.startCreating()
 				return a, createWorktree(a.cfg, a.repoRoot, a.create.kind, a.create.hint, a.create.baseBranch, a.create.template, a.create.model, taskRefOf(a.create.selectedTask))
 			}
 			return a, nil
@@ -420,6 +426,7 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ViewCreate:
 		a.create, cmd = a.create.Update(msg)
 		if a.create.confirmed {
+			a.create = a.create.startCreating()
 			return a, createWorktree(a.cfg, a.repoRoot, a.create.kind, a.create.hint, a.create.baseBranch, a.create.template, a.create.model, taskRefOf(a.create.selectedTask))
 		}
 		if a.create.cancelled {
@@ -652,7 +659,10 @@ func createWorktree(cfg config.Config, repoRoot, kind, hint, base, tmpl, model s
 		}
 		_ = git.SymlinkEnvFiles(repoRoot, wtPath)
 
-		promptText, _ := prompt.Render(cfg, kind, hint, base, prompt.Resolve(cfg, kind, tmpl), taskRef)
+		promptText, err := prompt.Render(cfg, kind, hint, base, prompt.Resolve(cfg, kind, tmpl), taskRef)
+		if err != nil {
+			return errMsg{fmt.Errorf("brief render failed for %s: %w", branch, err)}
+		}
 		promptPath := wtPath + "/.worktree.md"
 		if err := writeFile(promptPath, promptText); err != nil {
 			return errMsg{err}
