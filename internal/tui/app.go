@@ -216,7 +216,7 @@ func (a App) Init() tea.Cmd {
 func (a App) capturing() bool {
 	switch a.current {
 	case ViewThreads:
-		return a.dashboard.filter.active || a.dashboard.showSummary || a.dashboard.confirmDrop
+		return a.dashboard.filter.active || a.dashboard.showSummary
 	case ViewTasks:
 		return a.tasks.filter.active || a.tasks.confirming
 	case ViewCreate:
@@ -290,7 +290,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case remoteCheckedMsg:
 		a.clean.worktrees = msg.worktrees
 		a.clean.remoteChecked = true
-		a.clean.autoSelectDone()
+		// A hand-off from Threads targets one worktree; the done-autoselect would
+		// bury it under every merged row.
+		if p := a.clean.focusPath; p != "" && a.clean.focusOn(p) {
+			a.clean.focusPath = ""
+		} else {
+			a.clean.autoSelectDone()
+		}
 		return a, nil
 
 	case cleanRemovedMsg:
@@ -377,6 +383,12 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ViewThreads:
 		m, c := a.dashboard.Update(msg)
 		a.dashboard = m.(Dashboard)
+		if p := a.dashboard.cleanPath; p != "" {
+			a.dashboard.cleanPath = ""
+			next, cleanCmd := a.gotoTab(ViewClean)
+			next.clean.focusPath = p
+			return next, cleanCmd
+		}
 		cmd = c
 		if a.dashboard.quit {
 			a.result = a.dashboard.Result()
@@ -514,7 +526,7 @@ func helpFor(v View) []keyHint {
 	case ViewThreads:
 		return []keyHint{
 			{"⏎", "cd into worktree"}, {"o", "open the agent"}, {"s", "summarize"},
-			{"p", "open PR"}, {"t", "open task"}, {"d", "drop session"},
+			{"p", "open PR"}, {"t", "open task"}, {"d", "clean worktree"},
 			{"/", "filter"}, {"a", "all repos"}, {"r", "refresh"}, {"j/k g/G", "move"},
 		}
 	case ViewTasks:

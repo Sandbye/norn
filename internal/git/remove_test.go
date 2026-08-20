@@ -7,6 +7,15 @@ import (
 	"testing"
 )
 
+// execGit runs git in dir and returns its combined output, for setup steps that
+// want to skip rather than fail when git is missing.
+func execGit(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // run fails the test on error — setup steps are not the thing under test.
 func run(t *testing.T, dir string, args ...string) string {
 	t.Helper()

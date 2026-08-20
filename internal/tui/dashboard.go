@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -51,10 +52,10 @@ type Dashboard struct {
 	// markFrame animates the theme's rune mark (cycles through RuneMarks).
 	markFrame int
 
-	// confirmDrop gates the `d` (drop session) action behind a y/n prompt.
-	confirmDrop bool
-	dropTarget  string // session ID pending drop
-	dropBranch  string // branch label for the prompt
+	// cleanPath is set by `d`: the app switches to Clean focused on this
+	// worktree. Dropping the store row is no longer an action — the row is
+	// re-adopted from disk on the next tick, so removal has to mean the worktree.
+	cleanPath string
 
 	// Headless "summarize session" overlay (press `s`). Additive — does not
 	// affect any existing navigation/launch flow.
@@ -115,6 +116,7 @@ const prCacheTTL = 60 * time.Second
 type dashRow struct {
 	state.Session
 	WorktreeAlive bool
+	DetachedAt    string            // short sha when the branch is gone (detached HEAD); "" normally
 	PRState       string            // OPEN / DRAFT / MERGED / CLOSED / ""
 	PRChecks      string            // ✓ / ✗ / · / ""
 	PRPending     bool              // currently being fetched
@@ -227,25 +229,6 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 
-		// Drop confirmation swallows keys until resolved.
-		if d.confirmDrop {
-			switch s {
-			case "y", "Y", "enter":
-				if fresh, err := state.Load(); err == nil && fresh != nil {
-					fresh.Remove(d.dropTarget)
-					_ = fresh.Save()
-				}
-				d.confirmDrop = false
-				return d, d.loadCmd()
-			case "n", "N", "esc":
-				d.confirmDrop = false
-			case "ctrl+c":
-				d.quit = true
-				return d, tea.Quit
-			}
-			return d, nil
-		}
-
 		// Filter input: printable/backspace/esc edit the query. While filtering,
 		// letters type into the query, so navigation uses arrows/ctrl+n+p and
 		// the action letters (r/a/p/t/d) are paused until esc.
@@ -345,12 +328,10 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "d":
-			// Drop the session — behind a confirm (mutates the store).
+			// Hand off to Clean, focused on this worktree: that's where removal
+			// lives (remote/merged state, stash-before-force, branch handling).
 			if d.cursor < len(vis) {
-				row := vis[d.cursor]
-				d.confirmDrop = true
-				d.dropTarget = row.ID
-				d.dropBranch = row.Branch
+				d.cleanPath = vis[d.cursor].Path
 			}
 		}
 
@@ -385,6 +366,9 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.rows[i].PRNumber = entry.Number
 				}
 				continue
+			}
+			if d.rows[i].DetachedAt != "" {
+				continue // branch is gone; `gh pr view` has nothing to resolve
 			}
 			if d.rows[i].Status != state.StatusActive && d.rows[i].PRNumber == 0 {
 				continue
@@ -581,9 +565,12 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 			continue
 		}
 		branch := fitCell(r.Branch, branchW)
-		if r.WorktreeAlive {
+		switch {
+		case r.DetachedAt != "":
+			branch = dirtyStyle.Render(branch) // branch deleted under the worktree
+		case r.WorktreeAlive:
 			branch = branchStyle.Render(branch)
-		} else {
+		default:
 			branch = dimStyle.Render(branch)
 		}
 		lines = append(lines, stateGlyph(r.AgentState)+" "+branch+" "+dimStyle.Render(age))
@@ -616,6 +603,9 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 	var b strings.Builder
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorText).Render(truncate(title, w)) + "\n")
 	b.WriteString(dimStyle.Render(truncate(r.Branch, w)) + "\n")
+	if r.DetachedAt != "" {
+		b.WriteString(dirtyStyle.Render(truncate("branch gone · detached at "+r.DetachedAt, w)) + "\n")
+	}
 	if r.Goal != "" {
 		b.WriteString("\n" + lipgloss.NewStyle().Width(w).Foreground(colorText).Render(r.Goal) + "\n")
 	}
@@ -739,9 +729,6 @@ func prDetail(r dashRow) string {
 // dashKeyHelp is context-aware: only shows actions that are available for the
 // currently-focused row. Quieter UI, less guesswork.
 func (d Dashboard) dashKeyHelp() string {
-	if d.confirmDrop {
-		return confirmStyle.Render("drop " + d.dropBranch + " from the dashboard? (y/n)")
-	}
 	if d.filter.active {
 		return dimStyle.Render("type to filter · ↑/↓ or ctrl+n/p move · ⏎ cd · o open · esc clear")
 	}
@@ -823,6 +810,7 @@ func worktreeState(wtPath string) stateFile {
 // Fast path only — PR data is fetched async via fetchPRCmd after this returns.
 func (d Dashboard) loadCmd() tea.Cmd {
 	scope := d.scopeRepo
+	cfg := d.cfg
 	// Live agent state is a claude-only signal (reads Claude Code's transcripts).
 	useClaude := d.cfg.AgentCommand() == "claude"
 	return func() tea.Msg {
@@ -842,6 +830,16 @@ func (d Dashboard) loadCmd() tea.Cmd {
 		})
 		store.DedupeByPath()
 		changed := len(store.Sessions) != before
+
+		// Adopt worktrees that exist on disk but have no row: a session dropped
+		// with `d`, a worktree made by hand, or a store that lost the entry. The
+		// dashboard is a view of live threads, so anything checked out belongs in
+		// it — otherwise the only place it shows up is Clean, where the only
+		// verb is delete.
+		if adoptWorktrees(store, cfg.WorktreeDir) {
+			changed = true
+			store.SortByActivity()
+		}
 
 		for i := range store.Sessions {
 			sess := &store.Sessions[i]
@@ -874,6 +872,11 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				continue
 			}
 			row := dashRow{Session: sess, WorktreeAlive: true}
+			if git.CurrentBranch(sess.Path) == "" {
+				// Branch deleted under the worktree: label the sha so the row
+				// still reads, and skip the PR lookup (there's no ref to ask about).
+				row.DetachedAt = git.DetachedHead(sess.Path)
+			}
 			st := worktreeState(sess.Path)
 			row.Next, row.Goal, row.Done, row.Blocked = st.next, st.goal, st.done, st.blocked
 			if useClaude {
@@ -883,6 +886,79 @@ func (d Dashboard) loadCmd() tea.Cmd {
 		}
 		return dashLoadedMsg{rows: rows}
 	}
+}
+
+// adoptWorktrees adds a session row for every linked worktree under root that
+// the store doesn't know about, so a live checkout can never go invisible.
+// Reports whether anything was added. The disk scan is filesystem-only; git is
+// consulted per *unknown* path, so the steady state costs no processes.
+func adoptWorktrees(store *state.Store, root string) bool {
+	if root == "" {
+		return false
+	}
+	added := false
+	for _, path := range git.WorktreePaths(root) {
+		if store.FindByPath(path) != nil {
+			continue
+		}
+		branch := git.CurrentBranch(path)
+		if branch == "" {
+			// Detached (branch deleted under it): the dir name is the only name
+			// left, and it's what the worktree was created as.
+			if rel, err := filepath.Rel(root, path); err == nil {
+				branch = trimKindPrefix(rel)
+			}
+		}
+		if branch == "" {
+			continue
+		}
+		repo := git.OriginRepoName(path)
+		sess := state.Session{
+			ID:        state.MakeID(repo, branch),
+			Repo:      repo,
+			Branch:    branch,
+			Kind:      kindFromPath(root, path),
+			Path:      path,
+			Title:     worktreeTitle(path),
+			ClickUpID: git.ClickUpID(branch),
+			// Adopted, not started here: date it from the checkout itself so it
+			// doesn't jump to the top of an activity-sorted list.
+			StartedAt:      pathModTime(path),
+			LastActivityAt: pathModTime(path),
+		}
+		store.UpsertByPath(sess)
+		added = true
+	}
+	return added
+}
+
+// kindFromPath reads the worktree kind off the layout (<root>/<kind>/<branch>).
+func kindFromPath(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "task"
+	}
+	if k, _, ok := strings.Cut(rel, string(filepath.Separator)); ok && (k == "task" || k == "review") {
+		return k
+	}
+	return "task"
+}
+
+// trimKindPrefix drops the leading task/ or review/ segment, leaving the branch
+// name the worktree dir encodes.
+func trimKindPrefix(rel string) string {
+	if k, rest, ok := strings.Cut(rel, string(filepath.Separator)); ok && (k == "task" || k == "review") {
+		return rest
+	}
+	return rel
+}
+
+func pathModTime(path string) time.Time {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return time.Now()
+	}
+	return fi.ModTime()
 }
 
 // fetchPRCmd returns a tea.Cmd that runs `gh pr view <branch>` in the background
