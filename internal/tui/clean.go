@@ -15,6 +15,7 @@ type cleanModel struct {
 	cursor        int
 	selected      map[string]bool // keyed by worktree Path so filtering is safe
 	forced        map[string]bool // dirty rows to stash + force-remove instead of skip
+	focusPath     string          // arrived here from Threads `d`: select just this worktree
 	confirming    bool
 	dirtyCount    int // selected dirty worktrees that will be SKIPPED
 	forceCount    int // selected dirty worktrees that will be stashed + removed
@@ -56,6 +57,22 @@ func (m *cleanModel) autoSelectDone() {
 	if first >= 0 {
 		m.cursor = first
 	}
+}
+
+// focusOn selects exactly the requested worktree and parks the cursor on it,
+// for the hand-off from Threads (`d`). Returns false when the path isn't in the
+// list, so the caller can fall back to the usual auto-select.
+func (m *cleanModel) focusOn(path string) bool {
+	for i, wt := range m.sorted() {
+		if wt.Path != path {
+			continue
+		}
+		m.selected = map[string]bool{path: true}
+		m.forced = map[string]bool{}
+		m.cursor = i
+		return true
+	}
+	return false
 }
 
 func (m cleanModel) sorted() []git.Worktree {
@@ -103,6 +120,7 @@ func (m cleanModel) Update(msg tea.Msg) (cleanModel, tea.Cmd) {
 						Branch:         wt.Branch,
 						MergedUpstream: wt.Merged || wt.RemoteGone,
 						Force:          m.forced[wt.Path],
+						Detached:       wt.Detached,
 					})
 				}
 			}
@@ -300,6 +318,8 @@ func (m cleanModel) View() string {
 		switch {
 		case !m.remoteChecked:
 			remoteText, remoteStyle = "...", dimStyle
+		case wt.Detached:
+			remoteText, remoteStyle = "no ref", dirtyStyle
 		case wt.RemoteGone:
 			remoteText, remoteStyle = "gone", goneStyle
 		case wt.Merged:

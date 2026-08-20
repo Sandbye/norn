@@ -23,6 +23,7 @@ type Worktree struct {
 	Merged     bool   // branch is an ancestor of a base branch (work is done)
 	MergedInto string // which base it merged into (for display)
 	Dirty      bool   // has uncommitted/untracked changes (cached; drives clean's preview)
+	Detached   bool   // HEAD isn't on a branch (branch deleted under the worktree)
 }
 
 func RepoRoot() (string, error) {
@@ -143,9 +144,18 @@ func ListWorktrees(worktreeDir string, filterCommon string) ([]Worktree, error) 
 
 			rel, _ := filepath.Rel(worktreeDir, path)
 
+			// Detached (branch deleted under it): git says "HEAD", which is both
+			// useless as a label and dangerous as a ref. Fall back to the name the
+			// worktree was created as — its path under <worktreeDir>/<kind>/.
+			detached := branch == "HEAD"
+			if detached {
+				branch = strings.TrimPrefix(rel, kind+string(filepath.Separator))
+			}
+
 			results = append(results, Worktree{
 				Path:       path,
 				Branch:     branch,
+				Detached:   detached,
 				RelPath:    rel,
 				Kind:       kind,
 				LastCommit: lastCommit,
@@ -156,6 +166,43 @@ func ListWorktrees(worktreeDir string, filterCommon string) ([]Worktree, error) 
 	}
 
 	return results, nil
+}
+
+// WorktreePaths returns every linked-worktree checkout under root: a directory
+// holding a `.git` FILE (the pointer a linked worktree gets, not a real git
+// dir). Filesystem-only, no git calls, so a caller can scan on a tick without
+// spawning a process per worktree.
+func WorktreePaths(root string) []string {
+	var out []string
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || !info.IsDir() {
+			return nil
+		}
+		fi, statErr := os.Stat(filepath.Join(path, ".git"))
+		if statErr != nil {
+			return nil
+		}
+		if !fi.IsDir() { // a real .git dir is the main checkout, not a worktree
+			out = append(out, path)
+		}
+		return filepath.SkipDir
+	})
+	sort.Strings(out)
+	return out
+}
+
+// DetachedHead returns HEAD's short sha when the checkout is detached, "" when
+// it's on a branch. A worktree whose branch was deleted under it lands here, and
+// it still needs a label to show.
+func DetachedHead(path string) string {
+	if CurrentBranch(path) != "" {
+		return ""
+	}
+	sha, err := cmdOutput(path, "git", "rev-parse", "--short=8", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return sha
 }
 
 // CheckoutClass classifies a filesystem path by its git checkout kind:
@@ -234,6 +281,9 @@ func CheckRemoteGone(repoRoot string, worktrees []Worktree) []Worktree {
 		go func(idx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if worktrees[idx].Detached {
+				return // no branch: origin/HEAD would false-positive as "active"
+			}
 			remoteBranch := "origin/" + worktrees[idx].Branch
 			_, err := cmdOutput(repoRoot, "git", "rev-parse", "--verify", "refs/remotes/"+remoteBranch)
 			worktrees[idx].RemoteGone = err != nil
@@ -262,6 +312,9 @@ func CheckMerged(repoRoot string, worktrees []Worktree, bases []string) []Worktr
 		go func(idx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if worktrees[idx].Detached {
+				return // nothing to ask merge-base about
+			}
 			for _, base := range bases {
 				if worktrees[idx].Branch == base {
 					continue // a base branch isn't "merged into itself"
@@ -535,6 +588,7 @@ type RemoveRequest struct {
 	Branch         string
 	MergedUpstream bool // merged into a base branch, or its remote branch is gone
 	Force          bool // remove even when dirty; uncommitted work is stashed first
+	Detached       bool // HEAD isn't on a branch, so there's no branch to delete
 }
 
 // StashWorktree parks everything uncommitted (untracked included) in the
@@ -603,6 +657,9 @@ func RemoveWorktree(repoRoot string, req RemoveRequest) RemoveOutcome {
 	// Release the ghost entry in .git/worktrees/ so the branch is deletable.
 	_, _ = captureRun(repoRoot, "git", "worktree", "prune")
 
+	if req.Detached {
+		return res // the branch was already gone; Branch here is just a label
+	}
 	if _, err := captureRun(repoRoot, "git", "branch", "-d", branch); err != nil {
 		if req.MergedUpstream {
 			_, _ = captureRun(repoRoot, "git", "branch", "-D", branch) // remote-confirmed merged: safe
