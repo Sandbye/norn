@@ -491,15 +491,52 @@ func (d DiffView) applyLineJump() DiffView {
 	return d
 }
 
-// adjustFileScroll keeps the cursor inside the viewport.
+// adjustFileScroll keeps the cursor inside the viewport, measured in the lines
+// the rows actually occupy. A wrapped row costs several lines, so a window of
+// `vh` logical rows can be four times taller than the pane: counting rows left
+// the cursor below the last rendered line and the view looked frozen.
 func (d *DiffView) adjustFileScroll() {
 	vh := d.viewportHeight()
 	if d.fileCursor < d.fileScroll {
 		d.fileScroll = d.fileCursor
 	}
-	if d.fileCursor >= d.fileScroll+vh {
-		d.fileScroll = d.fileCursor - vh + 1
+	// Walk back from the cursor while the rows still fit: that's the furthest
+	// the window can scroll and still show it. The cursor's own row always
+	// counts, so a row taller than the pane still renders (clipped).
+	used, top := 0, d.fileCursor
+	for i := d.fileCursor; i >= 0; i-- {
+		h := d.rowHeight(i)
+		if i != d.fileCursor && used+h > vh {
+			break
+		}
+		used += h
+		top = i
 	}
+	if d.fileScroll < top {
+		d.fileScroll = top
+	}
+}
+
+// rowHeight is how many terminal lines a parsed row occupies once rendered:
+// wrapped code plus any of my review comments anchored under it. Cheap — it
+// re-runs the wrap, not the syntax highlighting.
+func (d DiffView) rowHeight(i int) int {
+	if i < 0 || i >= len(d.parsed) {
+		return 1
+	}
+	p := d.parsed[i]
+	h := 1
+	if !d.split && p.kind != kindMeta && p.kind != kindHunk {
+		if w := d.width - gutterCols - prefixCols; w > 0 {
+			if n := len(wrapContent(p.content, nil, w)); n > 1 {
+				h = n
+			}
+		}
+	}
+	if len(d.files) > 0 {
+		h += len(d.commentLines(d.files[d.cursor].Path, p.oldNum))
+	}
+	return h
 }
 
 // --- commit picker (scope: full PR or specific commit) -------------------
@@ -1230,11 +1267,21 @@ func (d DiffView) updateFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return d, nil
 }
 
+// fileChromeLines is what renderFile draws around the diff body: a blank line,
+// the header, a blank line, then the position indicator, the help line and its
+// terminator. Under-counting it overflows the terminal by exactly that much,
+// which scrolls the header off and makes the top of the file unreachable.
+const fileChromeLines = 7
+
 func (d DiffView) viewportHeight() int {
-	if d.height < 10 {
-		return 10
+	chrome := fileChromeLines
+	if d.statusMsg != "" {
+		chrome++ // the status line is drawn under the help line
 	}
-	return d.height - 5
+	if vh := d.height - chrome; vh > 3 {
+		return vh
+	}
+	return 3
 }
 
 func (d DiffView) View() string {
@@ -1434,6 +1481,11 @@ func (d DiffView) renderReviewOverlay() string {
 
 // --- list mode -------------------------------------------------------------
 
+// listFooterLines is what renderList draws after the file rows: a blank line,
+// the help line and its terminator, plus the "n/total" counter when the list is
+// scrolled.
+const listFooterLines = 4
+
 func (d DiffView) renderList() string {
 	var b strings.Builder
 
@@ -1478,7 +1530,16 @@ func (d DiffView) renderList() string {
 		pathW = d.width - 25
 	}
 
-	for i, f := range d.files {
+	// Scroll the list inside the terminal instead of printing every file: a
+	// large diff used to overflow, and the terminal ate the top of the list, so
+	// the first file could not be reached again.
+	rows := d.height - (strings.Count(b.String(), "\n") + listFooterLines)
+	if rows < 3 {
+		rows = 3
+	}
+	start, end := scrollWindow(d.cursor, len(d.files), rows)
+	for i := start; i < end; i++ {
+		f := d.files[i]
 		marker := "  "
 		if i == d.cursor {
 			marker = cursorStyle.Render("› ")
@@ -1495,6 +1556,9 @@ func (d DiffView) renderList() string {
 		}
 		b.WriteString(line + "\n")
 	}
+	if end-start < len(d.files) {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  %d/%d", d.cursor+1, len(d.files))) + "\n")
+	}
 	listHelp := "j/k move · enter/l view file · R review · q quit"
 	if d.prMeta != nil {
 		listHelp = "j/k move · enter/l view file · m scope · R review · q quit"
@@ -1507,6 +1571,11 @@ func (d DiffView) renderList() string {
 
 // Row washes are theme-driven (see palette RemovedBG/AddedBG/HunkBG/TokenHi*):
 // muted red/green line fills, tinted hunks, brighter token-level highlights.
+
+const (
+	gutterCols = 11 // " %4d %4d " — keep in sync with formatGutter
+	prefixCols = 3  // " X "
+)
 
 func (d DiffView) renderFile() string {
 	var b strings.Builder
@@ -1804,8 +1873,6 @@ func (d DiffView) renderRow(p parsedDiffLine, mask []bool, lexer chroma.Lexer, f
 	// minified output) flow onto continuation rows instead of disappearing
 	// off-screen. Gutter and prefix stay on the first row only; continuation
 	// rows show ↪ in the prefix and a blank gutter, all on the same row bg.
-	const gutterCols = 11 // " %4d %4d " — keep in sync with formatGutter
-	const prefixCols = 3  // " X "
 	contentWidth := d.width - gutterCols - prefixCols
 	segments := wrapContent(p.content, mask, contentWidth)
 
