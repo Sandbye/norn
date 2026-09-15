@@ -1813,9 +1813,8 @@ func cmdRefreshDocs() {
 		if home != "" && strings.HasPrefix(r, home) {
 			short = "~" + r[len(home):]
 		}
-		cmd := exec.Command("git", "-C", r, "pull", "--ff-only")
-		out, err := cmd.CombinedOutput()
-		msg := strings.TrimSpace(string(out))
+		out, err := git.Capture(r, "git", "pull", "--ff-only")
+		msg := strings.TrimSpace(out)
 		switch {
 		case err != nil:
 			fmt.Printf("  ✗ %s\n     %s\n", short, firstLine(msg))
