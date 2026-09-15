@@ -72,9 +72,11 @@ It runs from anywhere, including outside a git repo, and `--repo` accepts a chec
 
 ## Configuration
 
-Zero config works. `norn init` scaffolds a per-project config in the current repo; global defaults live in `~/.config/work/config.yaml`. The **Settings** tab writes to the YAML surgically, so your comments and hand-added keys survive.
+Zero config works. Global defaults live in `~/.config/norn/config.yaml`. `norn init` scaffolds a personal config for the repo you're in at `~/.config/norn/projects/<repo>.yaml`; a `.norn.yaml` committed at the repo root is the shared layer your whole team gets. Merge order is global, then `.norn.yaml`, then personal. The **Settings** tab writes to the YAML surgically, so your comments and hand-added keys survive.
 
 Common knobs: `worktree_dir`, `base_branches`, `pr_base`, `ai_naming`. Run `norn --project-config` to print the resolved config, `norn doctor` to see what's wired up.
+
+Upgrading from a version that used the `work` name? Nothing to do. norn reads `~/.config/work`, `~/.cache/work`, `~/.local/state/work` and `.work.yaml` wherever it finds no `norn`-named equivalent, and `norn doctor` prints the `mv` that retires each one. It never moves your files for you.
 
 ### Agent
 
@@ -90,7 +92,7 @@ With `claude`, norn injects the task brief via `--append-system-prompt` and resu
 
 ### Templates
 
-Each worktree gets a `.worktree.md` brief from a template. norn ships `task` and `review`; drop your own in `~/.config/work/templates/<name>.md.tmpl` to shadow a built-in.
+Each worktree gets a `.worktree.md` brief from a template. norn ships `task` and `review`; drop your own in `~/.config/norn/templates/<name>.md.tmpl` to shadow a built-in.
 
 ```sh
 norn --templates                    # list templates + the data they can use

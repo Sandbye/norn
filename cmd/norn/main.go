@@ -18,6 +18,7 @@ import (
 	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/paths"
 	"github.com/sandbye/norn/internal/prompt"
 	"github.com/sandbye/norn/internal/state"
 	"github.com/sandbye/norn/internal/task"
@@ -37,6 +38,14 @@ func main() {
 	}
 	tui.ApplyTheme(cfg.Theme)
 	applyTemplateDir(cfg)
+
+	// A legacy-path install should hear about it wherever norn ran, so this
+	// lands after the TUI's alt screen is gone and after a command's output.
+	defer func() {
+		if n := paths.Notice(); n != "" {
+			fmt.Fprint(os.Stderr, "\n"+n)
+		}
+	}()
 
 	args := os.Args[1:]
 
@@ -283,11 +292,7 @@ func reapStale(repoRoot string) {
 // consumes and removes its own target within seconds of norn exiting, so
 // anything left this long belongs to a dead shell (or a run with no wrapper).
 func reapCdTargets() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	dir := filepath.Join(home, ".cache", "work")
+	dir := paths.Cache()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -560,18 +565,22 @@ func fetchReviewPR(repoRoot, prNum string) (prompt.PRRef, error) {
 }
 
 // writeCdTarget records the path the shell wrapper should `cd` into after the
-// work binary exits. Scoped per-shell via the parent PID so concurrent `work`
+// norn binary exits. Scoped per-shell via the parent PID so concurrent `norn`
 // invocations in other terminals can't bleed into each other. Read by the
-// `work()` shell function (in .zshrc/.bashrc) then deleted by it.
+// `norn()` shell function (in .zshrc/.bashrc) then deleted by it.
+//
+// Written to every cache dir that applies, not just the current one: a shell
+// started before the rename still runs a wrapper that reads ~/.cache/work, and
+// it only picks up the new path when that shell restarts. The files are tiny
+// and reaped after an hour.
 func writeCdTarget(path string) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
+	name := fmt.Sprintf("cd-target-%d", os.Getppid())
+	for _, dir := range paths.CacheAll() {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			continue
+		}
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(path), 0o644)
 	}
-	dir := filepath.Join(home, ".cache", "work")
-	_ = os.MkdirAll(dir, 0o755)
-	target := filepath.Join(dir, fmt.Sprintf("cd-target-%d", os.Getppid()))
-	_ = os.WriteFile(target, []byte(path), 0o644)
 }
 
 func cmdList(repoRoot string) {
@@ -1409,7 +1418,7 @@ func cmdInit(repoRoot string) {
 	}
 	home, _ := os.UserHomeDir()
 	repoName := originRepoName(repoRoot)
-	target := filepath.Join(home, ".config", "work", "projects", repoName+".yaml")
+	target := filepath.Join(paths.Projects(), repoName+".yaml")
 
 	if _, err := os.Stat(target); err == nil {
 		fmt.Printf("Project config already exists:\n  %s\n\nEdit it directly, or remove it first to regenerate.\n", short(target, home))
@@ -1570,6 +1579,7 @@ func cmdDoctor(cfg config.Config, repoRoot string) {
 		checkDocsPaths(home),
 		checkStateFile(home),
 		checkActiveRepo(cfg, repoRoot),
+		checkNamespace(),
 	}
 	render := func(c doctorCheck) {
 		mark := "✓"
@@ -1634,7 +1644,7 @@ func checkBinary(name string, required bool, note string) doctorCheck {
 }
 
 func checkGlobalConfig(home string) doctorCheck {
-	p := filepath.Join(home, ".config", "work", "config.yaml")
+	p := filepath.Join(paths.Config(), "config.yaml")
 	data, err := os.ReadFile(p)
 	if err != nil {
 		return doctorCheck{
@@ -1652,7 +1662,7 @@ func checkGlobalConfig(home string) doctorCheck {
 }
 
 func checkProjectConfigs(home string) doctorCheck {
-	dir := filepath.Join(home, ".config", "work", "projects")
+	dir := paths.Projects()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return doctorCheck{name: "project configs parse", detail: "no projects dir yet", warn: true, fix: "`norn init` inside any repo"}
@@ -1688,7 +1698,7 @@ func checkProjectConfigs(home string) doctorCheck {
 }
 
 func checkDocsPaths(home string) doctorCheck {
-	dir := filepath.Join(home, ".config", "work", "projects")
+	dir := paths.Projects()
 	entries, _ := os.ReadDir(dir)
 	var missing []string
 	total := 0
@@ -1726,8 +1736,29 @@ func checkDocsPaths(home string) doctorCheck {
 	return doctorCheck{name: fmt.Sprintf("docs paths resolve (%d)", total)}
 }
 
+// checkNamespace reports an install still reading the pre-rename "work" paths.
+// A warning, not a failure: those paths keep working, they just have a name
+// norn no longer uses anywhere else.
+func checkNamespace() doctorCheck {
+	// Touch every namespaced path so the notice reflects the whole install,
+	// not only what this run happened to read.
+	paths.Config()
+	paths.Cache()
+	paths.State()
+	n := paths.Notice()
+	if n == "" {
+		return doctorCheck{name: "config namespace is norn"}
+	}
+	return doctorCheck{
+		name:   "config namespace is norn",
+		detail: "still reading the old \"work\" paths",
+		warn:   true,
+		fix:    strings.TrimSpace(strings.TrimPrefix(n, "norn still reads the old \"work\" paths. To retire them:\n")),
+	}
+}
+
 func checkStateFile(home string) doctorCheck {
-	p := filepath.Join(home, ".local", "state", "work", "sessions.json")
+	p := state.Path()
 	if _, err := os.Stat(p); err != nil {
 		return doctorCheck{name: "session state file readable", detail: "not created yet (normal on fresh install)", warn: false}
 	}
@@ -1748,9 +1779,8 @@ func checkActiveRepo(cfg config.Config, repoRoot string) doctorCheck {
 	if repoRoot == "" {
 		return doctorCheck{name: "current dir: not in a git repo (skipping)"}
 	}
-	home, _ := os.UserHomeDir()
 	repoName := originRepoName(repoRoot)
-	p := filepath.Join(home, ".config", "work", "projects", repoName+".yaml")
+	p := filepath.Join(paths.Projects(), repoName+".yaml")
 	if _, err := os.Stat(p); err != nil {
 		return doctorCheck{
 			name: "current repo: " + repoName,
@@ -1761,12 +1791,12 @@ func checkActiveRepo(cfg config.Config, repoRoot string) doctorCheck {
 	return doctorCheck{name: "current repo: " + repoName + " (has project config)"}
 }
 
-// cmdRefreshDocs scans every project config under ~/.config/work/projects/,
+// cmdRefreshDocs scans every project config under ~/.config/norn/projects/,
 // collects unique git repos referenced by any `docs:` value, and runs
 // `git pull --ff-only` against each. Reports per-repo outcome.
 func cmdRefreshDocs() {
 	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".config", "work", "projects")
+	dir := paths.Projects()
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1965,7 +1995,7 @@ func upsertSession(repoRoot, kind, branch, wtPath, hint string) {
 const posixShellInit = `norn() {
   command norn "$@"
   local code=$?
-  local t="$HOME/.cache/work/cd-target-$$"
+  local t="%s/cd-target-$$"
   if [ -f "$t" ]; then
     local d; d=$(cat "$t"); rm -f "$t"
     [ -d "$d" ] && cd "$d"
@@ -1977,7 +2007,7 @@ const posixShellInit = `norn() {
 const fishShellInit = `function norn
   command norn $argv
   set -l code $status
-  set -l t "$HOME/.cache/work/cd-target-"$fish_pid
+  set -l t "%s/cd-target-"$fish_pid
   if test -f "$t"
     set -l d (cat "$t"); rm -f "$t"
     test -d "$d"; and cd "$d"
@@ -1992,11 +2022,14 @@ func cmdShellInit(shell string) {
 	if shell == "" {
 		shell = filepath.Base(os.Getenv("SHELL"))
 	}
+	// The cache dir is baked in resolved, not as $HOME/..., so a legacy install
+	// keeps its own dir and the wrapper can never disagree with writeCdTarget.
+	dir := paths.Cache()
 	switch shell {
 	case "fish":
-		fmt.Print(fishShellInit)
+		fmt.Printf(fishShellInit, dir)
 	default: // zsh, bash, sh
-		fmt.Print(posixShellInit)
+		fmt.Printf(posixShellInit, dir)
 	}
 }
 
@@ -2115,8 +2148,7 @@ func clickupLogin() {
 		}
 	}
 
-	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".config", "work", "config.yaml")
+	path := filepath.Join(paths.Config(), "config.yaml")
 	ed, err := config.OpenEditor(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
