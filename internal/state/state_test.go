@@ -65,3 +65,46 @@ func TestLoadCorruptSelfHeals(t *testing.T) {
 		t.Errorf("corrupt file not moved aside: %v", err)
 	}
 }
+
+// TestMutateConcurrentKeepsEveryRow is the lost-row case Save alone can't fix:
+// each writer loads, appends its own row and saves, so without a lock spanning
+// load-through-save the last writer's document is missing everyone else's rows.
+func TestMutateConcurrentKeepsEveryRow(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	const writers = 25
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := Mutate(func(s *Store) bool {
+				s.Sessions = append(s.Sessions, Session{
+					ID: fmt.Sprint(i), Repo: "r", Branch: fmt.Sprint(i),
+					Path: fmt.Sprintf("/p/%d", i), Status: StatusActive,
+				})
+				return true
+			}); err != nil {
+				t.Errorf("Mutate: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	s, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(s.Sessions) != writers {
+		t.Fatalf("rows = %d, want %d — a concurrent write was lost", len(s.Sessions), writers)
+	}
+	seen := map[string]bool{}
+	for _, sess := range s.Sessions {
+		seen[sess.ID] = true
+	}
+	for i := 0; i < writers; i++ {
+		if !seen[fmt.Sprint(i)] {
+			t.Errorf("row %d missing", i)
+		}
+	}
+}
