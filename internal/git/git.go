@@ -1,6 +1,8 @@
 package git
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -51,7 +53,7 @@ func RepoRootAt(dir string) (string, error) {
 
 // OriginRepoName returns the basename of the *main* repo for a given directory.
 // Inside a worktree, this resolves to the upstream repo's name rather than the
-// worktree's own dir name — so per-project config (~/.config/work/projects/<name>.yaml)
+// worktree's own dir name — so per-project config (~/.config/norn/projects/<name>.yaml)
 // keeps matching no matter which worktree you're in.
 func OriginRepoName(dir string) string {
 	common, err := CommonDir(dir)
@@ -231,11 +233,10 @@ func CheckoutClass(path string) string {
 // CurrentBranch returns the checked-out branch at path, or "" when detached or
 // on error. Used to reconcile a session row's branch against the live checkout.
 func CurrentBranch(path string) string {
-	out, err := exec.Command("git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	b, err := cmdOutput(path, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return ""
 	}
-	b := strings.TrimSpace(string(out))
 	if b == "HEAD" { // detached
 		return ""
 	}
@@ -343,12 +344,12 @@ func CheckMerged(repoRoot string, worktrees []Worktree, bases []string) []Worktr
 // revCount returns the number of commits in the given range (e.g. "a..b"), or 0
 // on error. Cheap ancestry/divergence probe.
 func revCount(repoRoot, rangeExpr string) int {
-	out, err := exec.Command("git", "-C", repoRoot, "rev-list", "--count", rangeExpr).Output()
+	out, err := cmdOutput(repoRoot, "git", "rev-list", "--count", rangeExpr)
 	if err != nil {
 		return 0
 	}
 	n := 0
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &n); err != nil {
+	if _, err := fmt.Sscanf(out, "%d", &n); err != nil {
 		return 0
 	}
 	return n
@@ -363,13 +364,13 @@ func BranchExists(repoRoot, branch string) bool {
 // checked out, or "" if none. Lets creation reuse a dropped-but-not-deleted
 // thread instead of colliding on the branch name.
 func WorktreePathForBranch(repoRoot, branch string) string {
-	out, err := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain").Output()
+	out, err := cmdOutput(repoRoot, "git", "worktree", "list", "--porcelain")
 	if err != nil {
 		return ""
 	}
 	want := "branch refs/heads/" + branch
 	path := ""
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		switch {
 		case strings.HasPrefix(line, "worktree "):
 			path = strings.TrimPrefix(line, "worktree ")
@@ -388,11 +389,10 @@ func WorktreePathForBranch(repoRoot, branch string) string {
 // file), idempotently, so calling it on an existing worktree fixes the whole
 // repo. Best-effort: never fails worktree creation.
 func ExcludeLocalMeta(wtPath string) {
-	out, err := exec.Command("git", "-C", wtPath, "rev-parse", "--git-path", "info/exclude").Output()
+	excl, err := cmdOutput(wtPath, "git", "rev-parse", "--git-path", "info/exclude")
 	if err != nil {
 		return
 	}
-	excl := strings.TrimSpace(string(out))
 	if excl == "" {
 		return
 	}
@@ -525,11 +525,11 @@ func RemoteBranchExists(repoRoot, remote, branch string) bool {
 
 // IsDirty reports whether the worktree has uncommitted changes.
 func IsDirty(wtPath string) bool {
-	out, err := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output()
+	out, err := cmdOutput(wtPath, "git", "status", "--porcelain")
 	if err != nil {
 		return false
 	}
-	return len(strings.TrimSpace(string(out))) > 0
+	return len(out) > 0
 }
 
 // ChangedFiles returns the sorted set of repo-relative paths this worktree
@@ -539,16 +539,16 @@ func IsDirty(wtPath string) bool {
 func ChangedFiles(wtPath, base string) []string {
 	set := map[string]struct{}{}
 	if base != "" {
-		if out, err := exec.Command("git", "-C", wtPath, "diff", "--name-only", base+"...HEAD").Output(); err == nil {
-			for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if out, err := cmdOutput(wtPath, "git", "diff", "--name-only", base+"...HEAD"); err == nil {
+			for _, l := range strings.Split(out, "\n") {
 				if l != "" {
 					set[l] = struct{}{}
 				}
 			}
 		}
 	}
-	if out, err := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output(); err == nil {
-		for _, l := range strings.Split(string(out), "\n") {
+	if out, err := cmdOutput(wtPath, "git", "status", "--porcelain"); err == nil {
+		for _, l := range strings.Split(out, "\n") {
 			if len(l) < 4 {
 				continue // "XY path" — need at least a status pair + a path
 			}
@@ -1047,23 +1047,91 @@ func CmdOutputPublic(dir string, name string, args ...string) string {
 	return out
 }
 
-func cmdOutput(dir string, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+// Timeout budgets. Local plumbing answers in milliseconds, so a long block is a
+// dead network mount or an index.lock someone else holds, never slow work.
+// Anything that reaches a remote gets the long budget: a real fetch over a slow
+// link is legitimate, an unreachable host is not.
+// Vars, not consts, so a test can shrink them without waiting out a real budget.
+var (
+	LocalTimeout   = 15 * time.Second
+	NetworkTimeout = 120 * time.Second
+)
+
+// ErrTimedOut reports that a command was killed at its budget. Callers that
+// swallow errors still surface nothing; callers that show one say why.
+var ErrTimedOut = errors.New("timed out")
+
+// networkOps reach a remote. Everything else is local plumbing.
+var networkOps = map[string]bool{
+	"fetch": true, "push": true, "pull": true, "clone": true,
+	"ls-remote": true, "remote": true, "submodule": true,
+}
+
+// valueFlags are git's global flags that take a separate value, so the
+// subcommand is the argument after the value, not after the flag.
+var valueFlags = map[string]bool{
+	"-C": true, "-c": true, "--git-dir": true, "--work-tree": true,
+	"--namespace": true, "--exec-path": true,
+}
+
+// timeoutFor picks the budget from the subcommand: the first argument that is
+// neither a flag nor a flag's value. An unrecognized command gets the local
+// budget, so a new call site is bounded by default, never unbounded.
+func timeoutFor(args []string) time.Duration {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if valueFlags[a] {
+			i++ // skip the value
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		if networkOps[a] {
+			return NetworkTimeout
+		}
+		return LocalTimeout
+	}
+	return LocalTimeout
+}
+
+// command builds a bounded command. The caller must call cancel, and passes the
+// context back to timeoutErr: a killed process reports "signal: killed", so the
+// context is the only place that says the budget ran out.
+func command(dir string, name string, args []string) (*exec.Cmd, context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutFor(args))
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	return cmd, ctx, cancel
+}
+
+// timeoutErr rewrites the generic "signal: killed" a context kill produces into
+// something that names the budget, and leaves every other failure alone.
+func timeoutErr(ctx context.Context, name string, args []string, err error) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	return fmt.Errorf("%s %s: %w after %s", name, strings.Join(args, " "), ErrTimedOut, timeoutFor(args))
+}
+
+func cmdOutput(dir string, name string, args ...string) (string, error) {
+	cmd, ctx, cancel := command(dir, name, args)
+	defer cancel()
 	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return "", timeoutErr(ctx, name, args, err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
 func cmdRun(dir string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
+	cmd, ctx, cancel := command(dir, name, args)
+	defer cancel()
 	// Capture git's chatter rather than letting it bleed onto the terminal /
 	// under the TUI (worktree create/remove, fetch, push are all plumbing).
 	// Fold any output into the error so failures stay useful.
 	if out, err := cmd.CombinedOutput(); err != nil {
+		err = timeoutErr(ctx, name, args, err)
 		if o := strings.TrimSpace(string(out)); o != "" {
 			return fmt.Errorf("%w: %s", err, o)
 		}
@@ -1072,12 +1140,18 @@ func cmdRun(dir string, name string, args ...string) error {
 	return nil
 }
 
+// Capture is captureRun for callers outside the package, so a git op run from
+// the CLI is bounded by the same budgets as one run from the TUI.
+func Capture(dir string, name string, args ...string) (string, error) {
+	return captureRun(dir, name, args...)
+}
+
 // captureRun runs a command capturing combined stdout+stderr instead of letting
 // it hit the terminal. Used where git's chatter would otherwise leak under the
 // TUI (e.g. worktree/branch removal).
 func captureRun(dir string, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
+	cmd, ctx, cancel := command(dir, name, args)
+	defer cancel()
 	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return string(out), timeoutErr(ctx, name, args, err)
 }
