@@ -57,6 +57,12 @@ type Config struct {
 	// set `ai_naming: false` to disable.
 	AINaming bool `yaml:"ai_naming" json:"ai_naming"`
 
+	// Notify: ping when a thread flips to waiting (terminal bell + a desktop
+	// notification where one is available). The dashboard already shows which
+	// thread needs you, but only while you are looking at it. Default true;
+	// set `notify: false` to disable.
+	Notify bool `yaml:"notify" json:"notify"`
+
 	// Agent selects the coding agent norn launches per worktree. Defaults to
 	// `claude`. Any other command (opencode, aider, …) is launched in the
 	// worktree directory, where `.worktree.md` gives it the task brief.
@@ -189,6 +195,7 @@ func DefaultConfig() Config {
 		WorktreeDir:  filepath.Join(home, "worktrees"),
 		BaseBranches: []string{"master", "main"},
 		AINaming:     true,
+		Notify:       true,
 		Agent:        AgentConfig{Command: "claude"},
 		User: User{
 			Name: "unknown",

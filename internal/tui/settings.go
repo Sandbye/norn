@@ -43,6 +43,7 @@ func settingRows() []settingRow {
 		{"Templates", "template", []string{"template"}, kindPicker, nil},
 		{"Tasks", "provider", []string{"tasks", "provider"}, kindPicker, []string{"github", "clickup", "none"}},
 		{"Appearance", "theme", []string{"theme"}, kindPicker, nil},
+		{"Appearance", "notify", []string{"notify"}, kindBool, nil},
 		{"Lists & policy", "base_branches", []string{"base_branches"}, kindEditor, nil},
 		{"Lists & policy", "verify", []string{"verify"}, kindEditor, nil},
 		{"Lists & policy", "clickup.lists", []string{"clickup", "lists"}, kindEditor, nil},
@@ -178,6 +179,8 @@ func resolvedDisplay(cfg config.Config, r settingRow) string {
 		return "default"
 	case "ai_naming":
 		return boolStr(cfg.AINaming)
+	case "notify":
+		return boolStr(cfg.Notify)
 	case "worktree_dir":
 		return cfg.WorktreeDir
 	case "pr_base":
