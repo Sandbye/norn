@@ -599,7 +599,7 @@ func (d DiffView) updateCommitPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (d DiffView) renderCommitPicker() string {
 	var b strings.Builder
-	b.WriteString("\n" + titleStyle.Render("work") + " " + subtitleStyle.Render("commit scope"))
+	b.WriteString("\n" + titleStyle.Render("norn") + " " + subtitleStyle.Render("commit scope"))
 	b.WriteString(dimStyle.Render(fmt.Sprintf("   PR #%d · %d commits", d.prMeta.Number, len(d.prMeta.CommitList))))
 	b.WriteString("\n\n")
 
@@ -1347,7 +1347,7 @@ func (d DiffView) renderHandoff() string {
 
 func (d DiffView) renderCommentOverlay() string {
 	var b strings.Builder
-	b.WriteString("\n" + titleStyle.Render("work") + " " + subtitleStyle.Render("comment"))
+	b.WriteString("\n" + titleStyle.Render("norn") + " " + subtitleStyle.Render("comment"))
 
 	switch {
 	case d.commentLineIdx < 0:
@@ -1415,7 +1415,7 @@ func (d DiffView) renderLineContext(lo, hi, ctx int) string {
 
 func (d DiffView) renderReviewOverlay() string {
 	var b strings.Builder
-	b.WriteString("\n" + titleStyle.Render("work") + " " + subtitleStyle.Render("review"))
+	b.WriteString("\n" + titleStyle.Render("norn") + " " + subtitleStyle.Render("review"))
 	if d.prMeta != nil {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("   PR #%d · %d pending comment(s)", d.prMeta.Number, len(d.pending))))
 	} else {
@@ -1489,7 +1489,7 @@ const listFooterLines = 4
 func (d DiffView) renderList() string {
 	var b strings.Builder
 
-	hdr := titleStyle.Render("work") + " " + subtitleStyle.Render("diff")
+	hdr := titleStyle.Render("norn") + " " + subtitleStyle.Render("diff")
 	if d.prMeta != nil {
 		scope := fmt.Sprintf("%d commit(s)", d.commits)
 		if d.scopeSHA != "" {
@@ -1581,7 +1581,7 @@ func (d DiffView) renderFile() string {
 	var b strings.Builder
 
 	f := d.files[d.cursor]
-	hdr := titleStyle.Render("work") + " " + subtitleStyle.Render("diff") +
+	hdr := titleStyle.Render("norn") + " " + subtitleStyle.Render("diff") +
 		dimStyle.Render(fmt.Sprintf("   %s", f.Path)) +
 		activeStyle.Render(fmt.Sprintf("  +%d", f.Added)) +
 		errorStyle.Render(fmt.Sprintf("  -%d", f.Removed))
