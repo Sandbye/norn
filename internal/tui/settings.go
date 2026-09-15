@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/paths"
 	"github.com/sandbye/norn/internal/prompt"
 )
 
@@ -84,16 +85,15 @@ type editorDoneMsg struct{ err error }
 
 // NewSettings builds the settings model. repoRoot may be "" (global only).
 func NewSettings(cfg config.Config, repoRoot string) settingsModel {
-	home, _ := os.UserHomeDir()
 	layers := []settingLayer{
-		{"Global", filepath.Join(home, ".config", "work", "config.yaml")},
+		{"Global", filepath.Join(paths.Config(), "config.yaml")},
 	}
 	if repoRoot != "" {
 		// Personal per-repo (not committed) and shared repo config.
 		if p := config.ProjectConfigPath(repoRoot); p != "" {
 			layers = append(layers, settingLayer{"Repo · personal", p})
 		}
-		layers = append(layers, settingLayer{"Repo · shared", filepath.Join(repoRoot, ".work.yaml")})
+		layers = append(layers, settingLayer{"Repo · shared", paths.RepoConfig(repoRoot)})
 	}
 	return settingsModel{
 		cfg:      cfg,

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sandbye/norn/internal/paths"
 	"gopkg.in/yaml.v3"
 )
 
@@ -211,20 +212,16 @@ func (c Config) HeadlessClaude() bool {
 }
 
 // ProjectConfigPath returns the personal (not committed) per-project config
-// path for repoRoot: ~/.config/work/projects/<repo>.yaml. Empty when repoRoot
+// path for repoRoot: ~/.config/norn/projects/<repo>.yaml. Empty when repoRoot
 // is empty. Uses the origin repo name so it's stable across worktrees.
 func ProjectConfigPath(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".config", "work", "projects", originRepoName(repoRoot)+".yaml")
+	return filepath.Join(paths.Projects(), originRepoName(repoRoot)+".yaml")
 }
 
-// Load reads ~/.config/work/config.yaml merged with .work.yaml from repo root.
+// Load reads ~/.config/norn/config.yaml merged with the repo's .norn.yaml.
 func Load(repoRoot string) (Config, error) {
 	cfg := DefaultConfig()
 
@@ -233,7 +230,7 @@ func Load(repoRoot string) (Config, error) {
 		return cfg, err
 	}
 
-	for _, path := range sourcePaths(home, repoRoot) {
+	for _, path := range sourcePaths(repoRoot) {
 		if err := mergeFromFile(&cfg, path); err != nil && !os.IsNotExist(err) {
 			return cfg, err
 		}
@@ -248,30 +245,26 @@ func Load(repoRoot string) (Config, error) {
 }
 
 // sourcePaths lists the config files in merge order — global, then the repo's
-// committed .work.yaml, then the personal per-project file — whether or not
+// committed .norn.yaml, then the personal per-project file — whether or not
 // they exist. The per-project file is keyed by the *origin* repo name (not the
 // worktree basename) so the same config matches from any worktree.
-func sourcePaths(home, repoRoot string) []string {
-	paths := []string{filepath.Join(home, ".config", "work", "config.yaml")}
+func sourcePaths(repoRoot string) []string {
+	out := []string{filepath.Join(paths.Config(), "config.yaml")}
 	if repoRoot != "" {
-		paths = append(paths,
-			filepath.Join(repoRoot, ".work.yaml"),
-			filepath.Join(home, ".config", "work", "projects", originRepoName(repoRoot)+".yaml"),
+		out = append(out,
+			paths.RepoConfig(repoRoot),
+			ProjectConfigPath(repoRoot),
 		)
 	}
-	return paths
+	return out
 }
 
 // Sources returns the config files Load actually read for repoRoot, in merge
 // order. Headless callers use it to report which config backed a result (and
 // to tell "no project config" from "project config with no verify commands").
 func Sources(repoRoot string) []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
 	var found []string
-	for _, path := range sourcePaths(home, repoRoot) {
+	for _, path := range sourcePaths(repoRoot) {
 		if _, err := os.Stat(path); err == nil {
 			found = append(found, path)
 		}
