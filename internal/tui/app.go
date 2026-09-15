@@ -239,6 +239,9 @@ func (a App) gotoTab(v View) (App, tea.Cmd) {
 	if a.current == ViewSettings && v != ViewSettings {
 		if cfg, err := config.Load(a.repoRoot); err == nil {
 			a.cfg = cfg
+			// The dashboard holds its own copy and outlives the tab switch, so
+			// without this a toggle there (notify, agent) needs a restart.
+			a.dashboard.cfg = cfg
 			prev := a.settings
 			a.settings = NewSettings(cfg, a.repoRoot)
 			a.settings.cursor, a.settings.layer = prev.cursor, prev.layer
