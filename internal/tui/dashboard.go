@@ -18,6 +18,7 @@ import (
 	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/notify"
 	"github.com/sandbye/norn/internal/prompt"
 	"github.com/sandbye/norn/internal/state"
 )
@@ -69,6 +70,48 @@ type Dashboard struct {
 	readyBranch   string            // summary finished, waiting to be viewed
 	summaryCache  map[string]string // branch -> last summary text
 	spinner       spinner.Model
+
+	// agentSeen is the previous live state per worktree path, so a flip into
+	// waiting fires once instead of every tick the state holds. nil until the
+	// first load, which seeds it without notifying: a thread that was already
+	// waiting when norn started is not news.
+	agentSeen map[string]claude.AgentState
+}
+
+// needsUser reports whether a state is one the user has to act on.
+func needsUser(s claude.AgentState) bool {
+	return s == claude.StateWaiting || s == claude.StateStuck
+}
+
+// agentTransitions updates seen and returns the rows that just flipped into a
+// state needing the user. A row first seen in that state is recorded silently:
+// it is the flip that is worth a ping, not the condition. Returns nothing when
+// seen is nil, which is the first load.
+func agentTransitions(seen map[string]claude.AgentState, rows []dashRow) []dashRow {
+	if seen == nil {
+		return nil
+	}
+	var flipped []dashRow
+	for _, r := range rows {
+		was, known := seen[r.Path]
+		seen[r.Path] = r.AgentState
+		if !known {
+			continue
+		}
+		if needsUser(r.AgentState) && !needsUser(was) {
+			flipped = append(flipped, r)
+		}
+	}
+	return flipped
+}
+
+// seedAgentStates records the current states without reporting any transition.
+func seedAgentStates(rows []dashRow) map[string]claude.AgentState {
+	seen := make(map[string]claude.AgentState, len(rows))
+	for _, r := range rows {
+		seen[r.Path] = r.AgentState
+	}
+	return seen
 }
 
 // visibleRows is d.rows narrowed by the active filter query (fuzzy on branch /
@@ -351,6 +394,15 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dashLoadedMsg:
 		d.rows = msg.rows
 		d.lastLoad = time.Now()
+		if d.agentSeen == nil {
+			d.agentSeen = seedAgentStates(d.rows)
+		} else {
+			for _, r := range agentTransitions(d.agentSeen, d.rows) {
+				if d.cfg.Notify {
+					notify.Notify("norn", r.Branch+" is waiting for you")
+				}
+			}
+		}
 		if d.cursor >= len(d.rows) {
 			d.cursor = max0(len(d.rows) - 1)
 		}

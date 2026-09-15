@@ -4,7 +4,9 @@
 
 ![norn demo](assets/demo.gif)
 
-norn is a terminal UI for running many pieces of work in parallel. Each task gets its own git **worktree** (an isolated checkout); norn creates, tracks, and cleans them up, and launches a coding agent per worktree so you can jump between tasks without stashing or branch-juggling.
+norn runs many coding agents at once and tells you which one needs you.
+
+Each task gets its own git **worktree** (an isolated checkout) with its own agent session. The dashboard reads each session's live state, so a thread whose turn has ended and is waiting on you shows up at a glance, instead of being found by cycling through terminals. When one flips to waiting, norn pings you. norn creates the worktrees, tracks them, and cleans them up, so you jump between tasks without stashing or branch-juggling.
 
 Named for the Norns, who weave the threads of fate at the roots of the world tree. Your worktrees are the threads, git is the tree.
 
@@ -35,7 +37,7 @@ The wrapper lives in the binary, so it never drifts. Without it norn still works
 
 norn is one tabbed TUI. `Tab` / `1`-`4` switch tabs, `?` shows keys, `esc` backs out, `q` quits.
 
-- **Threads** — live dashboard of every worktree session across your repos (branch, PR state, age). `⏎` cd's in, `o` opens the agent, `/` filters, `m` jumps to the main checkout.
+- **Threads** — live dashboard of every worktree session across your repos: agent state (working / waiting / idle), branch, PR state, age, and the next action from the worktree's own notes. `⏎` cd's in, `o` opens the agent, `/` filters, `m` jumps to the main checkout.
 - **New** — create a worktree from a hint, with a Conventional Branch name. `T` seeds it from a real tracker task, `M` picks the model.
 - **Clean** — auto-selects worktrees whose work is merged or whose remote branch is gone, so pruning is one keystroke.
 - **Settings** — edit config in place (agent, template, theme, toggles), with a global/project layer switch.
@@ -89,6 +91,16 @@ agent:
 ```
 
 With `claude`, norn injects the task brief via `--append-system-prompt` and resumes with `-c`. Any other agent is launched in the worktree directory, where the generated `.worktree.md` carries the brief. Thread summaries and AI branch naming are Claude-only and simply don't run otherwise.
+
+### Notifications
+
+A thread that finishes its turn is waiting on you, and with a dozen running you want to be told rather than to watch. On each dashboard refresh norn pings when a thread flips into `waiting`: a terminal bell, plus a desktop notification (`osascript` on macOS, `notify-send` on Linux) where one is available. Once per flip, never repeated while the state holds, and never for a thread that was already waiting when norn started.
+
+```yaml
+notify: true   # default; set false for silence
+```
+
+Agent state is read from Claude Code's local session transcripts, so this is Claude-only and simply doesn't run for other agents.
 
 ### Templates
 
