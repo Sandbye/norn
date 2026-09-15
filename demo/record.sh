@@ -11,16 +11,20 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BASE="$(mktemp -d)"
+# A fixed, short path rather than mktemp: the worktree dir is on screen in the
+# Settings tab, and /var/folders/2_/8mv5…/tmp.Buaw7esFSg reads like a bug.
+BASE="/tmp/norn-demo"
+rm -rf "$BASE"
 trap 'rm -rf "$BASE"' EXIT
+mkdir -p "$BASE"
 
 REPO="$BASE/repo"; WT="$BASE/wt"; STATE="$BASE/state"; CLAUDEC="$BASE/claude"; HOMED="$BASE/home"
-mkdir -p "$REPO" "$WT" "$STATE/work" "$CLAUDEC/projects" "$HOMED/.config/work"
+mkdir -p "$REPO" "$WT" "$STATE/norn" "$CLAUDEC/projects" "$HOMED/.config/norn"
 
 echo "building norn…"
 go build -C "$REPO_ROOT" -o "$BASE/norn" ./cmd/norn
 
-cat > "$HOMED/.config/work/config.yaml" <<EOF
+cat > "$HOMED/.config/norn/config.yaml" <<EOF
 worktree_dir: $WT
 user: { name: you, email: you@example.com }
 base_branches: [main]
@@ -67,6 +71,9 @@ updated: $(now)
 EOF
   slug="$(printf '%s' "$path" | sed 's#[/.]#-#g')"
   tdir="$CLAUDEC/projects/$slug"; mkdir -p "$tdir"
+  # The headline of the demo: this thread ends its turn while the dashboard is
+  # on screen, so the STATE column flips to waiting in front of the viewer.
+  [ "$branch" = "feature/login-flow" ] && FLIP_TRANSCRIPT="$tdir/seed.jsonl"
   case "$agent" in
     working) stop='"tool_use"'; ts="$(now)";;
     waiting) stop='"end_turn"'; ts="$(now)";;
@@ -79,7 +86,18 @@ EOF
   sessions+="{ \"id\": \"repo:$branch\", \"repo\": \"repo\", \"branch\": \"$branch\", \"kind\": \"$kind\", \"path\": \"$path\", \"title\": \"$title\", $prline \"status\": \"active\", \"started_at\": \"$(ago 3d)\", \"last_activity_at\": \"$(ago $((i*7))M)\" }"
   i=$((i+1))
 done
-printf '{\n  "sessions": %s]\n}\n' "$sessions" > "$STATE/work/sessions.json"
+printf '{\n  "sessions": %s]\n}\n' "$sessions" > "$STATE/norn/sessions.json"
+
+# Run from the tape just before norn starts: a real end_turn record lands mid
+# recording, and the next 5s dashboard tick picks it up. Nothing is faked in the
+# UI, the state is derived from the transcript exactly as it is in real use.
+cat > "$BASE/flip.sh" <<EOF
+#!/usr/bin/env bash
+sleep 13
+printf '{"type":"assistant","timestamp":"%s","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"x"}]}}\\n' \\
+  "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$FLIP_TRANSCRIPT"
+EOF
+chmod +x "$BASE/flip.sh"
 
 cat > "$BASE/demo.tape" <<EOF
 Output "$BASE/demo.gif"
@@ -94,29 +112,37 @@ Type "cd $REPO"
 Enter
 Type "export HOME=$HOMED XDG_STATE_HOME=$STATE CLAUDE_CONFIG_DIR=$CLAUDEC PATH=$BASE:\$PATH"
 Enter
+# disown, or zsh prints "[1] + done …" mid recording: that line scrolls the
+# TUI up by one and leaves the frame clipped for the rest of the take.
+Type "$BASE/flip.sh & disown"
+Enter
 Type "clear"
 Enter
 Sleep 800ms
 Show
 Type "norn"
 Enter
-Sleep 4s
+Sleep 3s
 Down@700ms 3
-Sleep 1200ms
+Sleep 1s
 Up@700ms 2
-Sleep 1200ms
+Sleep 1s
 Type "/"
 Sleep 400ms
 Type "fix"
-Sleep 1800ms
+Sleep 1500ms
 Escape
-Sleep 900ms
+Sleep 1s
+# login-flow ends its turn here: working -> waiting, on camera.
+Sleep 7s
+Down@700ms 1
+Sleep 2s
 Type "3"
-Sleep 1800ms
+Sleep 1500ms
 Type "5"
 Sleep 1800ms
 Type "1"
-Sleep 1600ms
+Sleep 1400ms
 Type "q"
 Sleep 600ms
 EOF
