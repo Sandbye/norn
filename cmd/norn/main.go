@@ -1883,37 +1883,35 @@ func cmdActivityTick(repoRoot string) {
 	}
 	repo := originRepoName(repoRoot)
 
-	store, err := state.Load()
-	if err != nil {
-		return
-	}
-	// Key by path: a thread is a worktree, not a branch. Branch switches update
-	// the existing row rather than spawning a new one.
-	if existing := store.FindByPath(repoRoot); existing != nil {
-		existing.Branch = branch
-		existing.ID = state.MakeID(repo, branch)
-		existing.LastActivityAt = time.Now()
-		if existing.ClickUpID == "" {
-			existing.ClickUpID = git.ClickUpID(branch)
+	_, _ = state.Mutate(func(store *state.Store) bool {
+		// Key by path: a thread is a worktree, not a branch. Branch switches update
+		// the existing row rather than spawning a new one.
+		if existing := store.FindByPath(repoRoot); existing != nil {
+			existing.Branch = branch
+			existing.ID = state.MakeID(repo, branch)
+			existing.LastActivityAt = time.Now()
+			if existing.ClickUpID == "" {
+				existing.ClickUpID = git.ClickUpID(branch)
+			}
+		} else {
+			kind := "task"
+			if strings.HasPrefix(branch, "review/") {
+				kind = "review"
+			}
+			store.UpsertByPath(state.Session{
+				ID:             state.MakeID(repo, branch),
+				Repo:           repo,
+				Branch:         branch,
+				Kind:           kind,
+				Path:           repoRoot,
+				ClickUpID:      git.ClickUpID(branch),
+				Status:         state.StatusActive,
+				StartedAt:      time.Now(),
+				LastActivityAt: time.Now(),
+			})
 		}
-	} else {
-		kind := "task"
-		if strings.HasPrefix(branch, "review/") {
-			kind = "review"
-		}
-		store.UpsertByPath(state.Session{
-			ID:             state.MakeID(repo, branch),
-			Repo:           repo,
-			Branch:         branch,
-			Kind:           kind,
-			Path:           repoRoot,
-			ClickUpID:      git.ClickUpID(branch),
-			Status:         state.StatusActive,
-			StartedAt:      time.Now(),
-			LastActivityAt: time.Now(),
-		})
-	}
-	_ = store.Save()
+		return true
+	})
 }
 
 func currentBranch(repoRoot string) string {
@@ -1938,27 +1936,25 @@ func upsertSession(repoRoot, kind, branch, wtPath, hint string) {
 	}
 	repo := originRepoName(repoRoot)
 	id := state.MakeID(repo, branch)
-	store, err := state.Load()
-	if err != nil {
-		return
-	}
 	// Prefer the branch (reliably carries #<id> after naming); fall back to the hint.
 	clickup := git.ClickUpID(branch)
 	if clickup == "" {
 		clickup = git.ClickUpID(hint)
 	}
-	store.UpsertByPath(state.Session{
-		ID:             id,
-		Repo:           repo,
-		Branch:         branch,
-		Kind:           kind,
-		Path:           wtPath,
-		ClickUpID:      clickup,
-		Status:         state.StatusActive,
-		StartedAt:      time.Now(),
-		LastActivityAt: time.Now(),
+	_, _ = state.Mutate(func(store *state.Store) bool {
+		store.UpsertByPath(state.Session{
+			ID:             id,
+			Repo:           repo,
+			Branch:         branch,
+			Kind:           kind,
+			Path:           wtPath,
+			ClickUpID:      clickup,
+			Status:         state.StatusActive,
+			StartedAt:      time.Now(),
+			LastActivityAt: time.Now(),
+		})
+		return true
 	})
-	_ = store.Save()
 }
 
 // posixShellInit / fishShellInit are the shell wrapper that lets norn cd its

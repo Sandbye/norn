@@ -814,56 +814,58 @@ func (d Dashboard) loadCmd() tea.Cmd {
 	// Live agent state is a claude-only signal (reads Claude Code's transcripts).
 	useClaude := d.cfg.AgentCommand() == "claude"
 	return func() tea.Msg {
-		store, err := state.Load()
-		if err != nil || store == nil {
-			return dashLoadedMsg{}
-		}
-
-		// Reconcile: the dashboard reflects live worktrees, not an append-only
-		// log. Drop rows whose path is gone or is the main checkout, collapse
-		// duplicate rows sharing a worktree path, and reconcile each survivor's
-		// branch/ClickUp id against the live checkout. Persist if anything moved.
-		store.SortByActivity()
-		before := len(store.Sessions)
-		store.Prune(func(s state.Session) bool {
-			return git.CheckoutClass(s.Path) == "worktree"
-		})
-		store.DedupeByPath()
-		changed := len(store.Sessions) != before
-
-		// Adopt worktrees that exist on disk but have no row: a session dropped
-		// with `d`, a worktree made by hand, or a store that lost the entry. The
-		// dashboard is a view of live threads, so anything checked out belongs in
-		// it — otherwise the only place it shows up is Clean, where the only
-		// verb is delete.
-		if adoptWorktrees(store, cfg.WorktreeDir) {
-			changed = true
+		// Reconcile under the write lock: the dashboard reflects live worktrees,
+		// not an append-only log. Drop rows whose path is gone or is the main
+		// checkout, collapse duplicate rows sharing a worktree path, and
+		// reconcile each survivor's branch/ClickUp id against the live checkout.
+		store, err := state.Mutate(func(store *state.Store) bool {
 			store.SortByActivity()
-		}
+			before := len(store.Sessions)
+			store.Prune(func(s state.Session) bool {
+				return git.CheckoutClass(s.Path) == "worktree"
+			})
+			store.DedupeByPath()
+			changed := len(store.Sessions) != before
 
-		for i := range store.Sessions {
-			sess := &store.Sessions[i]
-			if b := git.CurrentBranch(sess.Path); b != "" && b != sess.Branch {
-				sess.Branch = b
-				sess.ID = state.MakeID(sess.Repo, b)
+			// Adopt worktrees that exist on disk but have no row: a session dropped
+			// with `d`, a worktree made by hand, or a store that lost the entry. The
+			// dashboard is a view of live threads, so anything checked out belongs in
+			// it — otherwise the only place it shows up is Clean, where the only
+			// verb is delete.
+			if adoptWorktrees(store, cfg.WorktreeDir) {
 				changed = true
+				store.SortByActivity()
 			}
-			if sess.ClickUpID == "" {
-				if id := git.ClickUpID(sess.Branch); id != "" {
-					sess.ClickUpID = id
+
+			for i := range store.Sessions {
+				sess := &store.Sessions[i]
+				if b := git.CurrentBranch(sess.Path); b != "" && b != sess.Branch {
+					sess.Branch = b
+					sess.ID = state.MakeID(sess.Repo, b)
+					changed = true
+				}
+				if sess.ClickUpID == "" {
+					if id := git.ClickUpID(sess.Branch); id != "" {
+						sess.ClickUpID = id
+						changed = true
+					}
+				}
+				// Re-read the title from .worktree.md every load: a bare-hint
+				// worktree has none until start-task resolves the task and writes
+				// it back, at which point the dashboard picks it up on next refresh.
+				if t := worktreeTitle(sess.Path); t != "" && t != sess.Title {
+					sess.Title = t
 					changed = true
 				}
 			}
-			// Re-read the title from .worktree.md every load: a bare-hint
-			// worktree has none until start-task resolves the task and writes
-			// it back, at which point the dashboard picks it up on next refresh.
-			if t := worktreeTitle(sess.Path); t != "" && t != sess.Title {
-				sess.Title = t
-				changed = true
+			return changed
+		})
+		if err != nil || store == nil {
+			// A busy lock must not blank the dashboard: fall back to a plain
+			// read and skip this tick's reconcile writeback.
+			if store, err = state.Load(); err != nil || store == nil {
+				return dashLoadedMsg{}
 			}
-		}
-		if changed {
-			_ = store.Save()
 		}
 
 		rows := make([]dashRow, 0, len(store.Sessions))
