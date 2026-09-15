@@ -98,6 +98,9 @@ func main() {
 				cmdTemplates(cfg)
 			}
 			return
+		case "statusline":
+			cmdStatusline()
+			return
 		case "shell-init":
 			shell := ""
 			if len(args) > 1 {
@@ -2323,6 +2326,7 @@ Usage:
   norn template edit [name]  Customize a template in $EDITOR (default: task)
   norn auth [provider]    Connect an integration (ClickUp, …) for the task picker
   norn shell-init [shell]  Print the cd wrapper: eval "$(norn shell-init zsh)"
+  norn statusline          Render the thread's state card for Claude Code's status bar
   norn diff               TUI diff of the whole branch: fork base → HEAD
                           (every commit since the branch was created, pushed or not)
   norn diff -w, --working  Just current uncommitted changes (working tree)
