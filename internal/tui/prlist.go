@@ -80,7 +80,7 @@ func (m PRList) View() string {
 	}
 
 	var b strings.Builder
-	hdr := titleStyle.Render("work") + " " + subtitleStyle.Render("diff") +
+	hdr := titleStyle.Render("norn") + " " + subtitleStyle.Render("diff") +
 		dimStyle.Render(fmt.Sprintf("   pick a PR · %d open", len(m.prs)))
 	b.WriteString("\n" + hdr + "\n\n")
 
