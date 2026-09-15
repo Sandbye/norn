@@ -15,6 +15,7 @@ import (
 
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/paths"
 )
 
 const tmplExt = ".md.tmpl"
@@ -23,7 +24,7 @@ const tmplExt = ".md.tmpl"
 var embedded embed.FS
 
 // overrideDir is where user template overrides live. Empty = the default
-// (~/.config/work/templates). SetTemplateDir wires the `templates.dir` config.
+// (~/.config/norn/templates). SetTemplateDir wires the `templates.dir` config.
 var overrideDir string
 
 // SetTemplateDir points the user-override lookup at dir (called once at startup
@@ -166,13 +167,12 @@ func renderNamed(tmplName string, data Data) (string, error) {
 }
 
 // userTemplateDir is where user template overrides live: the configured
-// `templates.dir`, or ~/.config/work/templates by default.
+// `templates.dir`, or ~/.config/norn/templates by default.
 func userTemplateDir() string {
 	if overrideDir != "" {
 		return overrideDir
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "work", "templates")
+	return paths.Templates()
 }
 
 // List returns the available template names (basename without the .md.tmpl

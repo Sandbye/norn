@@ -1,6 +1,6 @@
 // Package state persists per-session metadata for the work CLI.
 //
-// One JSON file at ~/.local/state/work/sessions.json holds every active and
+// One JSON file at ~/.local/state/norn/sessions.json holds every active and
 // recent worktree session. Sized for ~10 concurrent sessions; if it ever grows,
 // migrate to sqlite via modernc.org/sqlite. Atomic writes via tmp+rename.
 package state
@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/sandbye/norn/internal/paths"
 )
 
 const StatusActive = "active"
@@ -41,11 +43,7 @@ type Store struct {
 
 // Path returns the canonical store path. Honors XDG_STATE_HOME.
 func Path() string {
-	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
-		return filepath.Join(x, "work", "sessions.json")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "state", "work", "sessions.json")
+	return filepath.Join(paths.State(), "sessions.json")
 }
 
 // Load reads the store. Returns an empty store if the file doesn't exist.
