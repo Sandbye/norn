@@ -9,7 +9,9 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/sandbye/norn/internal/config"
 	"os/exec"
 	"strings"
 	"time"
@@ -31,6 +33,10 @@ type Options struct {
 	SystemPrompt string        // --append-system-prompt
 	Stdin        string        // piped context (e.g. a diff)
 	Timeout      time.Duration // 0 → 90s default
+	// Resume names a specific session (--resume <id>). Preferred over Continue
+	// when the id is known, since --continue guesses "most recent" and silently
+	// starts a new conversation when it guesses wrong.
+	Resume string
 	// Continue resumes the directory's existing session (--continue) instead of
 	// starting a fresh one. Claude Code will resume a session that has finished
 	// but not one still running, so callers must only set this for a thread
@@ -38,8 +44,8 @@ type Options struct {
 	Continue bool
 	// PermissionMode is --permission-mode. Empty means Claude Code's default for
 	// -p, which is Manual: anything that would prompt is denied, because an
-	// unattended run has nobody to ask. Set acceptEdits or auto to let a run
-	// actually change files.
+	// unattended run has nobody to ask. Callers translate a norn grant into
+	// this with PermissionModeFor.
 	PermissionMode string
 }
 
@@ -124,6 +130,15 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error) 
 		if ctx.Err() == context.DeadlineExceeded {
 			return Result{}, fmt.Errorf("claude timed out after %s", timeout)
 		}
+		// claude puts the reason on stderr, and an exit status alone is not
+		// diagnosable: "already running", "not logged in" and "no session to
+		// continue" all surface as exit 1.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if msg := strings.TrimSpace(string(ee.Stderr)); msg != "" {
+				return Result{}, fmt.Errorf("claude: %s", firstLine(msg))
+			}
+		}
 		return Result{}, fmt.Errorf("claude -p failed: %w", err)
 	}
 
@@ -135,7 +150,9 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error) 
 // session instead of answering the one on screen, which no exit code reveals.
 func buildArgs(prompt string, opts Options) []string {
 	args := []string{"-p", prompt, "--output-format", "json"}
-	if opts.Continue {
+	if opts.Resume != "" {
+		args = append(args, "--resume", opts.Resume)
+	} else if opts.Continue {
 		args = append(args, "--continue")
 	}
 	if opts.PermissionMode != "" {
@@ -154,6 +171,69 @@ func buildArgs(prompt string, opts Options) []string {
 // restarts real work, and killing it halfway leaves the thread mid-turn.
 const ReplyTimeout = 15 * time.Minute
 
+// PermissionModeFor translates a norn grant into Claude Code's own flag value.
+// Manual is the empty string, which is already -p's default, so "answer" passes
+// no flag at all.
+//
+//	answer → Manual       anything needing approval is denied
+//	edit   → acceptEdits  writes files; shell still needs an allow rule
+//	act    → auto         a classifier reviews each action instead of you
+func PermissionModeFor(grant string) string {
+	switch config.Grant(grant) {
+	case config.GrantEdit:
+		return "acceptEdits"
+	case config.GrantAct:
+		return "auto"
+	}
+	return ""
+}
+
+// Stop ends a background session so it can be resumed headlessly. Claude Code
+// refuses to resume a session the daemon is still holding, and says so, naming
+// this as the way through.
+func Stop(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, agentsTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "claude", "stop", id).CombinedOutput()
+	if err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("claude stop %s: %s", id, firstLine(msg))
+		}
+		return fmt.Errorf("claude stop %s: %w", id, err)
+	}
+	return nil
+}
+
+// ReplyTo sends one line to a worktree's session, stopping it first when the
+// daemon holds it. Addressing the session by id rather than by --continue is
+// what makes the reply land in the thread on screen instead of a new
+// conversation.
+//
+// live may be absent: a headless reply ends the run, so the daemon stops
+// holding the session and it leaves `claude agents` even though the
+// conversation is still resumable. The transcript keeps the id either way.
+func ReplyTo(ctx context.Context, dir string, live *Session, text, mode string) (Result, error) {
+	id := SessionIDFor(dir)
+	if live != nil {
+		if live.Background() {
+			if err := Stop(ctx, live.ID); err != nil {
+				return Result{}, err
+			}
+		}
+		if live.SessionID != "" {
+			id = live.SessionID
+		}
+	}
+	if id == "" {
+		return Result{}, fmt.Errorf("no session to resume for %s", dir)
+	}
+	return Run(ctx, dir, text, Options{
+		Resume:         id,
+		PermissionMode: mode,
+		Timeout:        ReplyTimeout,
+	})
+}
+
 // Reply continues the worktree's session with one line from the user, headless,
 // so the dashboard can answer a waiting thread without taking over the
 // terminal. mode is passed through to --permission-mode; empty keeps Claude
@@ -165,6 +245,15 @@ func Reply(ctx context.Context, dir, text, mode string) (Result, error) {
 		PermissionMode: mode,
 		Timeout:        ReplyTimeout,
 	})
+}
+
+// firstLine keeps a status line to one line: claude's stderr can run long, and
+// this lands in a dashboard footer.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
 }
 
 func parseEnvelope(out []byte) (Result, error) {

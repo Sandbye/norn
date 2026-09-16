@@ -88,6 +88,20 @@ func Probe(worktreePath string) Status {
 	return st
 }
 
+// SessionIDFor returns the id of a worktree's newest session, taken from the
+// transcript filename, which is that id. Empty when there is no transcript.
+//
+// This is how a reply reaches a session that is no longer live: a headless run
+// finishes and the daemon stops holding it, so `claude agents` lists nothing,
+// while the conversation itself is still resumable by id.
+func SessionIDFor(worktreePath string) string {
+	f := newestTranscript(filepath.Join(projectsDir(), slugFor(worktreePath)))
+	if f == "" {
+		return ""
+	}
+	return strings.TrimSuffix(filepath.Base(f), ".jsonl")
+}
+
 // HasSession reports whether a worktree has a transcript Claude can continue,
 // i.e. whether `claude -c` in that directory would resume something.
 func HasSession(worktreePath string) bool {
