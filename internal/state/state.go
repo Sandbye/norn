@@ -39,6 +39,10 @@ type Session struct {
 // Store is the on-disk session list, loaded into memory.
 type Store struct {
 	Sessions []Session `json:"sessions"`
+
+	// repaired records that Load rewrote paths or dropped duplicates, so
+	// Mutate persists the repair even when its fn changes nothing.
+	repaired bool
 }
 
 // Path returns the canonical store path. Honors XDG_STATE_HOME.
@@ -66,7 +70,34 @@ func Load() (*Store, error) {
 		_ = os.Rename(p, p+".corrupt")
 		return &Store{}, nil
 	}
+	s.canonicalizePaths()
 	return &s, nil
+}
+
+// canonicalizePaths rewrites every stored path through paths.Canon and collapses
+// rows that then share one, keeping the most recently active. Repairs stores
+// written before paths were canonical; idempotent afterwards.
+func (s *Store) canonicalizePaths() {
+	at := map[string]int{}
+	out := s.Sessions[:0]
+	for _, sess := range s.Sessions {
+		canon := paths.Canon(sess.Path)
+		if canon != sess.Path {
+			sess.Path = canon
+			s.repaired = true
+		}
+		i, dup := at[canon]
+		if !dup {
+			at[canon] = len(out)
+			out = append(out, sess)
+			continue
+		}
+		s.repaired = true
+		if sess.LastActivityAt.After(out[i].LastActivityAt) {
+			out[i] = sess
+		}
+	}
+	s.Sessions = out
 }
 
 // Save writes the store atomically via a unique temp file + rename. A unique
@@ -118,6 +149,7 @@ func (s *Store) Find(id string) *Session {
 
 // Upsert inserts or updates a session by id. Returns the merged session.
 func (s *Store) Upsert(sess Session) *Session {
+	sess.Path = paths.Canon(sess.Path)
 	if existing := s.Find(sess.ID); existing != nil {
 		// Preserve fields the caller didn't set.
 		if sess.Title == "" {
@@ -157,6 +189,7 @@ func (s *Store) Upsert(sess Session) *Session {
 // FindByPath returns the session at the given worktree path, or nil. Worktree
 // path is the stable identity of a thread; branch may change under it.
 func (s *Store) FindByPath(path string) *Session {
+	path = paths.Canon(path)
 	for i := range s.Sessions {
 		if s.Sessions[i].Path == path {
 			return &s.Sessions[i]
@@ -169,6 +202,7 @@ func (s *Store) FindByPath(path string) *Session {
 // path exists it's updated in place (branch may have changed); otherwise the
 // session is appended. Prevents branch switches from spawning duplicate rows.
 func (s *Store) UpsertByPath(sess Session) *Session {
+	sess.Path = paths.Canon(sess.Path)
 	if existing := s.FindByPath(sess.Path); existing != nil {
 		if sess.Title == "" {
 			sess.Title = existing.Title
@@ -226,11 +260,13 @@ func (s *Store) DedupeByPath() int {
 	out := s.Sessions[:0]
 	removed := 0
 	for _, sess := range s.Sessions {
-		if seen[sess.Path] {
+		canon := paths.Canon(sess.Path)
+		if seen[canon] {
 			removed++
 			continue
 		}
-		seen[sess.Path] = true
+		seen[canon] = true
+		sess.Path = canon
 		out = append(out, sess)
 	}
 	s.Sessions = out

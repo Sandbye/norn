@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestSaveConcurrentStaysValid reproduces the corruption that a fixed
@@ -106,5 +107,92 @@ func TestMutateConcurrentKeepsEveryRow(t *testing.T) {
 		if !seen[fmt.Sprint(i)] {
 			t.Errorf("row %d missing", i)
 		}
+	}
+}
+
+// symlinkedWorktree returns (realPath, linkedPath) for the same directory: the
+// shape of a default macOS install, where /tmp is a symlink to /private/tmp.
+func symlinkedWorktree(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	real, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(real, "worktrees", "feature", "dupe-check")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(real, "link")
+	if err := os.Symlink(filepath.Join(real, "worktrees"), link); err != nil {
+		t.Fatal(err)
+	}
+	return wt, filepath.Join(link, "feature", "dupe-check")
+}
+
+// TestUpsertByPathResolvesSymlinks: the same worktree reached through a symlink
+// is the same row. The path is stored once as built and once as read back from
+// `git worktree list`, and those two spellings must not both become rows.
+func TestUpsertByPathResolvesSymlinks(t *testing.T) {
+	real, link := symlinkedWorktree(t)
+
+	s := &Store{}
+	s.UpsertByPath(Session{ID: "app:feature/dupe-check", Repo: "app", Branch: "feature/dupe-check", Path: real})
+	s.UpsertByPath(Session{ID: "app:feature/dupe-check", Repo: "app", Branch: "feature/dupe-check", Path: link})
+
+	if len(s.Sessions) != 1 {
+		t.Fatalf("rows = %d, want 1: %+v", len(s.Sessions), s.Sessions)
+	}
+	if s.Sessions[0].Path != real {
+		t.Errorf("stored path = %q, want the resolved %q", s.Sessions[0].Path, real)
+	}
+	if s.FindByPath(link) == nil {
+		t.Error("FindByPath through the symlink found nothing")
+	}
+}
+
+// TestLoadCollapsesSymlinkDuplicates: installs that already wrote both
+// spellings self-heal on the next load, keeping the most recently active row.
+func TestLoadCollapsesSymlinkDuplicates(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	real, link := symlinkedWorktree(t)
+
+	old := time.Now().Add(-time.Hour)
+	seed := &Store{Sessions: []Session{
+		{ID: "app:b", Repo: "app", Branch: "b", Path: link, Status: StatusActive, StartedAt: old, LastActivityAt: old, Title: "from the symlinked row"},
+		{ID: "app:b", Repo: "app", Branch: "b", Path: real, Status: StatusActive, StartedAt: old, LastActivityAt: time.Now()},
+	}}
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(s.Sessions) != 1 {
+		t.Fatalf("rows = %d, want 1: %+v", len(s.Sessions), s.Sessions)
+	}
+	if s.Sessions[0].Path != real {
+		t.Errorf("surviving path = %q, want %q", s.Sessions[0].Path, real)
+	}
+	if s.Sessions[0].Title != "" {
+		t.Errorf("kept the stale row: title = %q", s.Sessions[0].Title)
+	}
+
+	// The repair reaches disk on the next write, even one that changes nothing.
+	if _, err := Mutate(func(*Store) bool { return false }); err != nil {
+		t.Fatalf("Mutate: %v", err)
+	}
+	data, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chk Store
+	if err := json.Unmarshal(data, &chk); err != nil {
+		t.Fatal(err)
+	}
+	if len(chk.Sessions) != 1 {
+		t.Fatalf("on-disk rows = %d, want 1", len(chk.Sessions))
 	}
 }
