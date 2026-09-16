@@ -184,3 +184,44 @@ func TestCursorSurvivesAThreadDisappearing(t *testing.T) {
 		t.Errorf("cursor = %d, out of range for %d rows", d.cursor, len(d.visibleRows()))
 	}
 }
+
+// Reading the open question in the pane is what replaces a trip into the
+// session, so it has to actually render.
+func TestDetailShowsTheOpenQuestion(t *testing.T) {
+	d := Dashboard{width: 120, height: 40}
+	r := qrow("fix/rounding", claude.StateWaiting, 1)
+	r.Question = "Should I drop the column or keep it nullable?"
+
+	out := d.renderDetail(r, 60)
+	if !strings.Contains(out, "asked") {
+		t.Errorf("no asked block:\n%s", out)
+	}
+	if !strings.Contains(out, "keep it nullable?") {
+		t.Errorf("question text missing:\n%s", out)
+	}
+
+	quiet := qrow("feature/login", claude.StateWorking, 1)
+	if out := d.renderDetail(quiet, 60); strings.Contains(out, "asked") {
+		t.Errorf("asked block shown for a thread with no question:\n%s", out)
+	}
+}
+
+// A long message must not push the rest of the pane off screen, and the tail is
+// the part worth keeping: that is where the question is.
+func TestQuestionLinesKeepsTheTailAndCaps(t *testing.T) {
+	text := strings.Repeat("Some preamble that goes on. ", 40) + "So: option A or option B?"
+
+	got := questionLines(text, 40, questionPaneLines)
+	if len(got) > questionPaneLines {
+		t.Errorf("%d lines, want at most %d", len(got), questionPaneLines)
+	}
+	if !strings.Contains(strings.Join(got, " "), "option A or option B?") {
+		t.Errorf("tail dropped:\n%s", strings.Join(got, "\n"))
+	}
+
+	// Trailing blank lines must not eat the window.
+	padded := questionLines("one line\n\n\n\n\n\n\n\n", 40, questionPaneLines)
+	if len(padded) != 1 || strings.TrimSpace(padded[0]) != "one line" {
+		t.Errorf("padding was not trimmed: %q", padded)
+	}
+}

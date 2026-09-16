@@ -168,6 +168,7 @@ type dashRow struct {
 	Goal          string            // .state.md `goal:` one-liner, shown in the detail pane (ephemeral)
 	Done          []string          // .state.md `done:` items — recent progress (ephemeral)
 	Blocked       string            // .state.md `blocked:` (non-"none"); "" when clear (ephemeral)
+	Question      string            // what the agent last said, only when waiting (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -780,6 +781,15 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 			}
 		}
 	}
+	// The open question, when the thread is waiting. It outranks `next` in
+	// urgency: `next` is the plan, this is what the thread is stopped on right
+	// now, and reading it here is what saves a trip into the session.
+	if r.Question != "" {
+		b.WriteString("\n" + dimStyle.Render("asked") + "\n")
+		for _, ln := range questionLines(r.Question, max(w-2, 8), questionPaneLines) {
+			b.WriteString(dimStyle.Render("▏ ") + lipgloss.NewStyle().Foreground(colorText).Render(ln) + "\n")
+		}
+	}
 	b.WriteString("\n" + dimStyle.Render(strings.Repeat("─", w)) + "\n\n")
 	const labelW = 7
 	row := func(k, v string) {
@@ -820,6 +830,25 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 		}
 	}
 	return lipgloss.NewStyle().Width(w).Render(b.String())
+}
+
+// questionPaneLines caps how much of the agent's last message the detail pane
+// shows. Enough to read a question, not enough to bury the rest of the pane.
+const questionPaneLines = 6
+
+// questionLines wraps text to width and keeps the last max lines, because a
+// question sits at the end of a message, after whatever preceded it.
+func questionLines(text string, width, max int) []string {
+	wrapped := lipgloss.NewStyle().Width(width).Render(strings.TrimSpace(text))
+	lines := strings.Split(wrapped, "\n")
+	// Drop trailing blanks first, or the tail window spends itself on padding.
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > max {
+		lines = lines[len(lines)-max:]
+	}
+	return lines
 }
 
 // glyphRune / glyphStyle / stateGlyph render the live agent state as a small
@@ -1039,7 +1068,8 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			st := worktreeState(sess.Path)
 			row.Next, row.Goal, row.Done, row.Blocked = st.next, st.goal, st.done, st.blocked
 			if useClaude {
-				row.AgentState, _ = claude.Probe(sess.Path)
+				st := claude.Probe(sess.Path)
+				row.AgentState, row.Question = st.State, st.Question
 			}
 			rows = append(rows, row)
 		}
