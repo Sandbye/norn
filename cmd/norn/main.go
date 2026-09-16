@@ -273,15 +273,22 @@ func upsertSessionFromPath(repoRoot, worktreeDir, wtPath string) {
 	if branch == "" {
 		return
 	}
-	kind := "task"
-	if rel, err := filepath.Rel(worktreeDir, wtPath); err == nil {
-		parts := strings.SplitN(rel, string(filepath.Separator), 2)
-		if len(parts) > 0 && (parts[0] == "task" || parts[0] == "review") {
-			kind = parts[0]
-		}
-	}
 	hint := readHintFromWorktreeMD(wtPath)
-	upsertSession(repoRoot, kind, branch, wtPath, hint)
+	upsertSession(repoRoot, worktreeKind(worktreeDir, wtPath), branch, wtPath, hint)
+}
+
+// worktreeKind reads the kind off the layout (<worktree_dir>/<kind>/<branch>).
+// Both operands are canonicalized: wtPath comes back from the session store,
+// which stores resolved paths, while worktree_dir is whatever the config spells.
+func worktreeKind(worktreeDir, wtPath string) string {
+	rel, err := filepath.Rel(paths.Canon(worktreeDir), paths.Canon(wtPath))
+	if err != nil {
+		return "task"
+	}
+	if k, _, ok := strings.Cut(rel, string(filepath.Separator)); ok && (k == "task" || k == "review") {
+		return k
+	}
+	return "task"
 }
 
 func readHintFromWorktreeMD(wtPath string) string {

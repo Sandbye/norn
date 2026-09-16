@@ -56,6 +56,32 @@ func CacheAll() []string {
 }
 
 // Projects is the per-project config dir inside Config.
+// Canon resolves symlinks so one directory has one spelling, whichever way a
+// caller reached it: norn builds a worktree path from worktree_dir and reads the
+// same path back from `git worktree list`, and on macOS /tmp is a symlink to
+// /private/tmp. A path that doesn't exist (yet, or any more) resolves against
+// its deepest existing ancestor.
+func Canon(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	cur, rest := filepath.Clean(p), ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return filepath.Clean(p)
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
 func Projects() string { return filepath.Join(Config(), "projects") }
 
 // Templates is the user template dir inside Config.
