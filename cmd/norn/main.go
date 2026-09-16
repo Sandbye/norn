@@ -229,13 +229,11 @@ func runApp(cfg config.Config, repoRoot string, initialView tui.View) {
 	case tui.ResultLaunch:
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
 		writeCdTarget(result.Path)
-		clearScreen()
-		tui.LaunchAgent(cfg.Agent, result.Path, false, result.Model)
+		handOff(cfg, result.Path, false, result.Model, nil)
 	case tui.ResultResume:
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
 		writeCdTarget(result.Path)
-		clearScreen()
-		tui.LaunchAgent(cfg.Agent, result.Path, true, result.Model)
+		handOff(cfg, result.Path, true, result.Model, nil)
 	case tui.ResultCd:
 		// Parent-shell cd: write the target and exit. The shell wrapper cd's the
 		// current shell into it — no nested subshell. Bump activity so the
@@ -429,8 +427,30 @@ func checkoutBranch(cfg config.Config, repoRoot, branch, templateOverride string
 	upsertSession(repoRoot, "task", branch, wtPath, branch)
 	writeCdTarget(wtPath)
 
+	handOff(cfg, wtPath, false, "", nil)
+}
+
+// handOff ends a create or resume by starting the agent in wtPath. It is the
+// last thing norn does, so it owns the screen clear.
+//
+// With no agent binary there is nothing to hand off to, and clearing the screen
+// then wipes the only line naming the worktree: the user is left with a blank
+// terminal and a worktree they never heard about. So when the agent is missing,
+// keep the screen and say where the work is.
+func handOff(cfg config.Config, wtPath string, resume bool, model string, warnings []string) {
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+	if !tui.AgentAvailable(cfg.Agent) {
+		fmt.Printf("Worktree ready: %s\n", wtPath)
+		fmt.Fprintf(os.Stderr, "note: agent %q is not on PATH, so no session was started.\n", cfg.AgentCommand())
+		return
+	}
 	clearScreen()
-	tui.LaunchAgent(cfg.Agent, wtPath, false, "") // config default model
+	if err := tui.LaunchAgent(cfg.Agent, wtPath, resume, model); err != nil {
+		fmt.Fprintf(os.Stderr, "error: agent %q: %v\n", cfg.AgentCommand(), err)
+	}
+	fmt.Printf("Worktree: %s\n", wtPath)
 }
 
 func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templateOverride string) {
@@ -478,11 +498,7 @@ func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templat
 	upsertSession(repoRoot, kind, branch, wtPath, hint)
 	writeCdTarget(wtPath)
 
-	clearScreen()
-	for _, w := range warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
-	}
-	tui.LaunchAgent(cfg.Agent, wtPath, false, "") // config default model
+	handOff(cfg, wtPath, false, "", warnings)
 }
 
 // runReview handles `norn review <pr#>`: check the PR's head out into a
@@ -540,8 +556,7 @@ func runReview(cfg config.Config, repoRoot string, reviewArgs []string) {
 	upsertSession(repoRoot, "review", branch, wtPath, pr.Title)
 	writeCdTarget(wtPath)
 
-	clearScreen()
-	tui.LaunchAgent(cfg.Agent, wtPath, false, "")
+	handOff(cfg, wtPath, false, "", nil)
 }
 
 // fetchReviewPR resolves the PR fields needed for a review worktree + brief.

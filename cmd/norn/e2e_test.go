@@ -316,3 +316,34 @@ func TestDiffRejectsAnUnresolvableBase(t *testing.T) {
 		t.Errorf("error does not name the bad ref:\n%s", r.stderr)
 	}
 }
+
+// The worst newcomer outcome norn had: with no agent installed, create cleared
+// the screen and scrollback, exited 0, said nothing, and left a worktree the
+// user never heard about. The README calls the agent optional, so this path has
+// to end with the user knowing where the work is.
+func TestCreateWithoutAnAgentSaysWhereTheWorktreeIs(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepo(t)
+	worktrees := filepath.Join(home, "worktrees")
+	write(t, filepath.Join(home, ".config", "norn", "config.yaml"),
+		"worktree_dir: "+worktrees+"\nbase_branches: [main]\nai_naming: false\nagent:\n  command: norn-no-such-agent\n")
+
+	r := runNorn(t, home, repo, "create", "fix payout rounding")
+
+	if r.code != 0 {
+		t.Fatalf("create exited %d, want 0 (the worktree is still real):\n%s", r.code, r.out())
+	}
+	if !strings.Contains(r.stdout, worktrees) {
+		t.Errorf("output never names the worktree path:\n%s", r.out())
+	}
+	if !strings.Contains(r.stderr, "norn-no-such-agent") {
+		t.Errorf("stderr does not say the agent is missing:\n%s", r.stderr)
+	}
+	// ESC[2J clears the screen and ESC[3J the scrollback: doing either here
+	// erases the only line that named the worktree.
+	for _, seq := range []string{"\x1b[2J", "\x1b[3J"} {
+		if strings.Contains(r.stdout, seq) {
+			t.Errorf("cleared the screen with %q despite having no agent to hand off to", seq)
+		}
+	}
+}
