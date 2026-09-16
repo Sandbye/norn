@@ -9,8 +9,9 @@ package claude
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"errors"
+	"fmt"
+	"github.com/sandbye/norn/internal/config"
 	"os/exec"
 	"strings"
 	"time"
@@ -43,8 +44,8 @@ type Options struct {
 	Continue bool
 	// PermissionMode is --permission-mode. Empty means Claude Code's default for
 	// -p, which is Manual: anything that would prompt is denied, because an
-	// unattended run has nobody to ask. Set acceptEdits or auto to let a run
-	// actually change files.
+	// unattended run has nobody to ask. Callers translate a norn grant into
+	// this with PermissionModeFor.
 	PermissionMode string
 }
 
@@ -169,6 +170,69 @@ func buildArgs(prompt string, opts Options) []string {
 // ReplyTimeout is the budget for an inline reply. Generous on purpose: a reply
 // restarts real work, and killing it halfway leaves the thread mid-turn.
 const ReplyTimeout = 15 * time.Minute
+
+// PermissionModeFor translates a norn grant into Claude Code's own flag value.
+// Manual is the empty string, which is already -p's default, so "answer" passes
+// no flag at all.
+//
+//	answer → Manual       anything needing approval is denied
+//	edit   → acceptEdits  writes files; shell still needs an allow rule
+//	act    → auto         a classifier reviews each action instead of you
+func PermissionModeFor(grant string) string {
+	switch config.Grant(grant) {
+	case config.GrantEdit:
+		return "acceptEdits"
+	case config.GrantAct:
+		return "auto"
+	}
+	return ""
+}
+
+// Stop ends a background session so it can be resumed headlessly. Claude Code
+// refuses to resume a session the daemon is still holding, and says so, naming
+// this as the way through.
+func Stop(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, agentsTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "claude", "stop", id).CombinedOutput()
+	if err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("claude stop %s: %s", id, firstLine(msg))
+		}
+		return fmt.Errorf("claude stop %s: %w", id, err)
+	}
+	return nil
+}
+
+// ReplyTo sends one line to a worktree's session, stopping it first when the
+// daemon holds it. Addressing the session by id rather than by --continue is
+// what makes the reply land in the thread on screen instead of a new
+// conversation.
+//
+// live may be absent: a headless reply ends the run, so the daemon stops
+// holding the session and it leaves `claude agents` even though the
+// conversation is still resumable. The transcript keeps the id either way.
+func ReplyTo(ctx context.Context, dir string, live *Session, text, mode string) (Result, error) {
+	id := SessionIDFor(dir)
+	if live != nil {
+		if live.Background() {
+			if err := Stop(ctx, live.ID); err != nil {
+				return Result{}, err
+			}
+		}
+		if live.SessionID != "" {
+			id = live.SessionID
+		}
+	}
+	if id == "" {
+		return Result{}, fmt.Errorf("no session to resume for %s", dir)
+	}
+	return Run(ctx, dir, text, Options{
+		Resume:         id,
+		PermissionMode: mode,
+		Timeout:        ReplyTimeout,
+	})
+}
 
 // Reply continues the worktree's session with one line from the user, headless,
 // so the dashboard can answer a waiting thread without taking over the

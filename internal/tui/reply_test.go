@@ -7,10 +7,30 @@ import (
 	"testing"
 
 	"github.com/sandbye/norn/internal/claude"
+	"github.com/sandbye/norn/internal/config"
 )
 
 // --continue resumes a finished session, not a running one, so offering reply
 // on a working thread would send an answer into a new session instead.
+// seedWaitingThread returns a row that can genuinely be answered: a live
+// worktree with a transcript, in waiting state.
+func seedWaitingThread(t *testing.T) dashRow {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	wt := t.TempDir()
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(wt)
+	if err := os.MkdirAll(filepath.Join(home, "projects", slug), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "projects", slug, "abc.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := qrow("fix/rounding", claude.StateWaiting, 1)
+	r.Path = wt
+	return r
+}
+
 func TestCanReplyOnlyWhenWaiting(t *testing.T) {
 	// A transcript has to exist for the path, because --continue happily starts
 	// a new session when it does not, so canReply checks rather than assumes.
@@ -142,5 +162,207 @@ func TestReplyOutcomeIsReported(t *testing.T) {
 	m, _ = d.Update(replySentMsg{branch: "fix/rounding", err: errReply("boom")})
 	if got := m.(Dashboard).reply.sent; !strings.Contains(got, "failed") || !strings.Contains(got, "boom") {
 		t.Errorf("failure not reported: %q", got)
+	}
+}
+
+// A reply restarts real work and can run for minutes. Without the sent text and
+// a moving spinner, the dashboard reads as hung, which is how it read the first
+// time it was used for real.
+func TestReplyShowsWhatWasSentWhileRunning(t *testing.T) {
+	row := seedWaitingThread(t)
+	d := Dashboard{width: 120, height: 40, rows: groupRows([]dashRow{row})}
+	d.reply = replyState{active: true, text: "option B please", path: row.Path, branch: row.Branch, target: row}
+
+	m, cmd := d.Update(key("enter"))
+	d = m.(Dashboard)
+	if cmd == nil {
+		t.Fatal("enter produced no command")
+	}
+	if d.reply.pending != "option B please" {
+		t.Errorf("pending = %q, want the sent text", d.reply.pending)
+	}
+	if out := d.View(); !strings.Contains(out, "option B please") {
+		t.Errorf("sent text is not on screen:\n%s", out)
+	}
+
+	m, _ = d.Update(replySentMsg{branch: "fix/rounding"})
+	d = m.(Dashboard)
+	if d.reply.pending != "" {
+		t.Errorf("pending not cleared: %q", d.reply.pending)
+	}
+	if !strings.Contains(d.reply.sent, "option B please") {
+		t.Errorf("outcome drops what was sent: %q", d.reply.sent)
+	}
+}
+
+// A pasted paragraph must not reflow the dashboard.
+func TestQuoteOneLine(t *testing.T) {
+	if got := quoteOneLine("yes\n  do   that"); got != `"yes do that"` {
+		t.Errorf("got %s", got)
+	}
+	long := quoteOneLine(strings.Repeat("word ", 40))
+	if n := len([]rune(long)); n > 62 {
+		t.Errorf("%d runes, want it cut", n)
+	}
+	if !strings.HasSuffix(long, `…"`) {
+		t.Errorf("cut is not marked: %s", long[len(long)-10:])
+	}
+}
+
+// App sees keys before Dashboard does, so an input it doesn't know about leaks
+// every app-level key: m jumped to the main checkout mid-word, and 1-5 switched
+// tabs. capturing() is the existing guard; a new input has to register with it.
+func TestAppKeysDoNotLeakWhileReplying(t *testing.T) {
+	a := App{current: ViewThreads, mainDir: "/repo"}
+	a.dashboard.rows = groupRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})
+	a.dashboard.reply = replyState{active: true, path: "/wt/x", branch: "fix/rounding"}
+
+	if !a.capturing() {
+		t.Fatal("capturing() is false while the reply input is open")
+	}
+
+	for _, s := range []string{"m", "1", "5", "q", "?"} {
+		m, _ := a.Update(key(s))
+		a = m.(App)
+		if a.quit {
+			t.Fatalf("key %q quit the app while replying", s)
+		}
+		if a.current != ViewThreads {
+			t.Fatalf("key %q switched tab while replying", s)
+		}
+		if a.showHelp {
+			t.Fatalf("key %q opened help while replying", s)
+		}
+	}
+	if a.dashboard.reply.text != "m15q?" {
+		t.Errorf("text = %q, want the keys typed", a.dashboard.reply.text)
+	}
+}
+
+// claude's own errors run long. A wrapped status line pushes the help row
+// around under the table, which is how the "already running" error looked.
+func TestReplyStatusStaysOneLine(t *testing.T) {
+	d := Dashboard{width: 100, height: 40, rows: groupRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})}
+	d.reply.branch = "fix/rounding" // the line belongs to its thread
+	d.reply.sent = "reply to fix/rounding failed: claude: " + strings.Repeat("a long explanation from claude ", 10)
+
+	out := d.View()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "a long explanation") && len([]rune(line)) > d.width {
+			t.Errorf("status line is %d runes wide, terminal is %d:\n%s", len([]rune(line)), d.width, line)
+		}
+	}
+	if !strings.Contains(out, "…") {
+		t.Errorf("long status was not truncated:\n%s", out)
+	}
+}
+
+// The trap that dropped a user out of norn: i was refused on a non-waiting
+// thread with a dim one-line status, so the keystrokes went to the dashboard
+// instead, where enter means "cd into this worktree and quit".
+func TestRefusedReplyNeverLeavesYouTypingAtTheDashboard(t *testing.T) {
+	row := seedWaitingThread(t)
+	row.AgentState = claude.StateWorking // nothing to answer yet
+
+	a := App{current: ViewThreads, mainDir: "/repo"}
+	a.dashboard.rows = groupRows([]dashRow{row})
+	a.dashboard.cfg = config.Config{Agent: config.AgentConfig{Command: "claude"}}
+
+	m, _ := a.Update(key("i"))
+	a = m.(App)
+	if !a.dashboard.reply.active {
+		t.Fatal("i did not open the input on a working thread")
+	}
+
+	for _, s := range []string{"y", "e", "s"} {
+		m, _ = a.Update(key(s))
+		a = m.(App)
+	}
+	m, _ = a.Update(key("enter"))
+	a = m.(App)
+
+	if a.quit {
+		t.Fatal("enter quit norn instead of refusing the reply")
+	}
+	if !strings.Contains(a.dashboard.reply.sent, "still working") {
+		t.Errorf("refusal not explained: %q", a.dashboard.reply.sent)
+	}
+}
+
+// The permission choice is per reply: "answer this" and "go finish it" are
+// different asks, and only the second grants an unattended run authority.
+// Named in norn's words, since every agent spells this differently.
+func TestReplyGrantCyclesAndIsShown(t *testing.T) {
+	if got := config.GrantAnswer.Next(); got != config.GrantEdit {
+		t.Errorf("answer cycles to %q", got)
+	}
+	if got := config.GrantEdit.Next(); got != config.GrantAct {
+		t.Errorf("edit cycles to %q", got)
+	}
+	if got := config.GrantAct.Next(); got != config.GrantAnswer {
+		t.Errorf("act cycles to %q, want back to answer", got)
+	}
+
+	row := seedWaitingThread(t)
+	a := App{current: ViewThreads}
+	a.dashboard.rows = groupRows([]dashRow{row})
+	a.dashboard.cfg = config.Config{Agent: config.AgentConfig{Command: "claude"}}
+
+	m, _ := a.Update(key("i"))
+	a = m.(App)
+	if a.dashboard.reply.grant != config.GrantAnswer {
+		t.Errorf("input opened at %q, want the weakest grant", a.dashboard.reply.grant)
+	}
+	if out := a.dashboard.View(); !strings.Contains(out, "answer only") {
+		t.Errorf("grant not shown in the prompt:\n%s", out)
+	}
+
+	m, _ = a.Update(key("tab"))
+	a = m.(App)
+	if a.dashboard.reply.grant != config.GrantEdit {
+		t.Errorf("tab did not cycle: %q", a.dashboard.reply.grant)
+	}
+	if out := a.dashboard.View(); !strings.Contains(out, "may edit files") {
+		t.Errorf("cycled grant not shown:\n%s", out)
+	}
+	if a.current != ViewThreads {
+		t.Error("tab switched tab while replying")
+	}
+}
+
+// The config value is the starting point, not a lock.
+func TestReplyModeStartsFromConfig(t *testing.T) {
+	row := seedWaitingThread(t)
+	a := App{current: ViewThreads}
+	a.dashboard.rows = groupRows([]dashRow{row})
+	a.dashboard.cfg = config.Config{
+		Agent:               config.AgentConfig{Command: "claude"},
+		ReplyPermissionMode: "act",
+	}
+
+	m, _ := a.Update(key("i"))
+	a = m.(App)
+	if a.dashboard.reply.grant != config.GrantAct {
+		t.Errorf("grant = %q, want the configured act", a.dashboard.reply.grant)
+	}
+}
+
+// A reply is one thread's business. Showing its spinner while you are looking
+// at another thread says the wrong one is busy.
+func TestReplyLineOnlyShowsOnItsOwnThread(t *testing.T) {
+	rows := groupRows([]dashRow{
+		qrow("fix/rounding", claude.StateWaiting, 1),
+		qrow("feature/login", claude.StateWaiting, 2),
+	})
+	d := Dashboard{width: 100, height: 40, rows: rows}
+	d.reply.branch, d.reply.pending = "fix/rounding", "yes please"
+
+	for i, r := range d.visibleRows() {
+		d.cursor = i
+		out := d.View()
+		onTarget := r.Branch == "fix/rounding"
+		if shown := strings.Contains(out, "yes please"); shown != onTarget {
+			t.Errorf("cursor on %s: pending line shown = %v, want %v", r.Branch, shown, onTarget)
+		}
 	}
 }
