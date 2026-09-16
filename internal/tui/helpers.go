@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -236,6 +237,12 @@ func makeAgentCmd(agent config.AgentConfig, wtPath string, resume bool, model st
 	}
 
 	if resume {
+		// A session the daemon holds cannot be continued: `claude -c` refuses
+		// it and tells you to attach instead. That is the normal state for a
+		// thread norn started and you left, so check before falling back.
+		if s, ok := claude.SessionFor(claude.Sessions(context.Background()), wtPath); ok && s.Background() {
+			return wireStdio(exec.Command("claude", "attach", s.ID), wtPath)
+		}
 		return wireStdio(exec.Command("claude", "-c"), wtPath)
 	}
 
