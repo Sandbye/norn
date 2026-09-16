@@ -32,6 +32,7 @@ var version = "dev"
 // quietCommands are read by tools, not people: their output is parsed or
 // rendered somewhere norn does not control, so nothing else may be written.
 var quietCommands = map[string]bool{
+	"shell-init":      true,
 	"statusline":      true,
 	"brief":           true,
 	"--activity-tick": true,
@@ -2040,10 +2041,15 @@ func upsertSession(repoRoot, kind, branch, wtPath, hint string) {
 // by reading the cd-target file norn writes. Keeping this in the binary (via
 // `eval "$(norn shell-init)"`) means it never drifts out of sync like a
 // hand-copied function does.
-const posixShellInit = `norn() {
-  command norn "$@"
+//
+// The function is named after the binary that printed it, not "norn", so a
+// second build alongside the release one gets its own working wrapper. Named
+// "norn" regardless, a `norn-dev shell-init` would define a function that calls
+// the release binary, and the dev build would silently never cd.
+const posixShellInit = `%[1]s() {
+  command %[1]s "$@"
   local code=$?
-  local t="%s/cd-target-$$"
+  local t="%[2]s/cd-target-$$"
   if [ -f "$t" ]; then
     local d; d=$(cat "$t"); rm -f "$t"
     [ -d "$d" ] && cd "$d"
@@ -2052,10 +2058,10 @@ const posixShellInit = `norn() {
 }
 `
 
-const fishShellInit = `function norn
-  command norn $argv
+const fishShellInit = `function %[1]s
+  command %[1]s $argv
   set -l code $status
-  set -l t "%s/cd-target-"$fish_pid
+  set -l t "%[2]s/cd-target-"$fish_pid
   if test -f "$t"
     set -l d (cat "$t"); rm -f "$t"
     test -d "$d"; and cd "$d"
@@ -2072,13 +2078,27 @@ func cmdShellInit(shell string) {
 	}
 	// The cache dir is baked in resolved, not as $HOME/..., so a legacy install
 	// keeps its own dir and the wrapper can never disagree with writeCdTarget.
-	dir := paths.Cache()
-	switch shell {
-	case "fish":
-		fmt.Printf(fishShellInit, dir)
-	default: // zsh, bash, sh
-		fmt.Printf(posixShellInit, dir)
+	fmt.Print(shellInitScript(shell, binaryName(), paths.Cache()))
+}
+
+// binaryName is the name this build was invoked as, which the wrapper is named
+// after. argv[0] is not always a usable path (a login shell prefixes it with a
+// dash), so fall back rather than emit a broken function name.
+func binaryName() string {
+	name := filepath.Base(os.Args[0])
+	if name == "" || name == "." || name == "/" || strings.HasPrefix(name, "-") {
+		return "norn"
 	}
+	return name
+}
+
+// shellInitScript renders the wrapper. Split out from cmdShellInit so the
+// naming and the baked-in cache dir are testable without a subprocess.
+func shellInitScript(shell, name, cacheDir string) string {
+	if shell == "fish" {
+		return fmt.Sprintf(fishShellInit, name, cacheDir)
+	}
+	return fmt.Sprintf(posixShellInit, name, cacheDir)
 }
 
 // cmdAuth connects an integration via an interactive huh form. `norn auth
