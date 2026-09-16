@@ -24,7 +24,12 @@ func gitRun(t *testing.T, dir string, args ...string) {
 // dropped row, hand-made worktree, or a branch deleted under it. Without this
 // the only view that shows it is Clean, where the only verb is delete.
 func TestAdoptWorktrees(t *testing.T) {
-	dir := t.TempDir()
+	// Resolve the temp dir: the store canonicalizes symlinks, and on macOS
+	// t.TempDir() hands back a path under the /var -> /private/var link.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	main := filepath.Join(dir, "myrepo")
 	if err := os.MkdirAll(main, 0o755); err != nil {
 		t.Fatal(err)

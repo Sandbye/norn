@@ -37,7 +37,9 @@ func Mutate(fn func(*Store) bool) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fn(s) {
+	// s.repaired means Load rewrote a path or dropped a duplicate, so the repair
+	// has to reach disk even when fn changes nothing.
+	if fn(s) || s.repaired {
 		if err := s.Save(); err != nil {
 			return s, err
 		}
