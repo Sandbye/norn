@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"errors"
 	"os/exec"
 	"strings"
 	"time"
@@ -31,6 +32,10 @@ type Options struct {
 	SystemPrompt string        // --append-system-prompt
 	Stdin        string        // piped context (e.g. a diff)
 	Timeout      time.Duration // 0 → 90s default
+	// Resume names a specific session (--resume <id>). Preferred over Continue
+	// when the id is known, since --continue guesses "most recent" and silently
+	// starts a new conversation when it guesses wrong.
+	Resume string
 	// Continue resumes the directory's existing session (--continue) instead of
 	// starting a fresh one. Claude Code will resume a session that has finished
 	// but not one still running, so callers must only set this for a thread
@@ -124,6 +129,15 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error) 
 		if ctx.Err() == context.DeadlineExceeded {
 			return Result{}, fmt.Errorf("claude timed out after %s", timeout)
 		}
+		// claude puts the reason on stderr, and an exit status alone is not
+		// diagnosable: "already running", "not logged in" and "no session to
+		// continue" all surface as exit 1.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if msg := strings.TrimSpace(string(ee.Stderr)); msg != "" {
+				return Result{}, fmt.Errorf("claude: %s", firstLine(msg))
+			}
+		}
 		return Result{}, fmt.Errorf("claude -p failed: %w", err)
 	}
 
@@ -135,7 +149,9 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error) 
 // session instead of answering the one on screen, which no exit code reveals.
 func buildArgs(prompt string, opts Options) []string {
 	args := []string{"-p", prompt, "--output-format", "json"}
-	if opts.Continue {
+	if opts.Resume != "" {
+		args = append(args, "--resume", opts.Resume)
+	} else if opts.Continue {
 		args = append(args, "--continue")
 	}
 	if opts.PermissionMode != "" {
@@ -165,6 +181,15 @@ func Reply(ctx context.Context, dir, text, mode string) (Result, error) {
 		PermissionMode: mode,
 		Timeout:        ReplyTimeout,
 	})
+}
+
+// firstLine keeps a status line to one line: claude's stderr can run long, and
+// this lands in a dashboard footer.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
 }
 
 func parseEnvelope(out []byte) (Result, error) {
