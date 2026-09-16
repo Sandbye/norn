@@ -139,6 +139,7 @@ var (
 	selectedStyle    lipgloss.Style
 	cursorStyle      lipgloss.Style
 	dimStyle         lipgloss.Style
+	taskHeaderStyle  lipgloss.Style
 	ageStyle         lipgloss.Style
 	goneStyle        lipgloss.Style
 	dirtyStyle       lipgloss.Style
@@ -205,6 +206,7 @@ func buildStyles() {
 	selectedStyle = lipgloss.NewStyle().Foreground(colorBlue).Bold(true).PaddingLeft(1)
 	cursorStyle = lipgloss.NewStyle().Foreground(colorTeal).Bold(true)
 	dimStyle = lipgloss.NewStyle().Foreground(colorOverlay)
+	taskHeaderStyle = lipgloss.NewStyle().Foreground(colorTeal)
 	ageStyle = lipgloss.NewStyle().Foreground(colorYellow)
 	goneStyle = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
 

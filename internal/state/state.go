@@ -6,6 +6,8 @@
 package state
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -34,11 +36,29 @@ type Session struct {
 	StartedAt      time.Time `json:"started_at"`
 	LastActivityAt time.Time `json:"last_activity_at"`
 	Blockers       []string  `json:"blockers,omitempty"`
+
+	// TaskID ties this worktree to a Task in the same store; Role is the part it
+	// plays in it ("logic", "assets", …). Both empty for a standalone worktree,
+	// and omitempty so a store written before tasks existed loads unchanged.
+	TaskID string `json:"task_id,omitempty"`
+	Role   string `json:"role,omitempty"`
+}
+
+// Task is one piece of work split across several worktrees. Every Session
+// carrying its ID is one role thread of it. Trunk is the integrating role's
+// branch: role branches merge into it, and only it opens a PR.
+type Task struct {
+	ID        string    `json:"id"`
+	Repo      string    `json:"repo"`
+	Goal      string    `json:"goal,omitempty"`
+	Trunk     string    `json:"trunk"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Store is the on-disk session list, loaded into memory.
 type Store struct {
 	Sessions []Session `json:"sessions"`
+	Tasks    []Task    `json:"tasks,omitempty"`
 
 	// repaired records that Load rewrote paths or dropped duplicates, so
 	// Mutate persists the repair even when its fn changes nothing.
@@ -170,6 +190,10 @@ func (s *Store) Upsert(sess Session) *Session {
 		if len(sess.Blockers) == 0 {
 			sess.Blockers = existing.Blockers
 		}
+		if sess.TaskID == "" {
+			sess.TaskID = existing.TaskID
+			sess.Role = existing.Role
+		}
 		*existing = sess
 		return existing
 	}
@@ -221,6 +245,10 @@ func (s *Store) UpsertByPath(sess Session) *Session {
 		}
 		if len(sess.Blockers) == 0 {
 			sess.Blockers = existing.Blockers
+		}
+		if sess.TaskID == "" {
+			sess.TaskID = existing.TaskID
+			sess.Role = existing.Role
 		}
 		*existing = sess
 		return existing
@@ -304,4 +332,114 @@ func (s *Store) SortByActivity() {
 // MakeID builds the canonical session id from repo + branch.
 func MakeID(repo, branch string) string {
 	return repo + ":" + branch
+}
+
+// NewTaskID mints an opaque task id. Opaque, not derived from repo+trunk: the
+// trunk branch can be renamed, and a derived id would dangle on every session
+// row pointing at it.
+func NewTaskID() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// FindTask returns the task with the matching id, or nil.
+func (s *Store) FindTask(id string) *Task {
+	for i := range s.Tasks {
+		if s.Tasks[i].ID == id {
+			return &s.Tasks[i]
+		}
+	}
+	return nil
+}
+
+// FindTaskByTrunk returns the task owning the given trunk branch in the given
+// repo, or nil. This is the lookup for "does a task already exist for this
+// branch", since the id is opaque.
+func (s *Store) FindTaskByTrunk(repo, trunk string) *Task {
+	for i := range s.Tasks {
+		if s.Tasks[i].Repo == repo && s.Tasks[i].Trunk == trunk {
+			return &s.Tasks[i]
+		}
+	}
+	return nil
+}
+
+// UpsertTask inserts or updates a task by id, minting one when the caller left
+// it empty. Fields the caller didn't set are preserved, same contract as
+// UpsertByPath.
+func (s *Store) UpsertTask(t Task) *Task {
+	if t.ID == "" {
+		t.ID = NewTaskID()
+	}
+	if existing := s.FindTask(t.ID); existing != nil {
+		if t.Goal == "" {
+			t.Goal = existing.Goal
+		}
+		if t.Trunk == "" {
+			t.Trunk = existing.Trunk
+		}
+		if t.Repo == "" {
+			t.Repo = existing.Repo
+		}
+		if t.CreatedAt.IsZero() {
+			t.CreatedAt = existing.CreatedAt
+		}
+		*existing = t
+		return existing
+	}
+	if t.CreatedAt.IsZero() {
+		t.CreatedAt = time.Now()
+	}
+	s.Tasks = append(s.Tasks, t)
+	return &s.Tasks[len(s.Tasks)-1]
+}
+
+// SessionsForTask returns the rows belonging to a task, in store order.
+func (s *Store) SessionsForTask(id string) []Session {
+	if id == "" {
+		return nil
+	}
+	var out []Session
+	for _, sess := range s.Sessions {
+		if sess.TaskID == id {
+			out = append(out, sess)
+		}
+	}
+	return out
+}
+
+// PruneTasks drops tasks no session points at any more, and clears a TaskID
+// that points at no task. Both halves matter: the dashboard prunes rows whose
+// worktree is gone, which would otherwise leave a task header over nothing.
+// Returns the number of changes made, so a Mutate caller can report dirty.
+func (s *Store) PruneTasks() int {
+	live := map[string]bool{}
+	for _, sess := range s.Sessions {
+		if sess.TaskID != "" {
+			live[sess.TaskID] = true
+		}
+	}
+	known := map[string]bool{}
+	out := s.Tasks[:0]
+	removed := 0
+	for _, t := range s.Tasks {
+		if !live[t.ID] {
+			removed++
+			continue
+		}
+		known[t.ID] = true
+		out = append(out, t)
+	}
+	s.Tasks = out
+	for i := range s.Sessions {
+		if id := s.Sessions[i].TaskID; id != "" && !known[id] {
+			s.Sessions[i].TaskID = ""
+			s.Sessions[i].Role = ""
+			removed++
+		}
+	}
+	return removed
 }
