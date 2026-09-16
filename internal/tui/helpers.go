@@ -301,11 +301,25 @@ func fitCell(s string, w int) string {
 	return s + strings.Repeat(" ", w-len(r))
 }
 
-// LaunchAgent runs the configured agent in the worktree and blocks until it exits.
-// LaunchAgent runs the coding agent in wtPath. model overrides the config
-// default for this launch (empty → default); ignored on resume and non-claude.
-func LaunchAgent(agent config.AgentConfig, wtPath string, resume bool, model string) {
-	makeAgentCmd(agent, wtPath, resume, model).Run()
+// AgentAvailable reports whether the configured agent binary is on PATH.
+// Creating a worktree succeeds with or without it, so the caller has to know
+// which it is: handing off to a missing binary clears the screen and leaves
+// the user with a blank terminal and a worktree they were never told about.
+func AgentAvailable(agent config.AgentConfig) bool {
+	command := agent.Command
+	if command == "" {
+		command = "claude"
+	}
+	_, err := exec.LookPath(command)
+	return err == nil
+}
+
+// LaunchAgent runs the coding agent in wtPath and blocks until it exits. model
+// overrides the config default for this launch (empty → default); ignored on
+// resume and non-claude. The error is returned rather than swallowed: a failure
+// to start is invisible otherwise, because the screen was just cleared for it.
+func LaunchAgent(agent config.AgentConfig, wtPath string, resume bool, model string) error {
+	return makeAgentCmd(agent, wtPath, resume, model).Run()
 }
 
 // LaunchAgentPrompt runs the agent in wtPath with prompt as its next message,
