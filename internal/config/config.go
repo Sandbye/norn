@@ -77,6 +77,12 @@ type Config struct {
 	// and simply don't run for other agents.
 	Agent AgentConfig `yaml:"agent,omitempty" json:"agent,omitempty"`
 
+	// Roles names the parts a task splits into and which agent serves each,
+	// for work handed to several agents at once. Exactly one role integrates
+	// the others' output. See roles.go. Empty for a repo that runs one agent,
+	// which keeps `agent:` above the only thing that decides what launches.
+	Roles Roles `yaml:"roles,omitempty" json:"roles,omitempty"`
+
 	// Theme selects the TUI color palette: "nord" (default) or "frog".
 	Theme string `yaml:"theme,omitempty" json:"theme,omitempty"`
 
@@ -253,6 +259,10 @@ func Load(repoRoot string) (Config, error) {
 	// Expand ~ in worktree_dir
 	if strings.HasPrefix(cfg.WorktreeDir, "~/") {
 		cfg.WorktreeDir = filepath.Join(home, cfg.WorktreeDir[2:])
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return cfg, err
 	}
 
 	return cfg, nil
