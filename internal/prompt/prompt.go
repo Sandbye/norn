@@ -39,6 +39,7 @@ func DataFields() []string {
 		".Verify (commands)  .Setup (setup command)",
 		".Base (fork branch)  .PRBase (PR target)  .BranchFormat",
 		".HintBlock  .Kind  .Generated",
+		".Role.Name / .Role.Integrates / .Role.Trunk / .Role.Siblings (nil unless split)",
 		"funcs: plus1 · default · upper · lower · join",
 	}
 }
@@ -50,6 +51,22 @@ type TaskRef struct {
 	Title       string
 	URL         string
 	Description string
+}
+
+// RoleRef is the part one worktree plays in a task split across several of
+// them. Only set when the repo declares roles and the create picked more than
+// one, so a lone worktree renders exactly the brief it always did.
+type RoleRef struct {
+	Name string
+	// Integrates marks the role that owns the trunk: the others merge into it
+	// and only it opens the PR.
+	Integrates bool
+	// Trunk is the branch this role merges into (its own branch when it
+	// integrates).
+	Trunk string
+	// Siblings are the other roles in the same task, so a brief can say what is
+	// being built in parallel and therefore is not this worktree's to touch.
+	Siblings []string
 }
 
 // PRRef is the pull request a review worktree is checked out to, baked into the
@@ -76,7 +93,8 @@ type Data struct {
 	// platform's actual shape instead of a hardcoded one that drifts.
 	BranchFormat string
 	Task         *TaskRef
-	PR           *PRRef // set for review worktrees (norn review <pr#>)
+	Role         *RoleRef // set for one thread of a task split across roles
+	PR           *PRRef   // set for review worktrees (norn review <pr#>)
 	Generated    string
 }
 
@@ -105,7 +123,7 @@ func branchFormat(cfg config.Config) string {
 	return git.DefaultBranchFormat
 }
 
-func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef) (string, error) {
+func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef, role *RoleRef) (string, error) {
 	if tmpl == "" {
 		tmpl = kind
 	}
@@ -123,6 +141,7 @@ func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef) 
 		PRBase:       cfg.PRBase,
 		BranchFormat: branchFormat(cfg),
 		Task:         taskRef,
+		Role:         role,
 		Generated:    time.Now().Format("2006-01-02 15:04"),
 	}
 

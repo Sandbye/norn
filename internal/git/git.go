@@ -431,34 +431,63 @@ func ExcludeLocalMeta(wtPath string) {
 	}
 }
 
+// CreateOutcome reports what a create did, so a caller assembling several
+// worktrees for one task knows which of them it owns and may unwind. A reused
+// branch or worktree is someone else's, and unwinding it would delete work the
+// failed create never made.
+type CreateOutcome struct {
+	Path        string
+	NewBranch   bool
+	NewWorktree bool
+	// Pushed records that the new branch reached origin, so an unwind knows it
+	// has a remote ref to delete too. The push is best-effort, so this is the
+	// only way to tell "never pushed" from "pushed and now orphaned".
+	Pushed bool
+}
+
+// CreateWorktree cuts `branch` off origin/<base> and checks it out. It is
+// CreateWorktreeFrom with a remote start ref, which is what a trunk (or a plain
+// single-worktree task) forks from.
 func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) {
+	out, err := CreateWorktreeFrom(repoRoot, worktreeDir, branch, base, true)
+	return out.Path, err
+}
+
+// CreateWorktreeFrom cuts `branch` at `startRef` and checks it out at
+// <worktreeDir>/<branch>. remoteStart says startRef names a branch on origin
+// that has to be fetched first; a role branch forks from a trunk cut seconds
+// ago, which exists locally and nowhere else, so it passes false.
+func CreateWorktreeFrom(repoRoot, worktreeDir, branch, startRef string, remoteStart bool) (CreateOutcome, error) {
 	wtPath := filepath.Join(worktreeDir, branch)
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
-		return "", err
+		return CreateOutcome{}, err
 	}
 
 	// Reuse a dropped-but-not-deleted thread: dropping only delists a session,
 	// so the branch + its worktree survive on disk. Re-create then means reuse.
 	if existing := WorktreePathForBranch(repoRoot, branch); existing != "" {
 		ExcludeLocalMeta(existing)
-		return existing, nil
+		return CreateOutcome{Path: existing}, nil
 	}
 	// Branch exists but isn't checked out anywhere (worktree removed, branch
 	// kept) → attach a fresh worktree to it rather than colliding on `-b`.
 	if BranchExists(repoRoot, branch) {
 		if err := cmdRun(repoRoot, "git", "worktree", "add", wtPath, branch); err != nil {
-			return "", fmt.Errorf("worktree add (existing branch) failed: %w", err)
+			return CreateOutcome{}, fmt.Errorf("worktree add (existing branch) failed: %w", err)
 		}
 		ExcludeLocalMeta(wtPath)
-		return wtPath, nil
+		return CreateOutcome{Path: wtPath, NewWorktree: true}, nil
 	}
 
-	if err := cmdRun(repoRoot, "git", "fetch", "origin", base, "--quiet"); err != nil {
-		return "", fmt.Errorf("fetch failed: %w", err)
+	if remoteStart {
+		if err := cmdRun(repoRoot, "git", "fetch", "origin", startRef, "--quiet"); err != nil {
+			return CreateOutcome{}, fmt.Errorf("fetch failed: %w", err)
+		}
+		startRef = "origin/" + startRef
 	}
 
-	if err := cmdRun(repoRoot, "git", "worktree", "add", "-b", branch, wtPath, "origin/"+base); err != nil {
-		return "", fmt.Errorf("worktree add failed: %w", err)
+	if err := cmdRun(repoRoot, "git", "worktree", "add", "-b", branch, wtPath, startRef); err != nil {
+		return CreateOutcome{}, fmt.Errorf("worktree add failed: %w", err)
 	}
 
 	// Push the empty branch immediately so origin tracks it from day one.
@@ -467,10 +496,30 @@ func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) 
 	// failures don't block worktree creation (offline / auth issues happen).
 	// Silent on failure (offline / auth): printing here would leak under the
 	// TUI, and the branch works locally until the next push.
-	_ = cmdRun(wtPath, "git", "push", "-u", "origin", branch, "--quiet")
+	pushed := cmdRun(wtPath, "git", "push", "-u", "origin", branch, "--quiet") == nil
 
 	ExcludeLocalMeta(wtPath)
-	return wtPath, nil
+	return CreateOutcome{Path: wtPath, NewBranch: true, NewWorktree: true, Pushed: pushed}, nil
+}
+
+// DiscardNewWorktree undoes a CreateWorktreeFrom that a later step in the same
+// create failed after. `git branch -D` is safe here and nowhere else: the
+// branch was cut seconds ago by the call being unwound, so there is nothing on
+// it to lose. Best-effort and silent — the caller is already reporting the
+// failure that sent it here, and a second error on top of it helps nobody.
+func DiscardNewWorktree(repoRoot string, out CreateOutcome, branch string) {
+	if out.NewWorktree && out.Path != "" {
+		_, _ = captureRun(repoRoot, "git", "worktree", "remove", "--force", out.Path)
+		_, _ = captureRun(repoRoot, "git", "worktree", "prune")
+	}
+	if out.NewBranch && branch != "" {
+		_, _ = captureRun(repoRoot, "git", "branch", "-D", branch)
+		if out.Pushed {
+			// The create pushed it seconds ago to give the dashboard a remote to
+			// look at; leaving it there is the same orphan as the local branch.
+			_, _ = captureRun(repoRoot, "git", "push", "origin", "--delete", branch, "--quiet")
+		}
+	}
 }
 
 // FetchPRHead fetches a pull request's head commit into a local branch,

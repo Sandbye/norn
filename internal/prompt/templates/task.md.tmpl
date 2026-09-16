@@ -8,6 +8,10 @@ url: {{.Task.URL}}
 {{- end}}
 {{- end}}
 base: {{.Base}}
+{{- if .Role}}
+role: {{.Role.Name}}
+trunk: {{.Role.Trunk}}
+{{- end}}
 created: {{.Generated}}
 ---
 
@@ -28,9 +32,27 @@ _Provided above — no need to re-fetch it._
 
 {{.HintBlock}}
 {{end}}
+{{- if .Role}}
+## Your role: {{.Role.Name}}
+
+This task is split across several worktrees, one per role. You own the **{{.Role.Name}}** part of it and nothing else.
+{{if .Role.Integrates}}
+You are the integrating role. The other roles work on their own branches off `{{.Role.Trunk}}` and merge back into it. This worktree is the trunk checkout, and it is the only one that opens a PR.
+{{- else}}
+Your branch merges into `{{.Role.Trunk}}`. Do not open a PR: the integrating role does that once every role has merged.
+{{- end}}
+{{- if .Role.Siblings}}
+
+Worked in parallel right now, so not yours to touch: {{join .Role.Siblings " · "}}.
+{{- end}}
+
+{{end}}
 ## This worktree
 
 - Forked from `{{.Base}}` — diff your work with `git diff {{.Base}}...HEAD`.
+{{- if and .Role (not .Role.Integrates)}}
+- Merges into `{{.Role.Trunk}}`, not into `{{.PRBase | default .Base}}`.
+{{- end}}
 {{- if and .PRBase (ne .PRBase .Base)}}
 - Branches from `{{.Base}}`, but PRs target `{{.PRBase}}`.
 {{- end}}

@@ -38,6 +38,11 @@ type createModel struct {
 	template     string
 	models       []string
 	model        string
+	// roles are the repo's declared roles; pickedRoles is what this create
+	// splits across. Both empty in a repo that declares none, and the form drops
+	// the field entirely then.
+	roles       []string
+	pickedRoles []string
 
 	// The New-tab form (hint + base + template + model) is a huh form. It's
 	// rebuilt when seeding from a task (the hint field is dropped then).
@@ -96,6 +101,14 @@ func (m *createModel) buildForm() *huh.Form {
 		fields = append(fields, huh.NewSelect[string]().Key("model").
 			Title("Model").Options(modelOptions(m.models)...))
 	}
+	// One role is not a split, so the picker only shows where there is a second
+	// role to pick. The integrating role is added back by the create itself, so
+	// it is not in the list: it is not a choice.
+	if opts := roleOptions(m.roles); len(opts) > 0 {
+		fields = append(fields, huh.NewMultiSelect[string]().Key("roles").
+			Title("Split across roles").Description("none = one worktree").
+			Options(opts...))
+	}
 	return huh.NewForm(huh.NewGroup(fields...)).
 		WithShowHelp(true).WithWidth(m.formWidth()).WithTheme(nornHuhTheme())
 }
@@ -126,6 +139,13 @@ func (m *createModel) readForm() {
 	if len(m.models) > 0 {
 		m.model = m.form.GetString("model") // "" (default) is a valid choice
 	}
+	if len(m.roles) > 1 {
+		// Comma-ok: the field is only in the form when there are roles to pick,
+		// and a panic here would take the whole TUI down over a missing select.
+		if picked, ok := m.form.Get("roles").([]string); ok {
+			m.pickedRoles = picked
+		}
+	}
 }
 
 // startCreating latches the confirm so the create fires exactly once, and puts
@@ -151,6 +171,17 @@ func (m createModel) createFailed() createModel {
 // task-seeded create with one base and no choices has nothing left to show.
 func (m createModel) hasFormFields() bool {
 	return !m.seeded || len(m.baseBranches) > 1 || len(m.templates) > 1 || len(m.models) > 0
+}
+
+// roleOptions lists the roles a create may pick. Empty for a repo with fewer
+// than two roles, which is what makes the field disappear there.
+func roleOptions(roles []string) []huh.Option[string] {
+	if len(roles) < 2 {
+		return nil
+	}
+	// RoleNames puts the integrating role first; it owns the trunk either way,
+	// so offering it as a choice would suggest a split without one is possible.
+	return huh.NewOptions(roles[1:]...)
 }
 
 func modelOptions(models []string) []huh.Option[string] {
