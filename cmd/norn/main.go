@@ -1164,6 +1164,15 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 	var ref, target string
 	if baseOverride != "" {
 		ref = baseOverride
+		// An unresolvable base has to fail here. Left to the git calls below it
+		// fails silently: they error, their output is empty, and an empty diff
+		// prints as "no committed changes" — so a typo'd or unfetched base
+		// answers "you are shipping nothing", which is the most dangerous wrong
+		// answer this command can give.
+		if !refExists(repoRoot, ref) {
+			fmt.Fprintf(os.Stderr, "error: base %q does not resolve to a ref\n(fetch it first, or check the spelling)\n", ref)
+			os.Exit(1)
+		}
 		// For display purposes, strip a leading `origin/` so the header shows
 		// just the branch name.
 		target = strings.TrimPrefix(baseOverride, "origin/")
@@ -1192,7 +1201,14 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 	commitCountRaw, _ := gitOutput(repoRoot, "git", "rev-list", "--count", ref+"..HEAD")
 	commitCount, _ := strconv.Atoi(strings.TrimSpace(commitCountRaw))
 
-	numstat, _ := gitOutput(repoRoot, "git", "diff", "--numstat", ref+"...HEAD")
+	// Same reasoning as the base check: a failed diff must not read as a clean
+	// one. Unrelated histories have no merge base, so this can still fail with
+	// a ref that resolves.
+	numstat, nerr := gitOutput(repoRoot, "git", "diff", "--numstat", ref+"...HEAD")
+	if nerr != nil {
+		fmt.Fprintf(os.Stderr, "error: could not diff against %s: %v\n", ref, nerr)
+		os.Exit(1)
+	}
 	files := parseNumstat(numstat)
 
 	if len(files) == 0 {

@@ -285,3 +285,34 @@ func gitOut(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// diff's whole job is answering "what am I about to ship". A base that does not
+// resolve used to answer "nothing", with exit 0, because the underlying git
+// calls failed quietly and an empty diff prints as a clean branch.
+func TestDiffRejectsAnUnresolvableBase(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepo(t)
+	testConfig(t, home, filepath.Join(home, "worktrees"))
+
+	gitRun(t, repo, "checkout", "-q", "-b", "fix/rounding")
+	write(t, filepath.Join(repo, "ledger.go"), "package ledger\n")
+	gitRun(t, repo, "add", "ledger.go")
+	gitRun(t, repo, "commit", "-q", "-m", "add ledger")
+
+	// Sanity: against a real base the commit shows up. Without this the test
+	// would pass on a repo that simply has nothing to diff.
+	if r := runNorn(t, home, repo, "diff", "--plain", "--base", "main"); r.code != 0 || !strings.Contains(r.stdout, "ledger.go") {
+		t.Fatalf("known base: exit %d, want the commit in the diff:\n%s", r.code, r.out())
+	}
+
+	r := runNorn(t, home, repo, "diff", "--plain", "--base", "does-not-exist")
+	if r.code == 0 {
+		t.Errorf("unknown base exited 0:\n%s", r.out())
+	}
+	if strings.Contains(r.out(), "No committed changes") {
+		t.Errorf("unknown base reported a clean branch:\n%s", r.out())
+	}
+	if !strings.Contains(r.stderr, "does-not-exist") {
+		t.Errorf("error does not name the bad ref:\n%s", r.stderr)
+	}
+}
