@@ -29,6 +29,15 @@ import (
 // -ldflags "-X main.version=...". "dev" for local builds.
 var version = "dev"
 
+// quietCommands are read by tools, not people: their output is parsed or
+// rendered somewhere norn does not control, so nothing else may be written.
+var quietCommands = map[string]bool{
+	"statusline":      true,
+	"brief":           true,
+	"--activity-tick": true,
+	"--cd":            true,
+}
+
 func main() {
 	repoRoot, _ := git.RepoRoot()
 	cfg, err := config.Load(repoRoot)
@@ -41,7 +50,12 @@ func main() {
 
 	// A legacy-path install should hear about it wherever norn ran, so this
 	// lands after the TUI's alt screen is gone and after a command's output.
+	// Machine surfaces are exempt: statusline runs on every render, and a
+	// notice repeated hundreds of times a session is noise, not a warning.
 	defer func() {
+		if len(os.Args) > 1 && quietCommands[os.Args[1]] {
+			return
+		}
 		if n := paths.Notice(); n != "" {
 			fmt.Fprint(os.Stderr, "\n"+n)
 		}
@@ -83,6 +97,9 @@ func main() {
 			default:
 				cmdTemplates(cfg)
 			}
+			return
+		case "statusline":
+			cmdStatusline()
 			return
 		case "shell-init":
 			shell := ""
@@ -2340,6 +2357,7 @@ Usage:
   norn template edit [name]  Customize a template in $EDITOR (default: task)
   norn auth [provider]    Connect an integration (ClickUp, …) for the task picker
   norn shell-init [shell]  Print the cd wrapper: eval "$(norn shell-init zsh)"
+  norn statusline          Render the thread's state card for Claude Code's status bar
   norn diff               TUI diff of the whole branch: fork base → HEAD
                           (every commit since the branch was created, pushed or not)
   norn diff -w, --working  Just current uncommitted changes (working tree)

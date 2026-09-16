@@ -102,6 +102,35 @@ notify: true   # default; set false for silence
 
 Agent state is read from Claude Code's local session transcripts, so this is Claude-only and simply doesn't run for other agents.
 
+### Re-entry: status bar and resume
+
+Coming back to a thread is the expensive part, and it is expensive twice: you rebuild "where was I", and then the agent rebuilds it too by reading files while you watch the tokens go. Two small pieces fix each half.
+
+**Status bar.** `norn statusline` renders the thread's card for Claude Code's status line: branch, context use, the `next` action from `.state.md`, and anything blocking it. It runs locally and the model never sees it, so it costs no tokens.
+
+```json
+{
+  "statusLine": { "type": "command", "command": "norn statusline" }
+}
+```
+
+Note that configuring any custom status line makes Claude Code drop most of its footer keyboard hints, `esc to interrupt` among them.
+
+**Resume.** Hand the same file to the model once, at session start, instead of letting it rediscover:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "resume",
+        "hooks": [{ "type": "command", "command": "cat .state.md 2>/dev/null" }] }
+    ]
+  }
+}
+```
+
+Hook stdout on `SessionStart` is added to the model's context, charged once for the session. `.state.md` is already the shape for this: goal, next action, blocker, and the decisions a later session would otherwise re-derive. norn's dashboard reads the same file, so the TUI, your status bar and the agent all resume from one source.
+
 ### Templates
 
 Each worktree gets a `.worktree.md` brief from a template. norn ships `task` and `review`; drop your own in `~/.config/norn/templates/<name>.md.tmpl` to shadow a built-in.
