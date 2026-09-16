@@ -45,23 +45,47 @@ type tailRecord struct {
 	Timestamp time.Time `json:"timestamp"`
 	Message   struct {
 		StopReason string `json:"stop_reason"`
+		// Content blocks are a mixed list (text, thinking, tool_use); only the
+		// text ones carry what the agent actually said to the user.
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
 	} `json:"message"`
 }
 
-// Probe returns the live agent state for a worktree and the timestamp of its
-// last transcript activity. Returns StateUnknown (and zero time) when there's no
-// readable transcript. Never errors — a missing/odd signal is just "unknown".
-func Probe(worktreePath string) (AgentState, time.Time) {
+// questionMax caps the text kept from the last message. It exists to bound
+// memory across many worktrees, not to fit any particular pane.
+const questionMax = 2000
+
+// Status is everything one read of a worktree's transcript can tell us.
+type Status struct {
+	State AgentState
+	Last  time.Time // timestamp of the last transcript activity
+	// Question is what the agent last said, and is set only when it is waiting.
+	// Mid-turn text is a progress note, not something to answer, so surfacing
+	// it would invite a reply to a thread that is still working.
+	Question string
+}
+
+// Probe returns the live status for a worktree. Returns a zero Status (state
+// unknown) when there is no readable transcript. Never errors: a missing or odd
+// signal is just "unknown".
+func Probe(worktreePath string) Status {
 	f := newestTranscript(filepath.Join(projectsDir(), slugFor(worktreePath)))
 	if f == "" {
-		return StateUnknown, time.Time{}
+		return Status{}
 	}
 	data, err := tailBytes(f, tailBytesN)
 	if err != nil {
-		return StateUnknown, time.Time{}
+		return Status{}
 	}
-	state, ts := parseTail(data)
-	return resolve(state, ts, time.Now()), ts
+	state, ts, text := parseTail(data)
+	st := Status{State: resolve(state, ts, time.Now()), Last: ts}
+	if st.State == StateWaiting {
+		st.Question = text
+	}
+	return st
 }
 
 // HasSession reports whether a worktree has a transcript Claude can continue,
@@ -86,7 +110,7 @@ func resolve(state AgentState, ts, now time.Time) AgentState {
 // parseTail walks transcript-tail bytes from the end and maps the last
 // message-bearing record to a base state (before the idle overlay). Pure and
 // deterministic, so it's unit-testable without touching ~/.claude.
-func parseTail(data []byte) (AgentState, time.Time) {
+func parseTail(data []byte) (AgentState, time.Time, string) {
 	lines := bytes.Split(data, []byte{'\n'})
 	if len(lines) > 1 {
 		lines = lines[1:] // drop the first, likely-partial line
@@ -102,16 +126,32 @@ func parseTail(data []byte) (AgentState, time.Time) {
 		}
 		switch r.Type {
 		case "assistant":
-			return assistantState(r.Message.StopReason), r.Timestamp
+			return assistantState(r.Message.StopReason), r.Timestamp, assistantText(r)
 		case "user":
 			// A user record is either a tool_result being fed back (mid loop) or
 			// a fresh human turn — either way the agent is about to act.
-			return StateWorking, r.Timestamp
+			return StateWorking, r.Timestamp, ""
 		default:
 			continue // attachment / ai-title / agent-name / system, etc.
 		}
 	}
-	return StateUnknown, time.Time{}
+	return StateUnknown, time.Time{}, ""
+}
+
+// assistantText joins the record's text blocks, skipping thinking and tool_use.
+// Trailing text is what a question ends with, so the cap keeps the tail.
+func assistantText(r tailRecord) string {
+	var parts []string
+	for _, c := range r.Message.Content {
+		if c.Type == "text" && strings.TrimSpace(c.Text) != "" {
+			parts = append(parts, strings.TrimSpace(c.Text))
+		}
+	}
+	text := strings.TrimSpace(strings.Join(parts, "\n\n"))
+	if runes := []rune(text); len(runes) > questionMax {
+		return "…" + string(runes[len(runes)-questionMax:])
+	}
+	return text
 }
 
 func assistantState(stop string) AgentState {

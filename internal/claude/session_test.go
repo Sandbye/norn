@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,7 +35,7 @@ func TestParseTail(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, _ := parseTail([]byte(c.data))
+			got, _, _ := parseTail([]byte(c.data))
 			if got != c.want {
 				t.Errorf("parseTail = %q, want %q", got, c.want)
 			}
@@ -76,5 +77,69 @@ func TestSlugFor(t *testing.T) {
 	}
 	if got := slugFor("/Users/x/worktrees/feature/foo.bar"); got != "-Users-x-worktrees-feature-foo-bar" {
 		t.Errorf("slugFor with dot = %q", got)
+	}
+}
+
+// The dashboard's reason for reading the transcript at all is to save a trip
+// into the session, so it needs what the agent actually asked, not just that it
+// stopped.
+func TestParseTailReturnsTheLastAssistantText(t *testing.T) {
+	const rec = `{"type":"assistant","timestamp":"2026-09-16T09:00:00Z","message":{"stop_reason":"end_turn","content":[` +
+		`{"type":"thinking","text":"internal reasoning nobody asked for"},` +
+		`{"type":"text","text":"Should I drop the column or keep it nullable?"}]}}`
+
+	state, _, text := parseTail([]byte("partial\n" + rec))
+	if state != StateWaiting {
+		t.Errorf("state = %q, want waiting", state)
+	}
+	if text != "Should I drop the column or keep it nullable?" {
+		t.Errorf("text = %q", text)
+	}
+	if strings.Contains(text, "internal reasoning") {
+		t.Errorf("thinking block leaked into the question: %q", text)
+	}
+}
+
+// Mid-turn text is a progress note, not something to answer. Offering it as a
+// question would invite a reply to a thread that is still working.
+func TestProbeOnlyReportsAQuestionWhenWaiting(t *testing.T) {
+	cases := []struct {
+		name, stop string
+		want       bool
+	}{
+		{"end_turn carries the question", "end_turn", true},
+		{"tool_use does not", "tool_use", false},
+	}
+	for _, c := range cases {
+		rec := `{"type":"assistant","timestamp":"` + time.Now().UTC().Format(time.RFC3339) +
+			`","message":{"stop_reason":"` + c.stop + `","content":[{"type":"text","text":"mid sentence"}]}}`
+		state, ts, text := parseTail([]byte("partial\n" + rec))
+		st := Status{State: resolve(state, ts, time.Now()), Last: ts}
+		if st.State == StateWaiting {
+			st.Question = text
+		}
+		if got := st.Question != ""; got != c.want {
+			t.Errorf("%s: question present = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// A long message is capped from the end, since that is where a question lands.
+func TestAssistantTextKeepsTheTail(t *testing.T) {
+	var r tailRecord
+	r.Message.Content = []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}{{Type: "text", Text: strings.Repeat("filler ", 1000) + "FINAL QUESTION?"}}
+
+	got := assistantText(r)
+	if len([]rune(got)) > questionMax+1 {
+		t.Errorf("text is %d runes, over the cap", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "FINAL QUESTION?") {
+		t.Errorf("tail was dropped, ends with: %q", got[len(got)-min(40, len(got)):])
+	}
+	if !strings.HasPrefix(got, "…") {
+		t.Errorf("truncation is not marked: %q", got[:20])
 	}
 }

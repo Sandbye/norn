@@ -102,6 +102,20 @@ notify: true   # default; set false for silence
 
 Agent state is read from Claude Code's local session transcripts, so this is Claude-only and simply doesn't run for other agents.
 
+### Answering a thread without entering it
+
+Most waiting threads need one word: yes, the second option, go ahead. Paying a full context switch for one word is the cost this removes. Press `i` on a waiting thread, type the answer, press `⏎`. norn sends it to that thread's existing session with `claude -p --continue`, so nothing takes over your terminal and the thread flips back to working on the next refresh.
+
+Only a thread that is actually waiting can be answered. Claude Code resumes a session that has finished but not one that is still running, so answering a working thread would open a new session instead of continuing the one on screen.
+
+By default the reply runs under Claude Code's `-p` permissions, which is Manual: a tool that would normally ask you is denied, because nobody is watching to approve it. The agent is told so and reports back. That is fine for answering a question, and not enough for a reply that should go on to change files. To allow that:
+
+```yaml
+reply_permission_mode: acceptEdits   # or auto; default is Manual
+```
+
+That grants an unattended run authority over your files, which is why it is off unless you ask for it.
+
 ### Re-entry: status bar and resume
 
 Coming back to a thread is the expensive part, and it is expensive twice: you rebuild "where was I", and then the agent rebuilds it too by reading files while you watch the tokens go. Two small pieces fix each half.

@@ -76,6 +76,9 @@ type Dashboard struct {
 	// first load, which seeds it without notifying: a thread that was already
 	// waiting when norn started is not news.
 	agentSeen map[string]claude.AgentState
+
+	// reply is the inline answer to a waiting thread.
+	reply replyState
 }
 
 // needsUser reports whether a state is one the user has to act on.
@@ -168,6 +171,7 @@ type dashRow struct {
 	Goal          string            // .state.md `goal:` one-liner, shown in the detail pane (ephemeral)
 	Done          []string          // .state.md `done:` items — recent progress (ephemeral)
 	Blocked       string            // .state.md `blocked:` (non-"none"); "" when clear (ephemeral)
+	Question      string            // what the agent last said, only when waiting (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -272,6 +276,30 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 
+		// Reply input: while open, letters type into the reply, so it is checked
+		// before the filter and before any action key.
+		if d.reply.active {
+			switch s {
+			case "esc":
+				d.reply.active, d.reply.text = false, ""
+				return d, nil
+			case "enter":
+				text := strings.TrimSpace(d.reply.text)
+				if text == "" {
+					d.reply.active = false
+					return d, nil
+				}
+				path, branch := d.reply.path, d.reply.branch
+				d.reply.active, d.reply.text = false, ""
+				d.reply.sent = "sending to " + branch + "…"
+				return d, replyCmd(path, branch, text, d.cfg.ReplyPermissionMode)
+			}
+			if d.reply.handleKey(s) {
+				return d, nil
+			}
+			return d, nil
+		}
+
 		// Filter input: printable/backspace/esc edit the query. While filtering,
 		// letters type into the query, so navigation uses arrows/ctrl+n+p and
 		// the action letters (r/a/p/t/d) are paused until esc.
@@ -317,6 +345,23 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.quit = true
 					d.result = Result{Action: ResultCd, Path: row.Path}
 					return d, tea.Quit
+				}
+			}
+		case "i":
+			// Answer the focused thread without entering it. Gated on waiting:
+			// see canReply.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				switch {
+				case !d.cfg.HeadlessClaude() || !claude.Available():
+					d.reply.sent = "reply needs the claude CLI"
+				case canReply(row):
+					d.reply.active = true
+					d.reply.text = ""
+					d.reply.path, d.reply.branch = row.Path, row.Branch
+					d.reply.sent = ""
+				default:
+					d.reply.sent = "only a waiting thread can be answered"
 				}
 			}
 		case "o":
@@ -391,9 +436,36 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.markFrame++
 		return d, markTick()
 
+	case replySentMsg:
+		switch {
+		case msg.err != nil:
+			d.reply.sent = "reply to " + msg.branch + " failed: " + msg.err.Error()
+		default:
+			d.reply.sent = "answered " + msg.branch
+		}
+		// The thread has moved: it was waiting, now it is working again.
+		return d, d.loadCmd()
+
 	case dashLoadedMsg:
+		// The cursor is an index, but the user is pointing at a thread. Rows
+		// reorder on every tick now that they group by state, and a thread that
+		// flips to waiting jumps the whole list, so without this the cursor
+		// quietly lands on someone else's thread mid-keystroke.
+		selected := ""
+		if prev := d.visibleRows(); d.cursor >= 0 && d.cursor < len(prev) {
+			selected = prev[d.cursor].Path
+		}
+
 		d.rows = msg.rows
 		d.lastLoad = time.Now()
+		if selected != "" {
+			for i, r := range d.visibleRows() {
+				if r.Path == selected {
+					d.cursor = i
+					break
+				}
+			}
+		}
 		if d.agentSeen == nil {
 			d.agentSeen = seedAgentStates(d.rows)
 		} else {
@@ -550,6 +622,14 @@ func (d Dashboard) View() string {
 	body := lipgloss.NewStyle().Height(bodyH).Render(
 		lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", detail))
 
+	// Reply line above the help: the input while open, otherwise the outcome of
+	// the last one, so a failure does not vanish on the next tick.
+	if d.reply.active {
+		body += "\n\n" + cursorStyle.Render("reply "+d.reply.branch+" ▸ ") + d.reply.text + cursorStyle.Render("▏")
+	} else if d.reply.sent != "" {
+		body += "\n\n" + dimStyle.Render(d.reply.sent)
+	}
+
 	// Filter line above the help.
 	if d.filter.active || d.filter.query != "" {
 		fl := cursorStyle.Render("/") + d.filter.query
@@ -599,21 +679,91 @@ func (d Dashboard) renderHeader() string {
 	return hero + "\n\n" + ident
 }
 
-// renderSidebar lists the threads (state glyph + branch + a right-aligned age),
-// cursor highlighted, scrolled to keep the cursor visible. The age carries
-// glanceable recency so the left rail reads as a live index, not a bare list.
+// Thread groups. The rail is a queue, not a log: what needs you sits at the
+// top, what is running below it, what is quiet last. Ordering by group beats
+// ordering by recency here, because recency does not tell you where to go next.
+const (
+	groupNeedsYou = iota
+	groupWorking
+	groupQuiet
+)
+
+var groupLabels = map[int]string{
+	groupNeedsYou: "NEEDS YOU",
+	groupWorking:  "WORKING",
+	groupQuiet:    "QUIET",
+}
+
+// threadGroup buckets a row by its live agent state. idle and unknown share a
+// bucket: both mean "nothing is happening here", and splitting them would put a
+// header above a single row for no gain.
+func threadGroup(r dashRow) int {
+	switch {
+	case needsUser(r.AgentState):
+		return groupNeedsYou
+	case r.AgentState == claude.StateWorking:
+		return groupWorking
+	default:
+		return groupQuiet
+	}
+}
+
+// groupRows orders rows by group, keeping each group's existing order (activity,
+// most recent first). Returns a new slice: the caller's order is a view, and the
+// header gauge reads the same slice.
+func groupRows(rows []dashRow) []dashRow {
+	out := make([]dashRow, len(rows))
+	copy(out, rows)
+	sort.SliceStable(out, func(i, j int) bool {
+		return threadGroup(out[i]) < threadGroup(out[j])
+	})
+	return out
+}
+
+// sidebarLine is one rendered row of the rail. row indexes into vis, or is -1
+// for a group header, which is display only and never selectable.
+type sidebarLine struct {
+	text string
+	row  int
+}
+
+// renderSidebar lists the threads (state glyph + branch + a right-aligned age)
+// under a header per group, cursor highlighted, scrolled to keep the cursor
+// visible. The age carries glanceable recency so the left rail reads as a live
+// index, not a bare list.
+//
+// Scrolling windows over rendered lines rather than rows, because the group
+// headers take vertical space too: windowing over rows would let the cursor
+// slide off the bottom by as many lines as there are headers on screen.
 func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
-	lines := []string{dimStyle.Render(fitCell("THREADS", w))}
-	listH := max(h-len(lines), 3)
-	start, end := scrollWindow(d.cursor, len(vis), listH)
 	const ageW = 3
 	branchW := max(w-ageW-3, 4) // glyph + two spaces + age column
-	for i := start; i < end; i++ {
-		r := vis[i]
+
+	// With no live state at all (a non-claude agent, or no transcript yet) every
+	// row is quiet, and a "QUIET" header over the whole list says nothing. Fall
+	// back to the plain rail in that case.
+	grouped := false
+	for _, r := range vis {
+		if threadGroup(r) != groupQuiet {
+			grouped = true
+			break
+		}
+	}
+
+	var all []sidebarLine
+	lastGroup := -1
+	if !grouped {
+		all = append(all, sidebarLine{dimStyle.Render(fitCell("THREADS", w)), -1})
+	}
+	for i, r := range vis {
+		if g := threadGroup(r); grouped && g != lastGroup {
+			all = append(all, sidebarLine{dimStyle.Render(fitCell(groupLabels[g], w)), -1})
+			lastGroup = g
+		}
 		age := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt))
 		if i == d.cursor {
 			plain := glyphRune(r.AgentState) + " " + fitCell(r.Branch, branchW) + " " + age
-			lines = append(lines, lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(fitCell(plain, w)))
+			all = append(all, sidebarLine{lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(fitCell(plain, w)), i})
 			continue
 		}
 		branch := fitCell(r.Branch, branchW)
@@ -625,9 +775,27 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		default:
 			branch = dimStyle.Render(branch)
 		}
-		lines = append(lines, stateGlyph(r.AgentState)+" "+branch+" "+dimStyle.Render(age))
+		all = append(all, sidebarLine{stateGlyph(r.AgentState) + " " + branch + " " + dimStyle.Render(age), i})
 	}
-	if len(vis) > listH {
+	if len(all) == 0 {
+		return dimStyle.Render(fitCell("THREADS", w))
+	}
+
+	// Window over display lines, anchored on the cursor's own line.
+	cursorLine := 0
+	for i, l := range all {
+		if l.row == d.cursor {
+			cursorLine = i
+		}
+	}
+	listH := max(h-1, 3) // 1 for the counter below
+	start, end := scrollWindow(cursorLine, len(all), listH)
+
+	lines := make([]string, 0, listH+1)
+	for _, l := range all[start:end] {
+		lines = append(lines, l.text)
+	}
+	if len(all) > listH {
 		lines = append(lines, dimStyle.Render(fmt.Sprintf("  %d/%d", d.cursor+1, len(vis))))
 	}
 	return strings.Join(lines, "\n")
@@ -675,6 +843,15 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 			}
 		}
 	}
+	// The open question, when the thread is waiting. It outranks `next` in
+	// urgency: `next` is the plan, this is what the thread is stopped on right
+	// now, and reading it here is what saves a trip into the session.
+	if r.Question != "" {
+		b.WriteString("\n" + dimStyle.Render("asked") + "\n")
+		for _, ln := range questionLines(r.Question, max(w-2, 8), questionPaneLines) {
+			b.WriteString(dimStyle.Render("▏ ") + lipgloss.NewStyle().Foreground(colorText).Render(ln) + "\n")
+		}
+	}
 	b.WriteString("\n" + dimStyle.Render(strings.Repeat("─", w)) + "\n\n")
 	const labelW = 7
 	row := func(k, v string) {
@@ -715,6 +892,25 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 		}
 	}
 	return lipgloss.NewStyle().Width(w).Render(b.String())
+}
+
+// questionPaneLines caps how much of the agent's last message the detail pane
+// shows. Enough to read a question, not enough to bury the rest of the pane.
+const questionPaneLines = 6
+
+// questionLines wraps text to width and keeps the last max lines, because a
+// question sits at the end of a message, after whatever preceded it.
+func questionLines(text string, width, max int) []string {
+	wrapped := lipgloss.NewStyle().Width(width).Render(strings.TrimSpace(text))
+	lines := strings.Split(wrapped, "\n")
+	// Drop trailing blanks first, or the tail window spends itself on padding.
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > max {
+		lines = lines[len(lines)-max:]
+	}
+	return lines
 }
 
 // glyphRune / glyphStyle / stateGlyph render the live agent state as a small
@@ -784,8 +980,11 @@ func (d Dashboard) dashKeyHelp() string {
 	if d.filter.active {
 		return dimStyle.Render("type to filter · ↑/↓ or ctrl+n/p move · ⏎ cd · o open · esc clear")
 	}
+	if d.reply.active {
+		return dimStyle.Render("type your answer · ⏎ send · ctrl+u clear · esc cancel")
+	}
 	// Concise essentials; the full keymap lives in the global `?` help overlay.
-	return dimStyle.Render("⏎ cd · o open · m main · ? help")
+	return dimStyle.Render("⏎ cd · o open · i answer · m main · ? help")
 }
 
 func openPRInBrowser(branch, repoDir string) {
@@ -934,11 +1133,12 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			st := worktreeState(sess.Path)
 			row.Next, row.Goal, row.Done, row.Blocked = st.next, st.goal, st.done, st.blocked
 			if useClaude {
-				row.AgentState, _ = claude.Probe(sess.Path)
+				st := claude.Probe(sess.Path)
+				row.AgentState, row.Question = st.State, st.Question
 			}
 			rows = append(rows, row)
 		}
-		return dashLoadedMsg{rows: rows}
+		return dashLoadedMsg{rows: groupRows(rows)}
 	}
 }
 
