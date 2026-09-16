@@ -216,7 +216,7 @@ func (a App) Init() tea.Cmd {
 func (a App) capturing() bool {
 	switch a.current {
 	case ViewThreads:
-		return a.dashboard.filter.active || a.dashboard.showSummary
+		return a.dashboard.filter.active || a.dashboard.showSummary || a.dashboard.reply.active
 	case ViewTasks:
 		return a.tasks.filter.active || a.tasks.confirming
 	case ViewCreate:

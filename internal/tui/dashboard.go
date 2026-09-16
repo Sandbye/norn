@@ -247,6 +247,11 @@ func (d Dashboard) Init() tea.Cmd {
 		d.loadCmd(),
 		tea.Tick(5*time.Second, func(t time.Time) tea.Msg { return dashTickMsg(t) }),
 		markTick(),
+		// Restart the spinner: leaving the tab ends its tick chain, because only
+		// the active view is delegated messages, and coming back to a frozen
+		// spinner reads as a hung reply. The handler stops it again when nothing
+		// is pending, so this costs one tick when idle.
+		d.spinner.Tick,
 	)
 }
 
@@ -283,16 +288,26 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				d.reply.active, d.reply.text = false, ""
 				return d, nil
+			case "tab":
+				d.reply.grant = d.reply.grant.Next()
+				return d, nil
 			case "enter":
 				text := strings.TrimSpace(d.reply.text)
 				if text == "" {
 					d.reply.active = false
 					return d, nil
 				}
+				if why := replyRefusal(d.reply.target); why != "" {
+					d.reply.active, d.reply.text = false, ""
+					d.reply.sent = why
+					return d, nil
+				}
 				path, branch := d.reply.path, d.reply.branch
 				d.reply.active, d.reply.text = false, ""
-				d.reply.sent = "sending to " + branch + "…"
-				return d, replyCmd(path, branch, text, d.cfg.ReplyPermissionMode)
+				// Keep the sent text on screen: it is the only record of your own
+				// half of the exchange, since the pane only ever shows the agent's.
+				d.reply.pending, d.reply.sent = text, ""
+				return d, tea.Batch(replyCmd(path, branch, text, d.reply.grant), d.spinner.Tick)
 			}
 			if d.reply.handleKey(s) {
 				return d, nil
@@ -352,17 +367,19 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// see canReply.
 			if d.cursor < len(vis) {
 				row := vis[d.cursor]
-				switch {
-				case !d.cfg.HeadlessClaude() || !claude.Available():
+				if !d.cfg.HeadlessClaude() || !claude.Available() {
 					d.reply.sent = "reply needs the claude CLI"
-				case canReply(row):
-					d.reply.active = true
-					d.reply.text = ""
-					d.reply.path, d.reply.branch = row.Path, row.Branch
-					d.reply.sent = ""
-				default:
-					d.reply.sent = "only a waiting thread can be answered"
+					break
 				}
+				// Open the input whatever the thread's state. Refusing here left
+				// the user typing into the dashboard without noticing, where
+				// enter means "cd and quit": the check belongs at send time.
+				d.reply.active = true
+				d.reply.text = ""
+				d.reply.path, d.reply.branch = row.Path, row.Branch
+				d.reply.sent = ""
+				d.reply.target = row
+				d.reply.grant = d.cfg.ReplyGrant()
 			}
 		case "o":
 			// Open (launch/resume) the agent in the worktree.
@@ -437,11 +454,13 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return d, markTick()
 
 	case replySentMsg:
+		sent := d.reply.pending
+		d.reply.pending = ""
 		switch {
 		case msg.err != nil:
 			d.reply.sent = "reply to " + msg.branch + " failed: " + msg.err.Error()
 		default:
-			d.reply.sent = "answered " + msg.branch
+			d.reply.sent = "answered " + msg.branch + ": " + quoteOneLine(sent)
 		}
 		// The thread has moved: it was waiting, now it is working again.
 		return d, d.loadCmd()
@@ -527,6 +546,11 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case spinner.TickMsg:
+		if d.reply.pending != "" {
+			var cmd tea.Cmd
+			d.spinner, cmd = d.spinner.Update(msg)
+			return d, cmd
+		}
 		if d.summarizing {
 			var cmd tea.Cmd
 			d.spinner, cmd = d.spinner.Update(msg)
@@ -625,9 +649,17 @@ func (d Dashboard) View() string {
 	// Reply line above the help: the input while open, otherwise the outcome of
 	// the last one, so a failure does not vanish on the next tick.
 	if d.reply.active {
-		body += "\n\n" + cursorStyle.Render("reply "+d.reply.branch+" ▸ ") + d.reply.text + cursorStyle.Render("▏")
-	} else if d.reply.sent != "" {
-		body += "\n\n" + dimStyle.Render(d.reply.sent)
+		body += "\n\n" + cursorStyle.Render("reply "+d.reply.branch+" ▸ ") + d.reply.text + cursorStyle.Render("▏") +
+			dimStyle.Render("   ["+d.reply.grant.Label()+"]")
+	} else if d.reply.pending != "" && d.onReplyTarget(vis) {
+		// A reply restarts real work, so this can run for minutes. Show the
+		// spinner and the text, or it reads as a hang. Only while the cursor is
+		// on that thread: it is that thread's state, not the dashboard's.
+		body += "\n\n" + d.spinner.View() + dimStyle.Render(" "+d.reply.branch+" ▸ ") + quoteOneLine(d.reply.pending)
+	} else if d.reply.sent != "" && d.onReplyTarget(vis) {
+		// One line: claude's own errors run long, and a wrapped status pushes the
+		// help line around under the table.
+		body += "\n\n" + dimStyle.Render(truncate(d.reply.sent, max(avail-2, 20)))
 	}
 
 	// Filter line above the help.
@@ -981,7 +1013,7 @@ func (d Dashboard) dashKeyHelp() string {
 		return dimStyle.Render("type to filter · ↑/↓ or ctrl+n/p move · ⏎ cd · o open · esc clear")
 	}
 	if d.reply.active {
-		return dimStyle.Render("type your answer · ⏎ send · ctrl+u clear · esc cancel")
+		return dimStyle.Render("type your answer · ⏎ send · ⇥ permission · ctrl+u clear · esc cancel")
 	}
 	// Concise essentials; the full keymap lives in the global `?` help overlay.
 	return dimStyle.Render("⏎ cd · o open · i answer · m main · ? help")
