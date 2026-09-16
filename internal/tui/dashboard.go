@@ -172,6 +172,8 @@ type dashRow struct {
 	Done          []string          // .state.md `done:` items — recent progress (ephemeral)
 	Blocked       string            // .state.md `blocked:` (non-"none"); "" when clear (ephemeral)
 	Question      string            // what the agent last said, only when waiting (ephemeral)
+	TaskGoal      string            // owning task's goal, "" when standalone (ephemeral)
+	TaskTrunk     string            // owning task's trunk branch (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -743,13 +745,72 @@ func threadGroup(r dashRow) int {
 // groupRows orders rows by group, keeping each group's existing order (activity,
 // most recent first). Returns a new slice: the caller's order is a view, and the
 // header gauge reads the same slice.
+//
+// A task's role worktrees move as one cluster: they stay adjacent, and the
+// cluster sits in its most urgent member's bucket. Otherwise one waiting role
+// would sit in NEEDS YOU with its siblings three headers down, and the task
+// would read as unrelated threads again.
 func groupRows(rows []dashRow) []dashRow {
-	out := make([]dashRow, len(rows))
-	copy(out, rows)
-	sort.SliceStable(out, func(i, j int) bool {
-		return threadGroup(out[i]) < threadGroup(out[j])
+	groups, lead := clusterGroups(rows)
+	type keyed struct {
+		row     dashRow
+		group   int
+		cluster int // original index of the cluster's first row; own index when standalone
+		seq     int
+	}
+	keys := make([]keyed, len(rows))
+	for i, r := range rows {
+		k := keyed{row: r, group: groups[i], cluster: i, seq: i}
+		if r.TaskID != "" {
+			k.cluster = lead[r.TaskID]
+		}
+		keys[i] = k
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		if keys[i].group != keys[j].group {
+			return keys[i].group < keys[j].group
+		}
+		if keys[i].cluster != keys[j].cluster {
+			return keys[i].cluster < keys[j].cluster
+		}
+		return keys[i].seq < keys[j].seq
 	})
+	out := make([]dashRow, len(keys))
+	for i, k := range keys {
+		out[i] = k.row
+	}
 	return out
+}
+
+// clusterGroups returns each row's effective group and, per task, the index of
+// its first row. A standalone row's effective group is its own; a task row's is
+// the most urgent among its siblings, so every row of a task reports the same
+// one. Ordering and the rail's headers both read this, or a header would land
+// in the middle of a cluster.
+func clusterGroups(rows []dashRow) ([]int, map[string]int) {
+	bucket := map[string]int{}
+	lead := map[string]int{}
+	for i, r := range rows {
+		if r.TaskID == "" {
+			continue
+		}
+		g := threadGroup(r)
+		if b, seen := bucket[r.TaskID]; !seen || g < b {
+			bucket[r.TaskID] = g
+		}
+		if _, seen := lead[r.TaskID]; !seen {
+			lead[r.TaskID] = i
+		}
+	}
+	groups := make([]int, len(rows))
+	for i, r := range rows {
+		if r.TaskID != "" {
+			groups[i] = bucket[r.TaskID]
+			continue
+		}
+		groups[i] = threadGroup(r)
+	}
+	return groups, lead
 }
 
 // sidebarLine is one rendered row of the rail. row indexes into vis, or is -1
@@ -774,9 +835,10 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 	// With no live state at all (a non-claude agent, or no transcript yet) every
 	// row is quiet, and a "QUIET" header over the whole list says nothing. Fall
 	// back to the plain rail in that case.
+	groups, _ := clusterGroups(vis)
 	grouped := false
-	for _, r := range vis {
-		if threadGroup(r) != groupQuiet {
+	for _, g := range groups {
+		if g != groupQuiet {
 			grouped = true
 			break
 		}
@@ -784,21 +846,39 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 
 	var all []sidebarLine
 	lastGroup := -1
+	lastTask := ""
 	if !grouped {
 		all = append(all, sidebarLine{dimStyle.Render(fitCell("THREADS", w)), -1})
 	}
 	for i, r := range vis {
-		if g := threadGroup(r); grouped && g != lastGroup {
+		if g := groups[i]; grouped && g != lastGroup {
 			all = append(all, sidebarLine{dimStyle.Render(fitCell(groupLabels[g], w)), -1})
 			lastGroup = g
+			lastTask = "" // a cluster split by the filter re-labels under its new header
 		}
+		// One header per task cluster, its rows indented under it. Standalone
+		// rows take neither, so they render exactly as before.
+		indent := ""
+		if r.TaskID != "" {
+			if r.TaskID != lastTask {
+				label := taskLabel(r)
+				all = append(all, sidebarLine{taskHeaderStyle.Render(fitCell("◈ "+label, w)), -1})
+			}
+			indent = "  "
+		}
+		lastTask = r.TaskID
+		name := r.Branch
+		if r.Role != "" {
+			name = r.Role // under a task header the role is the distinguishing part
+		}
+		nameW := max(branchW-len(indent), 4)
 		age := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt))
 		if i == d.cursor {
-			plain := glyphRune(r.AgentState) + " " + fitCell(r.Branch, branchW) + " " + age
+			plain := indent + glyphRune(r.AgentState) + " " + fitCell(name, nameW) + " " + age
 			all = append(all, sidebarLine{lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(fitCell(plain, w)), i})
 			continue
 		}
-		branch := fitCell(r.Branch, branchW)
+		branch := fitCell(name, nameW)
 		switch {
 		case r.DetachedAt != "":
 			branch = dirtyStyle.Render(branch) // branch deleted under the worktree
@@ -807,7 +887,7 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		default:
 			branch = dimStyle.Render(branch)
 		}
-		all = append(all, sidebarLine{stateGlyph(r.AgentState) + " " + branch + " " + dimStyle.Render(age), i})
+		all = append(all, sidebarLine{indent + stateGlyph(r.AgentState) + " " + branch + " " + dimStyle.Render(age), i})
 	}
 	if len(all) == 0 {
 		return dimStyle.Render(fitCell("THREADS", w))
@@ -831,6 +911,19 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		lines = append(lines, dimStyle.Render(fmt.Sprintf("  %d/%d", d.cursor+1, len(vis))))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// taskLabel names a task cluster in the rail: its goal, falling back to the
+// trunk branch when the task carries no goal yet.
+func taskLabel(r dashRow) string {
+	switch {
+	case r.TaskGoal != "":
+		return r.TaskGoal
+	case r.TaskTrunk != "":
+		return r.TaskTrunk
+	default:
+		return "task"
+	}
 }
 
 // compactAge is shortAge trimmed for the sidebar's narrow age column ("now"
@@ -911,6 +1004,10 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 	wrapRow("blocked", r.Blocked, dirtyStyle)
 	row("pr", prDetail(r))
 	row("last", shortAge(r.LastActivityAt))
+	if r.TaskID != "" {
+		row("task", taskLabel(r))
+		row("role", r.Role)
+	}
 	row("kind", r.Kind)
 	row("cu", r.ClickUpID)
 
@@ -1109,6 +1206,9 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			})
 			store.DedupeByPath()
 			changed := len(store.Sessions) != before
+			// Pruning rows can orphan a task, which would leave a header over
+			// no threads.
+			changed = store.PruneTasks() > 0 || changed
 
 			// Adopt worktrees that exist on disk but have no row: a session dropped
 			// with `d`, a worktree made by hand, or a store that lost the entry. The
@@ -1157,6 +1257,9 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				continue
 			}
 			row := dashRow{Session: sess, WorktreeAlive: true}
+			if task := store.FindTask(sess.TaskID); task != nil {
+				row.TaskGoal, row.TaskTrunk = task.Goal, task.Trunk
+			}
 			if git.CurrentBranch(sess.Path) == "" {
 				// Branch deleted under the worktree: label the sha so the row
 				// still reads, and skip the PR lookup (there's no ref to ask about).
