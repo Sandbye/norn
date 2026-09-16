@@ -65,8 +65,10 @@ func (r *Roles) UnmarshalYAML(node *yaml.Node) error {
 
 // UnmarshalYAML accepts `agent: <command>` as shorthand for `command:`, since a
 // role block reads as "which agent serves this role". The full AgentConfig keys
-// (command, args, model) work unchanged, and an explicit `command` wins. Keys
-// the block omits keep whatever an earlier config file set.
+// (command, args, model) work unchanged. A block spelling both is rejected
+// rather than resolved silently, because a precedence rule nobody reads is how
+// you end up launching an agent you did not pick. Keys the block omits keep
+// whatever an earlier config file set.
 func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 	v := struct {
 		Agent      string   `yaml:"agent"`
@@ -77,6 +79,9 @@ func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 	}{Args: r.Args, Model: r.Model, Integrates: r.Integrates}
 	if err := node.Decode(&v); err != nil {
 		return err
+	}
+	if v.Command != "" && v.Agent != "" {
+		return fmt.Errorf("line %d: role sets both `agent:` and `command:`, so use one of them", node.Line)
 	}
 	command := v.Command
 	if command == "" {

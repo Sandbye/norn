@@ -108,7 +108,7 @@ roles:
     integrates: true
 ```
 
-Each role takes the same keys as `agent:` (`command`, `args`, `model`), with `agent:` as shorthand for `command:`. Exactly one role sets `integrates: true`: it is the one that merges the others' work. A config with none, or with two, fails to load and the error names the roles.
+Each role takes the same keys as `agent:` (`command`, `args`, `model`), with `agent:` as shorthand for `command:`; a role spelling both is rejected rather than one silently winning. Exactly one role sets `integrates: true`: it is the one that merges the others' work. A config with none, or with two, fails to load and the error names the roles.
 
 Roles layer per field like every other key, so a personal `~/.config/norn/projects/<repo>.yaml` can point one role at a different agent without restating the rest. A repo that declares no roles is unaffected: `agent:` stays the only thing deciding what launches.
 

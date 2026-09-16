@@ -48,12 +48,13 @@ func TestRolesParse(t *testing.T) {
 	}
 }
 
-// An explicit `command:` wins over the `agent:` shorthand rather than the map
-// order deciding it.
-func TestRoleCommandBeatsAgentShorthand(t *testing.T) {
-	cfg := loadRoles(t, "roles:\n  logic:\n    agent: codex\n    command: claude\n")
-	if got := cfg.Roles["logic"].Command; got != "claude" {
-		t.Errorf("command = %q, want claude", got)
+// `agent:` is shorthand for `command:`, so a block spelling both is rejected
+// rather than one of them silently winning.
+func TestRoleRejectsBothSpellings(t *testing.T) {
+	cfg := DefaultConfig()
+	err := UnmarshalYAML([]byte("roles:\n  logic:\n    agent: codex\n    command: claude\n"), &cfg)
+	if err == nil || !strings.Contains(err.Error(), "use one of them") {
+		t.Fatalf("err = %v, want one naming the clash", err)
 	}
 }
 
