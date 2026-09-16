@@ -92,6 +92,26 @@ agent:
 
 With `claude`, norn injects the task brief via `--append-system-prompt` and resumes with `-c`. Any other agent is launched in the worktree directory, where the generated `.worktree.md` carries the brief. Thread summaries and AI branch naming are Claude-only and simply don't run otherwise.
 
+### Roles
+
+One task can be split across several agents, and the parts have names you already think in. `roles:` declares them and says which agent serves each:
+
+```yaml
+roles:
+  logic:
+    agent: claude
+  assets:
+    agent: codex
+    model: gpt-5
+  integration:
+    agent: claude
+    integrates: true
+```
+
+Each role takes the same keys as `agent:` (`command`, `args`, `model`), with `agent:` as shorthand for `command:`; a role spelling both is rejected rather than one silently winning. Exactly one role sets `integrates: true`: it is the one that merges the others' work. A config with none, or with two, fails to load and the error names the roles.
+
+Roles layer per field like every other key, so a personal `~/.config/norn/projects/<repo>.yaml` can point one role at a different agent without restating the rest. A repo that declares no roles is unaffected: `agent:` stays the only thing deciding what launches.
+
 ### Notifications
 
 A thread that finishes its turn is waiting on you, and with a dozen running you want to be told rather than to watch. On each dashboard refresh norn pings when a thread flips into `waiting`: a terminal bell, plus a desktop notification (`osascript` on macOS, `notify-send` on Linux) where one is available. Once per flip, never repeated while the state holds, and never for a thread that was already waiting when norn started.
