@@ -188,6 +188,15 @@ git clone https://github.com/sandbye/norn && cd norn
 go build ./... && go test ./...
 ```
 
+To try a change without replacing your installed norn, build it under another name. The shell wrapper is named after the binary, so the second build gets a working `⏎` of its own:
+
+```sh
+go build -o ~/go/bin/norn-dev ./cmd/norn
+eval "$(norn-dev shell-init zsh)"
+```
+
+Both builds share `~/.config/norn` and the session store, so `norn-dev` shows the same threads.
+
 Conventional Commits, focused changes. Good first PRs: themes, templates, agent presets.
 
 ## Support

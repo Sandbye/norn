@@ -347,3 +347,43 @@ func TestCreateWithoutAnAgentSaysWhereTheWorktreeIs(t *testing.T) {
 		}
 	}
 }
+
+// A second build alongside the release one is the normal way to try a change,
+// so it has to get a wrapper that calls itself. Also: shell-init's stdout is
+// eval'd by the shell, so nothing else may ever be written to it.
+func TestShellInitUnderADifferentBinaryName(t *testing.T) {
+	home := t.TempDir()
+	// A legacy install is the case that used to print a migration notice into
+	// the eval'd output.
+	write(t, filepath.Join(home, ".config", "work", "config.yaml"), "theme: nord\n")
+
+	dev := filepath.Join(t.TempDir(), "norn-dev")
+	data, err := os.ReadFile(binary(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dev, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(dev, "shell-init", "zsh")
+	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_STATE_HOME=")
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("shell-init: %v\n%s", err, stderr.String())
+	}
+
+	if !strings.HasPrefix(stdout.String(), "norn-dev() {") {
+		t.Errorf("wrapper is not named after the binary:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "command norn \"$@\"") {
+		t.Errorf("wrapper calls the release binary:\n%s", stdout.String())
+	}
+	// Everything on stdout gets eval'd, so a stray notice would be run as shell.
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if strings.Contains(line, "still reads the old") || strings.HasPrefix(line, "mv ") {
+			t.Errorf("migration notice reached the eval'd output: %q", line)
+		}
+	}
+}
