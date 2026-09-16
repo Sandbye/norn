@@ -31,6 +31,16 @@ type Options struct {
 	SystemPrompt string        // --append-system-prompt
 	Stdin        string        // piped context (e.g. a diff)
 	Timeout      time.Duration // 0 → 90s default
+	// Continue resumes the directory's existing session (--continue) instead of
+	// starting a fresh one. Claude Code will resume a session that has finished
+	// but not one still running, so callers must only set this for a thread
+	// that is waiting.
+	Continue bool
+	// PermissionMode is --permission-mode. Empty means Claude Code's default for
+	// -p, which is Manual: anything that would prompt is denied, because an
+	// unattended run has nobody to ask. Set acceptEdits or auto to let a run
+	// actually change files.
+	PermissionMode string
 }
 
 // envelope mirrors the JSON shape documented at code.claude.com/docs/en/headless.
@@ -103,15 +113,7 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error) 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	args := []string{"-p", prompt, "--output-format", "json"}
-	if len(opts.AllowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(opts.AllowedTools, ","))
-	}
-	if opts.SystemPrompt != "" {
-		args = append(args, "--append-system-prompt", opts.SystemPrompt)
-	}
-
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd := exec.CommandContext(ctx, "claude", buildArgs(prompt, opts)...)
 	cmd.Dir = dir
 	if opts.Stdin != "" {
 		cmd.Stdin = strings.NewReader(opts.Stdin)
@@ -126,6 +128,43 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error) 
 	}
 
 	return parseEnvelope(out)
+}
+
+// buildArgs assembles the CLI flags for a headless run. Split out from Run so
+// the flag logic is testable: a missing --continue silently starts a new
+// session instead of answering the one on screen, which no exit code reveals.
+func buildArgs(prompt string, opts Options) []string {
+	args := []string{"-p", prompt, "--output-format", "json"}
+	if opts.Continue {
+		args = append(args, "--continue")
+	}
+	if opts.PermissionMode != "" {
+		args = append(args, "--permission-mode", opts.PermissionMode)
+	}
+	if len(opts.AllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(opts.AllowedTools, ","))
+	}
+	if opts.SystemPrompt != "" {
+		args = append(args, "--append-system-prompt", opts.SystemPrompt)
+	}
+	return args
+}
+
+// ReplyTimeout is the budget for an inline reply. Generous on purpose: a reply
+// restarts real work, and killing it halfway leaves the thread mid-turn.
+const ReplyTimeout = 15 * time.Minute
+
+// Reply continues the worktree's session with one line from the user, headless,
+// so the dashboard can answer a waiting thread without taking over the
+// terminal. mode is passed through to --permission-mode; empty keeps Claude
+// Code's -p default, under which anything needing approval is denied and the
+// agent is told so rather than stalling.
+func Reply(ctx context.Context, dir, text, mode string) (Result, error) {
+	return Run(ctx, dir, text, Options{
+		Continue:       true,
+		PermissionMode: mode,
+		Timeout:        ReplyTimeout,
+	})
 }
 
 func parseEnvelope(out []byte) (Result, error) {

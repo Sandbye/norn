@@ -57,6 +57,13 @@ type Config struct {
 	// set `ai_naming: false` to disable.
 	AINaming bool `yaml:"ai_naming" json:"ai_naming"`
 
+	// ReplyPermissionMode is --permission-mode for an inline reply sent from the
+	// dashboard. Empty keeps Claude Code's -p default (Manual), under which a
+	// tool needing approval is denied, because nobody is watching to approve it.
+	// Set "acceptEdits" or "auto" to let a reply actually change files: that is
+	// granting an unattended run authority, so it is opt-in.
+	ReplyPermissionMode string `yaml:"reply_permission_mode,omitempty" json:"reply_permission_mode,omitempty"`
+
 	// Notify: ping when a thread flips to waiting (terminal bell + a desktop
 	// notification where one is available). The dashboard already shows which
 	// thread needs you, but only while you are looking at it. Default true;

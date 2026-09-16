@@ -76,6 +76,9 @@ type Dashboard struct {
 	// first load, which seeds it without notifying: a thread that was already
 	// waiting when norn started is not news.
 	agentSeen map[string]claude.AgentState
+
+	// reply is the inline answer to a waiting thread.
+	reply replyState
 }
 
 // needsUser reports whether a state is one the user has to act on.
@@ -273,6 +276,30 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 
+		// Reply input: while open, letters type into the reply, so it is checked
+		// before the filter and before any action key.
+		if d.reply.active {
+			switch s {
+			case "esc":
+				d.reply.active, d.reply.text = false, ""
+				return d, nil
+			case "enter":
+				text := strings.TrimSpace(d.reply.text)
+				if text == "" {
+					d.reply.active = false
+					return d, nil
+				}
+				path, branch := d.reply.path, d.reply.branch
+				d.reply.active, d.reply.text = false, ""
+				d.reply.sent = "sending to " + branch + "…"
+				return d, replyCmd(path, branch, text, d.cfg.ReplyPermissionMode)
+			}
+			if d.reply.handleKey(s) {
+				return d, nil
+			}
+			return d, nil
+		}
+
 		// Filter input: printable/backspace/esc edit the query. While filtering,
 		// letters type into the query, so navigation uses arrows/ctrl+n+p and
 		// the action letters (r/a/p/t/d) are paused until esc.
@@ -318,6 +345,23 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.quit = true
 					d.result = Result{Action: ResultCd, Path: row.Path}
 					return d, tea.Quit
+				}
+			}
+		case "i":
+			// Answer the focused thread without entering it. Gated on waiting:
+			// see canReply.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				switch {
+				case !d.cfg.HeadlessClaude() || !claude.Available():
+					d.reply.sent = "reply needs the claude CLI"
+				case canReply(row):
+					d.reply.active = true
+					d.reply.text = ""
+					d.reply.path, d.reply.branch = row.Path, row.Branch
+					d.reply.sent = ""
+				default:
+					d.reply.sent = "only a waiting thread can be answered"
 				}
 			}
 		case "o":
@@ -391,6 +435,16 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		d.markFrame++
 		return d, markTick()
+
+	case replySentMsg:
+		switch {
+		case msg.err != nil:
+			d.reply.sent = "reply to " + msg.branch + " failed: " + msg.err.Error()
+		default:
+			d.reply.sent = "answered " + msg.branch
+		}
+		// The thread has moved: it was waiting, now it is working again.
+		return d, d.loadCmd()
 
 	case dashLoadedMsg:
 		// The cursor is an index, but the user is pointing at a thread. Rows
@@ -567,6 +621,14 @@ func (d Dashboard) View() string {
 	// the selected thread's detail grows or shrinks (goal present, more fields…).
 	body := lipgloss.NewStyle().Height(bodyH).Render(
 		lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", detail))
+
+	// Reply line above the help: the input while open, otherwise the outcome of
+	// the last one, so a failure does not vanish on the next tick.
+	if d.reply.active {
+		body += "\n\n" + cursorStyle.Render("reply "+d.reply.branch+" ▸ ") + d.reply.text + cursorStyle.Render("▏")
+	} else if d.reply.sent != "" {
+		body += "\n\n" + dimStyle.Render(d.reply.sent)
+	}
 
 	// Filter line above the help.
 	if d.filter.active || d.filter.query != "" {
@@ -918,8 +980,11 @@ func (d Dashboard) dashKeyHelp() string {
 	if d.filter.active {
 		return dimStyle.Render("type to filter · ↑/↓ or ctrl+n/p move · ⏎ cd · o open · esc clear")
 	}
+	if d.reply.active {
+		return dimStyle.Render("type your answer · ⏎ send · ctrl+u clear · esc cancel")
+	}
 	// Concise essentials; the full keymap lives in the global `?` help overlay.
-	return dimStyle.Render("⏎ cd · o open · m main · ? help")
+	return dimStyle.Render("⏎ cd · o open · i answer · m main · ? help")
 }
 
 func openPRInBrowser(branch, repoDir string) {
