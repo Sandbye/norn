@@ -88,6 +88,12 @@ func (e errReply) Error() string { return string(e) }
 // canReply reports whether a row can be answered. Only a waiting thread: a
 // working one has a live session that --continue will not attach to, and an
 // idle or unknown one has nothing asking.
+//
+// The transcript check is not redundant. `claude -p --continue` does not fail
+// when there is nothing to continue: it starts a fresh conversation and exits
+// 0, so the answer would land in a session that never saw the question, and
+// still bill for it. Waiting state already implies a transcript, so this only
+// costs a stat, and it makes the guard the code's rather than the flag's.
 func canReply(r dashRow) bool {
-	return r.WorktreeAlive && r.AgentState == claude.StateWaiting
+	return r.WorktreeAlive && r.AgentState == claude.StateWaiting && claude.HasSession(r.Path)
 }

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,23 +12,40 @@ import (
 // --continue resumes a finished session, not a running one, so offering reply
 // on a working thread would send an answer into a new session instead.
 func TestCanReplyOnlyWhenWaiting(t *testing.T) {
+	// A transcript has to exist for the path, because --continue happily starts
+	// a new session when it does not, so canReply checks rather than assumes.
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	const wt = "/wt/fix/rounding"
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(wt)
+	dir := filepath.Join(home, "projects", slug)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	cases := []struct {
+		name  string
+		path  string
 		state claude.AgentState
 		alive bool
 		want  bool
 	}{
-		{claude.StateWaiting, true, true},
-		{claude.StateStuck, true, false},
-		{claude.StateWorking, true, false},
-		{claude.StateIdle, true, false},
-		{claude.StateUnknown, true, false},
-		{claude.StateWaiting, false, false}, // worktree gone
+		{"waiting with a session", wt, claude.StateWaiting, true, true},
+		{"stuck", wt, claude.StateStuck, true, false},
+		{"working", wt, claude.StateWorking, true, false},
+		{"idle", wt, claude.StateIdle, true, false},
+		{"unknown", wt, claude.StateUnknown, true, false},
+		{"worktree gone", wt, claude.StateWaiting, false, false},
+		{"no transcript to continue", "/wt/never/ran", claude.StateWaiting, true, false},
 	}
 	for _, c := range cases {
 		r := qrow("fix/rounding", c.state, 1)
-		r.WorktreeAlive = c.alive
+		r.Path, r.WorktreeAlive = c.path, c.alive
 		if got := canReply(r); got != c.want {
-			t.Errorf("state=%q alive=%v: canReply = %v, want %v", c.state, c.alive, got, c.want)
+			t.Errorf("%s: canReply = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
