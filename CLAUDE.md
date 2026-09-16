@@ -38,6 +38,7 @@ internal/
   prompt/
     prompt.go               Template rendering (text/template): Render, Resolve, List, NewTemplate
     templates/*.md.tmpl     Built-in templates (task, review, checkout); user overrides in ~/.config/norn/templates
+  worktree/worktree.go      What one create produces: a single worktree, or a trunk + one per role
   review/review.go          Local review model + .norn/review.md rendering (conventional comments)
 ```
 

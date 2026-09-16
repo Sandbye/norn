@@ -220,7 +220,7 @@ func cmdBrief(cwdRepo string, args []string) {
 	if f.template != "" && !prompt.Has(f.template) {
 		fmt.Fprintf(os.Stderr, "norn brief: template %q not found, using %q\n", f.template, tmpl)
 	}
-	briefText, err := prompt.Render(cfg, kind, hint, base, tmpl, taskRef)
+	briefText, err := prompt.Render(cfg, kind, hint, base, tmpl, taskRef, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "norn brief: %v\n", err)
 		os.Exit(1)

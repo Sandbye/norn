@@ -118,6 +118,13 @@ func TestValidate(t *testing.T) {
 			"roles:\n  logic:\n    agent: claude\n    integrates: true\n  assets:\n    agent: codex\n    integrates: true\n",
 			"roles assets, logic: each sets `integrates: true`",
 		},
+		{
+			// The name becomes a branch segment, so a space in it would fail
+			// halfway through a create instead of at config load.
+			"role name with a space",
+			"roles:\n  \"back end\":\n    agent: claude\n    integrates: true\n  logic:\n    agent: codex\n",
+			"role \"back end\"",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

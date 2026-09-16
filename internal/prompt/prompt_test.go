@@ -24,7 +24,7 @@ func TestRenderTask(t *testing.T) {
 		Setup:   "pnpm cleanup",
 	}
 
-	out, err := Render(cfg, "task", "fix the export bug", "master", "", nil)
+	out, err := Render(cfg, "task", "fix the export bug", "master", "", nil, nil)
 	if err != nil {
 		t.Fatalf("Render task: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestRenderTask(t *testing.T) {
 
 func TestRenderTaskWithTaskRef(t *testing.T) {
 	out, err := Render(config.Config{}, "task", "#42 fix it", "master", "",
-		&TaskRef{ID: "42", Title: "Fix the thing", URL: "https://x/42", Description: "some detail"})
+		&TaskRef{ID: "42", Title: "Fix the thing", URL: "https://x/42", Description: "some detail"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestRenderReview(t *testing.T) {
 		User: config.User{Name: "Test User", Email: "test@example.com"},
 	}
 
-	out, err := Render(cfg, "review", "CU-86c00000", "master", "", nil)
+	out, err := Render(cfg, "review", "CU-86c00000", "master", "", nil, nil)
 	if err != nil {
 		t.Fatalf("Render review: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestRenderNoHint(t *testing.T) {
 		User: config.User{Name: "Test"},
 	}
 
-	out, err := Render(cfg, "task", "", "master", "", nil)
+	out, err := Render(cfg, "task", "", "master", "", nil, nil)
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}

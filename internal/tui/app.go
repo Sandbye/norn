@@ -12,6 +12,7 @@ import (
 	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/prompt"
 	"github.com/sandbye/norn/internal/task"
+	"github.com/sandbye/norn/internal/worktree"
 )
 
 type View int
@@ -70,6 +71,9 @@ type Result struct {
 	Action ResultAction
 	Path   string // worktree path
 	Model  string // per-session model override for ResultLaunch (empty → config default)
+	// RoleTail names the other role worktrees of a split create, printed once
+	// the trunk's agent exits. Empty for a single worktree.
+	RoleTail []string
 }
 
 type App struct {
@@ -107,6 +111,7 @@ type remoteCheckedMsg struct {
 type worktreeCreatedMsg struct {
 	path  string
 	model string
+	tail  []string
 }
 
 type errMsg struct{ err error }
@@ -141,6 +146,7 @@ func newCreateFor(cfg config.Config, repoRoot string) createModel {
 	c.models = moveFront(modelChoices(cfg), c.model) // default first so the select starts on it
 	c.taskProvider = providerFor(cfg)
 	c.repoRoot = repoRoot
+	c.roles = cfg.RoleNames()
 	c.form = c.buildForm()
 	return c
 }
@@ -317,7 +323,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case worktreeCreatedMsg:
 		a.quit = true
-		a.result = Result{Action: ResultLaunch, Path: msg.path, Model: msg.model}
+		a.result = Result{Action: ResultLaunch, Path: msg.path, Model: msg.model, RoleTail: msg.tail}
 		return a, tea.Quit
 
 	case errMsg:
@@ -433,7 +439,7 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.current = ViewCreate
 			if a.create.confirmed {
 				a.create = a.create.startCreating()
-				return a, createWorktree(a.cfg, a.repoRoot, a.create.kind, a.create.hint, a.create.baseBranch, a.create.template, a.create.model, taskRefOf(a.create.selectedTask))
+				return a, createWorktree(a.cfg, a.repoRoot, a.create)
 			}
 			return a, nil
 		}
@@ -442,7 +448,7 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.create, cmd = a.create.Update(msg)
 		if a.create.confirmed {
 			a.create = a.create.startCreating()
-			return a, createWorktree(a.cfg, a.repoRoot, a.create.kind, a.create.hint, a.create.baseBranch, a.create.template, a.create.model, taskRefOf(a.create.selectedTask))
+			return a, createWorktree(a.cfg, a.repoRoot, a.create)
 		}
 		if a.create.cancelled {
 			return a.gotoTab(ViewThreads)
@@ -662,27 +668,30 @@ func taskRefOf(t *task.Task) *prompt.TaskRef {
 	return &prompt.TaskRef{ID: t.ID, Title: t.Title, URL: t.URL, Description: t.Description}
 }
 
-func createWorktree(cfg config.Config, repoRoot, kind, hint, base, tmpl, model string, taskRef *prompt.TaskRef) tea.Cmd {
+// createWorktree runs the New tab's create. It takes the form model rather than
+// its fields: the create already needs seven of them, and a split adds roles.
+func createWorktree(cfg config.Config, repoRoot string, c createModel) tea.Cmd {
 	return func() tea.Msg {
-		branch := git.MakeBranch(kind, hint, cfg.BranchFormat)
+		branch := git.MakeBranch(c.kind, c.hint, cfg.BranchFormat)
 		if cfg.AINaming && cfg.HeadlessClaude() && claude.Available() && git.BranchLacksSlug(branch) {
-			branch = claude.EnrichBranchName(context.Background(), repoRoot, hint, branch, cfg.BranchFormat)
+			branch = claude.EnrichBranchName(context.Background(), repoRoot, c.hint, branch, cfg.BranchFormat)
 		}
-		wtPath, err := git.CreateWorktree(repoRoot, cfg.WorktreeDir, branch, base)
+		res, err := worktree.Create(cfg, repoRoot, worktree.Request{
+			Kind:     c.kind,
+			Hint:     c.hint,
+			Branch:   branch,
+			Base:     c.baseBranch,
+			Template: c.template,
+			Roles:    c.pickedRoles,
+			Task:     taskRefOf(c.selectedTask),
+		})
 		if err != nil {
 			return errMsg{err}
 		}
-		_ = git.SymlinkEnvFiles(repoRoot, wtPath)
-
-		promptText, err := prompt.Render(cfg, kind, hint, base, prompt.Resolve(cfg, kind, tmpl), taskRef)
-		if err != nil {
-			return errMsg{fmt.Errorf("brief render failed for %s: %w", branch, err)}
+		var tail []string
+		for _, t := range res.Threads[1:] {
+			tail = append(tail, fmt.Sprintf("  %-10s %s", t.Role, t.Path))
 		}
-		promptPath := wtPath + "/.worktree.md"
-		if err := writeFile(promptPath, promptText); err != nil {
-			return errMsg{err}
-		}
-
-		return worktreeCreatedMsg{path: wtPath, model: model}
+		return worktreeCreatedMsg{path: res.Trunk().Path, model: c.model, tail: tail}
 	}
 }

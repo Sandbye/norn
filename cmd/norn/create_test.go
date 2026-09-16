@@ -29,6 +29,12 @@ func TestExtractCreateFlags(t *testing.T) {
 			createFlags{branch: "", branchSet: true, rest: nil}},
 		{"checkout= empty is still set", []string{"--checkout="},
 			createFlags{branch: "", branchSet: true, rest: nil}},
+		{"roles", []string{"--roles", "logic,assets", "build", "it"},
+			createFlags{roles: []string{"logic", "assets"}, rest: []string{"build", "it"}}},
+		{"roles= with spaces", []string{"--roles=logic, assets"},
+			createFlags{roles: []string{"logic", "assets"}, rest: nil}},
+		{"role singular alias", []string{"-r", "logic"},
+			createFlags{roles: []string{"logic"}, rest: nil}},
 	}
 	for _, c := range cases {
 		got := extractCreateFlags(c.args)
@@ -40,6 +46,9 @@ func TestExtractCreateFlags(t *testing.T) {
 		}
 		if strings.Join(got.rest, " ") != strings.Join(c.want.rest, " ") {
 			t.Errorf("%s: rest = %q, want %q", c.name, got.rest, c.want.rest)
+		}
+		if strings.Join(got.roles, ",") != strings.Join(c.want.roles, ",") {
+			t.Errorf("%s: roles = %q, want %q", c.name, got.roles, c.want.roles)
 		}
 	}
 }

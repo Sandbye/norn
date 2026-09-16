@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -147,12 +148,22 @@ func (c Config) AgentFor(role string) AgentConfig {
 	return r.AgentConfig
 }
 
-// Validate reports config that parses but cannot be acted on. Roles are the
-// only such rule today: the split needs one agent to merge the work, and norn
-// will not pick that agent for you.
+// roleNamePattern is what a role name may be. A role name becomes the last
+// segment of a branch, so anything git refuses in a ref would surface as a
+// worktree-add failure halfway through a create rather than as bad config.
+var roleNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+// Validate reports config that parses but cannot be acted on: the split needs
+// one agent to merge the work and norn will not pick that agent for you, and a
+// role name has to survive being put in a branch.
 func (c Config) Validate() error {
 	if len(c.Roles) == 0 {
 		return nil
+	}
+	for _, name := range sortedNames(c.Roles) {
+		if !roleNamePattern.MatchString(name) {
+			return fmt.Errorf("role %q: a role name becomes a branch segment, so use letters, digits, dot, dash or underscore", name)
+		}
 	}
 	var integrating []string
 	for _, name := range c.RoleNames() {

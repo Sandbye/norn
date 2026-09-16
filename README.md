@@ -46,6 +46,7 @@ norn is one tabbed TUI. `Tab` / `1`-`4` switch tabs, `?` shows keys, `esc` backs
 norn                      # the TUI
 norn create "add caching" # new worktree + branch, launch a session
 norn create --branch foo  # worktree on an existing branch (that ref, no new branch; --checkout is an alias)
+norn create "x" --roles logic,assets # one trunk + one worktree per role (see Roles)
 norn review 42            # check out PR #42 into a worktree, agent reviews it
 norn diff                 # review uncommitted changes (or: --base, <pr#>)
 norn --help               # everything
@@ -111,6 +112,25 @@ roles:
 Each role takes the same keys as `agent:` (`command`, `args`, `model`), with `agent:` as shorthand for `command:`; a role spelling both is rejected rather than one silently winning. Exactly one role sets `integrates: true`: it is the one that merges the others' work. A config with none, or with two, fails to load and the error names the roles.
 
 Roles layer per field like every other key, so a personal `~/.config/norn/projects/<repo>.yaml` can point one role at a different agent without restating the rest. A repo that declares no roles is unaffected: `agent:` stays the only thing deciding what launches.
+
+Declaring roles does not split anything. A create asks for the split:
+
+```bash
+norn create "multi model" --roles logic,assets
+```
+
+That cuts one trunk branch off the base and one branch per role off the trunk, each in its own worktree:
+
+```
+main
+ └─ feature/multi-model/CU-123/trunk    integrating role, the only branch that opens a PR
+     ├─ feature/multi-model/CU-123/logic
+     └─ feature/multi-model/CU-123/assets
+```
+
+The trunk takes a leaf of its own rather than being `feature/multi-model/CU-123`: git stores a ref as a file, so a branch of that name is exactly what would stop the role branches under it from existing.
+
+The integrating role is always included, so `--roles logic` still gives you two worktrees. Picking nothing, or picking only the integrating role, is one plain worktree on the usual branch name. Each worktree's `.worktree.md` names the role that owns it, the trunk it merges into, and the roles running in parallel; every row shares one task id, and a create that fails part-way removes the worktrees and branches it had already made. `norn create` with no hint offers the same picker in the New tab.
 
 ### Notifications
 

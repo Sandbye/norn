@@ -23,6 +23,7 @@ import (
 	"github.com/sandbye/norn/internal/state"
 	"github.com/sandbye/norn/internal/task"
 	"github.com/sandbye/norn/internal/tui"
+	"github.com/sandbye/norn/internal/worktree"
 )
 
 // version is the release version, injected at build time via
@@ -247,11 +248,11 @@ func runApp(cfg config.Config, repoRoot string, initialView tui.View) {
 	case tui.ResultLaunch:
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
 		writeCdTarget(result.Path)
-		handOff(cfg, result.Path, false, result.Model, nil)
+		handOff(cfg, result.Path, false, result.Model, nil, result.RoleTail)
 	case tui.ResultResume:
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
 		writeCdTarget(result.Path)
-		handOff(cfg, result.Path, true, result.Model, nil)
+		handOff(cfg, result.Path, true, result.Model, nil, nil)
 	case tui.ResultCd:
 		// Parent-shell cd: write the target and exit. The shell wrapper cd's the
 		// current shell into it — no nested subshell. Bump activity so the
@@ -372,6 +373,9 @@ func runCreate(cfg config.Config, repoRoot string, createArgs []string) {
 		if flags.base != "" {
 			fmt.Fprintln(os.Stderr, "note: --from is ignored with --branch (nothing is forked)")
 		}
+		if len(flags.roles) > 0 {
+			fmt.Fprintln(os.Stderr, "note: --roles is ignored with --branch (a checkout is one existing branch)")
+		}
 		checkoutBranch(cfg, repoRoot, flags.branch, flags.template)
 		return
 	}
@@ -381,7 +385,7 @@ func runCreate(cfg config.Config, repoRoot string, createArgs []string) {
 		runApp(cfg, repoRoot, tui.ViewCreate)
 		return
 	}
-	directCreate(cfg, repoRoot, "task", hint, flags.base, flags.template)
+	directCreate(cfg, repoRoot, "task", hint, flags.base, flags.template, flags.roles)
 }
 
 // checkoutBranch puts an existing branch into a worktree and launches the agent
@@ -440,7 +444,7 @@ func checkoutBranch(cfg config.Config, repoRoot, branch, templateOverride string
 			fmt.Fprintf(os.Stderr, "warning: template %q not found, using %q\n", templateOverride, tmpl)
 		}
 		base := resolveBranchBase(cfg, repoRoot, "")
-		promptText, rerr := prompt.Render(cfg, "checkout", branch, base, tmpl, nil)
+		promptText, rerr := prompt.Render(cfg, "checkout", branch, base, tmpl, nil, nil)
 		if rerr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not render prompt: %v\n", rerr)
 		}
@@ -452,7 +456,7 @@ func checkoutBranch(cfg config.Config, repoRoot, branch, templateOverride string
 	upsertSession(repoRoot, "task", branch, wtPath, branch)
 	writeCdTarget(wtPath)
 
-	handOff(cfg, wtPath, false, "", nil)
+	handOff(cfg, wtPath, false, "", nil, nil)
 }
 
 // handOff ends a create or resume by starting the agent in wtPath. It is the
@@ -462,12 +466,13 @@ func checkoutBranch(cfg config.Config, repoRoot, branch, templateOverride string
 // then wipes the only line naming the worktree: the user is left with a blank
 // terminal and a worktree they never heard about. So when the agent is missing,
 // keep the screen and say where the work is.
-func handOff(cfg config.Config, wtPath string, resume bool, model string, warnings []string) {
+func handOff(cfg config.Config, wtPath string, resume bool, model string, warnings, tail []string) {
 	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	if !tui.AgentAvailable(cfg.Agent) {
 		fmt.Printf("Worktree ready: %s\n", wtPath)
+		printTail(tail)
 		fmt.Fprintf(os.Stderr, "note: agent %q is not on PATH, so no session was started.\n", cfg.AgentCommand())
 		return
 	}
@@ -476,9 +481,20 @@ func handOff(cfg config.Config, wtPath string, resume bool, model string, warnin
 		fmt.Fprintf(os.Stderr, "error: agent %q: %v\n", cfg.AgentCommand(), err)
 	}
 	fmt.Printf("Worktree: %s\n", wtPath)
+	printTail(tail)
 }
 
-func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templateOverride string) {
+func printTail(tail []string) {
+	if len(tail) == 0 {
+		return
+	}
+	fmt.Println("Other roles:")
+	for _, line := range tail {
+		fmt.Println(line)
+	}
+}
+
+func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templateOverride string, roles []string) {
 	// Resolve the *branch base* (source to fork from) by priority:
 	//   1. explicit --from override
 	//   2. branch_base from project config (production-line, may differ from PR target)
@@ -487,43 +503,67 @@ func directCreate(cfg config.Config, repoRoot, kind, hint, baseOverride, templat
 	//   5. "main" as last-resort guess
 	base := resolveBranchBase(cfg, repoRoot, baseOverride)
 
-	branch := aiResolveBranch(cfg, repoRoot, kind, hint)
-	fmt.Printf("Creating worktree: %s (base: %s)\n", branch, base)
+	if unknown := worktree.UnknownRoles(cfg, roles); len(unknown) > 0 {
+		fmt.Fprintf(os.Stderr, "error: this repo declares no role %s\n", strings.Join(unknown, ", "))
+		if declared := cfg.RoleNames(); len(declared) > 0 {
+			fmt.Fprintf(os.Stderr, "declared roles: %s\n", strings.Join(declared, ", "))
+		} else {
+			fmt.Fprintln(os.Stderr, "declare them under `roles:` in .norn.yaml first")
+		}
+		os.Exit(1)
+	}
 
-	wtPath, err := git.CreateWorktree(repoRoot, cfg.WorktreeDir, branch, base)
+	branch := aiResolveBranch(cfg, repoRoot, kind, hint)
+
+	// Warnings are collected, not printed here: clearScreen() in handOff would
+	// wipe them a line later and the agent would start on an unexplained
+	// half-setup.
+	var warnings []string
+	if templateOverride != "" && !prompt.Has(templateOverride) {
+		warnings = append(warnings, fmt.Sprintf("template %q not found, using %q", templateOverride, prompt.Resolve(cfg, kind, templateOverride)))
+	}
+
+	planned := worktree.Plan(cfg, branch, roles)
+	if len(planned) == 1 {
+		fmt.Printf("Creating worktree: %s (base: %s)\n", planned[0].Branch, base)
+	} else {
+		fmt.Printf("Creating task: %d worktrees (base: %s)\n", len(planned), base)
+		for _, t := range planned {
+			fmt.Printf("  %-10s %s\n", t.Role, t.Branch)
+		}
+	}
+
+	res, err := worktree.Create(cfg, repoRoot, worktree.Request{
+		Kind:     kind,
+		Hint:     hint,
+		Branch:   branch,
+		Base:     base,
+		Template: templateOverride,
+		Roles:    roles,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	warnings = append(warnings, res.Warnings...)
 
-	// Warnings are collected, not printed here: clearScreen() below would wipe
-	// them a line later and the agent would start on an unexplained half-setup.
-	var warnings []string
-	if err := git.SymlinkEnvFiles(repoRoot, wtPath); err != nil {
-		warnings = append(warnings, fmt.Sprintf("env symlinks incomplete: %v", err))
-	}
+	writeCdTarget(res.Trunk().Path)
+	handOff(cfg, res.Trunk().Path, false, "", warnings, roleTail(res))
+}
 
-	// Generate prompt
-	tmpl := prompt.Resolve(cfg, kind, templateOverride)
-	if templateOverride != "" && !prompt.Has(templateOverride) {
-		warnings = append(warnings, fmt.Sprintf("template %q not found, using %q", templateOverride, tmpl))
+// roleTail is what the terminal shows once the trunk's agent exits: where the
+// other roles' worktrees are. It belongs after the hand-off, not before it —
+// handOff clears the screen, so anything printed earlier is gone by the time
+// the user is back at a prompt looking for them.
+func roleTail(res worktree.Result) []string {
+	if !res.Split() {
+		return nil
 	}
-	// The brief is what the agent reads on arrival, so failing to write it is
-	// fatal: launching anyway is how a failure gets hidden behind the session.
-	promptText, err := prompt.Render(cfg, kind, hint, base, tmpl, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: could not render brief: %v\nworktree is at %s\n", err, wtPath)
-		os.Exit(1)
+	tail := make([]string, 0, len(res.Threads))
+	for _, t := range res.Threads[1:] {
+		tail = append(tail, fmt.Sprintf("  %-10s %s", t.Role, t.Path))
 	}
-	if err := os.WriteFile(wtPath+"/.worktree.md", []byte(promptText), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "error: could not write brief: %v\nworktree is at %s\n", err, wtPath)
-		os.Exit(1)
-	}
-
-	upsertSession(repoRoot, kind, branch, wtPath, hint)
-	writeCdTarget(wtPath)
-
-	handOff(cfg, wtPath, false, "", warnings)
+	return tail
 }
 
 // runReview handles `norn review <pr#>`: check the PR's head out into a
@@ -581,7 +621,7 @@ func runReview(cfg config.Config, repoRoot string, reviewArgs []string) {
 	upsertSession(repoRoot, "review", branch, wtPath, pr.Title)
 	writeCdTarget(wtPath)
 
-	handOff(cfg, wtPath, false, "", nil)
+	handOff(cfg, wtPath, false, "", nil, nil)
 }
 
 // fetchReviewPR resolves the PR fields needed for a review worktree + brief.
@@ -752,6 +792,9 @@ type createFlags struct {
 	base     string
 	template string
 	branch   string
+	// roles are the role names this create splits across (`--roles a,b`). Empty
+	// means one worktree, which is what create did before roles existed.
+	roles []string
 	// Whether --branch was given at all, so `--branch=` (present but empty) is
 	// rejected rather than read as absent and quietly opening the New tab.
 	branchSet bool
@@ -783,11 +826,31 @@ func extractCreateFlags(args []string) createFlags {
 			f.branch, f.branchSet = strings.TrimPrefix(a, "--branch="), true
 		case strings.HasPrefix(a, "--checkout="):
 			f.branch, f.branchSet = strings.TrimPrefix(a, "--checkout="), true
+		case (a == "--roles" || a == "--role" || a == "-r") && i+1 < len(args):
+			f.roles = splitRoles(args[i+1])
+			i++ // skip the value
+		case strings.HasPrefix(a, "--roles="):
+			f.roles = splitRoles(strings.TrimPrefix(a, "--roles="))
+		case strings.HasPrefix(a, "--role="):
+			f.roles = splitRoles(strings.TrimPrefix(a, "--role="))
 		default:
 			f.rest = append(f.rest, a)
 		}
 	}
 	return f
+}
+
+// splitRoles parses `--roles logic,assets`. Commas and spaces both separate, so
+// a quoted `--roles "logic assets"` works as well as the comma form.
+func splitRoles(v string) []string {
+	fields := strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' })
+	roles := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			roles = append(roles, f)
+		}
+	}
+	return roles
 }
 
 // isAllDigits returns true if s consists solely of ASCII digits and is non-empty.
@@ -2362,6 +2425,9 @@ Usage:
   norn create             No hint → open the New tab to compose it
   norn create "hint" --from <b>
                           Override base branch for this worktree
+  norn create "hint" --roles <a,b>
+                          Split the task: a trunk worktree plus one per role
+                          (roles come from the roles: block in .norn.yaml)
   norn create "hint" --template <name>, -t <name>
                           Use a specific prompt template for this worktree
   norn create --branch <b>
