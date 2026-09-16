@@ -392,8 +392,25 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return d, markTick()
 
 	case dashLoadedMsg:
+		// The cursor is an index, but the user is pointing at a thread. Rows
+		// reorder on every tick now that they group by state, and a thread that
+		// flips to waiting jumps the whole list, so without this the cursor
+		// quietly lands on someone else's thread mid-keystroke.
+		selected := ""
+		if prev := d.visibleRows(); d.cursor >= 0 && d.cursor < len(prev) {
+			selected = prev[d.cursor].Path
+		}
+
 		d.rows = msg.rows
 		d.lastLoad = time.Now()
+		if selected != "" {
+			for i, r := range d.visibleRows() {
+				if r.Path == selected {
+					d.cursor = i
+					break
+				}
+			}
+		}
 		if d.agentSeen == nil {
 			d.agentSeen = seedAgentStates(d.rows)
 		} else {
@@ -599,21 +616,91 @@ func (d Dashboard) renderHeader() string {
 	return hero + "\n\n" + ident
 }
 
-// renderSidebar lists the threads (state glyph + branch + a right-aligned age),
-// cursor highlighted, scrolled to keep the cursor visible. The age carries
-// glanceable recency so the left rail reads as a live index, not a bare list.
+// Thread groups. The rail is a queue, not a log: what needs you sits at the
+// top, what is running below it, what is quiet last. Ordering by group beats
+// ordering by recency here, because recency does not tell you where to go next.
+const (
+	groupNeedsYou = iota
+	groupWorking
+	groupQuiet
+)
+
+var groupLabels = map[int]string{
+	groupNeedsYou: "NEEDS YOU",
+	groupWorking:  "WORKING",
+	groupQuiet:    "QUIET",
+}
+
+// threadGroup buckets a row by its live agent state. idle and unknown share a
+// bucket: both mean "nothing is happening here", and splitting them would put a
+// header above a single row for no gain.
+func threadGroup(r dashRow) int {
+	switch {
+	case needsUser(r.AgentState):
+		return groupNeedsYou
+	case r.AgentState == claude.StateWorking:
+		return groupWorking
+	default:
+		return groupQuiet
+	}
+}
+
+// groupRows orders rows by group, keeping each group's existing order (activity,
+// most recent first). Returns a new slice: the caller's order is a view, and the
+// header gauge reads the same slice.
+func groupRows(rows []dashRow) []dashRow {
+	out := make([]dashRow, len(rows))
+	copy(out, rows)
+	sort.SliceStable(out, func(i, j int) bool {
+		return threadGroup(out[i]) < threadGroup(out[j])
+	})
+	return out
+}
+
+// sidebarLine is one rendered row of the rail. row indexes into vis, or is -1
+// for a group header, which is display only and never selectable.
+type sidebarLine struct {
+	text string
+	row  int
+}
+
+// renderSidebar lists the threads (state glyph + branch + a right-aligned age)
+// under a header per group, cursor highlighted, scrolled to keep the cursor
+// visible. The age carries glanceable recency so the left rail reads as a live
+// index, not a bare list.
+//
+// Scrolling windows over rendered lines rather than rows, because the group
+// headers take vertical space too: windowing over rows would let the cursor
+// slide off the bottom by as many lines as there are headers on screen.
 func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
-	lines := []string{dimStyle.Render(fitCell("THREADS", w))}
-	listH := max(h-len(lines), 3)
-	start, end := scrollWindow(d.cursor, len(vis), listH)
 	const ageW = 3
 	branchW := max(w-ageW-3, 4) // glyph + two spaces + age column
-	for i := start; i < end; i++ {
-		r := vis[i]
+
+	// With no live state at all (a non-claude agent, or no transcript yet) every
+	// row is quiet, and a "QUIET" header over the whole list says nothing. Fall
+	// back to the plain rail in that case.
+	grouped := false
+	for _, r := range vis {
+		if threadGroup(r) != groupQuiet {
+			grouped = true
+			break
+		}
+	}
+
+	var all []sidebarLine
+	lastGroup := -1
+	if !grouped {
+		all = append(all, sidebarLine{dimStyle.Render(fitCell("THREADS", w)), -1})
+	}
+	for i, r := range vis {
+		if g := threadGroup(r); grouped && g != lastGroup {
+			all = append(all, sidebarLine{dimStyle.Render(fitCell(groupLabels[g], w)), -1})
+			lastGroup = g
+		}
 		age := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt))
 		if i == d.cursor {
 			plain := glyphRune(r.AgentState) + " " + fitCell(r.Branch, branchW) + " " + age
-			lines = append(lines, lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(fitCell(plain, w)))
+			all = append(all, sidebarLine{lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(fitCell(plain, w)), i})
 			continue
 		}
 		branch := fitCell(r.Branch, branchW)
@@ -625,9 +712,27 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		default:
 			branch = dimStyle.Render(branch)
 		}
-		lines = append(lines, stateGlyph(r.AgentState)+" "+branch+" "+dimStyle.Render(age))
+		all = append(all, sidebarLine{stateGlyph(r.AgentState) + " " + branch + " " + dimStyle.Render(age), i})
 	}
-	if len(vis) > listH {
+	if len(all) == 0 {
+		return dimStyle.Render(fitCell("THREADS", w))
+	}
+
+	// Window over display lines, anchored on the cursor's own line.
+	cursorLine := 0
+	for i, l := range all {
+		if l.row == d.cursor {
+			cursorLine = i
+		}
+	}
+	listH := max(h-1, 3) // 1 for the counter below
+	start, end := scrollWindow(cursorLine, len(all), listH)
+
+	lines := make([]string, 0, listH+1)
+	for _, l := range all[start:end] {
+		lines = append(lines, l.text)
+	}
+	if len(all) > listH {
 		lines = append(lines, dimStyle.Render(fmt.Sprintf("  %d/%d", d.cursor+1, len(vis))))
 	}
 	return strings.Join(lines, "\n")
@@ -938,7 +1043,7 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			}
 			rows = append(rows, row)
 		}
-		return dashLoadedMsg{rows: rows}
+		return dashLoadedMsg{rows: groupRows(rows)}
 	}
 }
 
