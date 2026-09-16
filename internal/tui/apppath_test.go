@@ -14,6 +14,7 @@ import (
 // "cd into this worktree and quit" key, so if the input never opened, the
 // keystrokes act instead of typing and enter drops you out of norn.
 func TestAppReplyPathDoesNotQuit(t *testing.T) {
+	stubClaude(t)
 	home := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", home)
 	wt := t.TempDir()

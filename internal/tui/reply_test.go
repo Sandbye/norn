@@ -10,12 +10,25 @@ import (
 	"github.com/sandbye/norn/internal/config"
 )
 
-// --continue resumes a finished session, not a running one, so offering reply
-// on a working thread would send an answer into a new session instead.
+// stubClaude puts an executable named claude on PATH. The dashboard gates the
+// reply input on claude.Available(), which is a real PATH lookup, so without
+// this the tests pass only on a machine that happens to have Claude Code
+// installed and fail on every CI runner.
+func stubClaude(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh" + "\n" + "exit 0" + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // seedWaitingThread returns a row that can genuinely be answered: a live
 // worktree with a transcript, in waiting state.
 func seedWaitingThread(t *testing.T) dashRow {
 	t.Helper()
+	stubClaude(t)
 	home := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", home)
 	wt := t.TempDir()
@@ -31,6 +44,8 @@ func seedWaitingThread(t *testing.T) dashRow {
 	return r
 }
 
+// --continue resumes a finished session, not a running one, so offering reply
+// on a working thread would send an answer into a new session instead.
 func TestCanReplyOnlyWhenWaiting(t *testing.T) {
 	// A transcript has to exist for the path, because --continue happily starts
 	// a new session when it does not, so canReply checks rather than assumes.
