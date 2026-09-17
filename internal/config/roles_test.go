@@ -250,3 +250,41 @@ func TestRoleArgsRejectReservedFlags(t *testing.T) {
 		t.Fatalf("Validate rejected a legitimate -c key: %v", err)
 	}
 }
+
+// A role may wait for another and promise a result. Both are checked at load,
+// where a typo is visible, rather than at land, where it would surface as a
+// strand that never starts or a gate that never fires.
+func TestOrderedRolesValidate(t *testing.T) {
+	ok := Config{Roles: Roles{
+		"tests":       {AgentConfig: AgentConfig{Command: "claude"}, Expect: ExpectRed},
+		"logic":       {AgentConfig: AgentConfig{Command: "claude"}, After: "tests", Expect: ExpectGreen},
+		"integration": {AgentConfig: AgentConfig{Command: "claude"}, Integrates: true},
+	}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("a valid pipeline was rejected: %v", err)
+	}
+
+	unknown := Config{Roles: Roles{
+		"logic":       {AgentConfig: AgentConfig{Command: "claude"}, After: "spec"},
+		"integration": {AgentConfig: AgentConfig{Command: "claude"}, Integrates: true},
+	}}
+	if err := unknown.Validate(); err == nil || !strings.Contains(err.Error(), "spec") {
+		t.Fatalf("waiting for an undeclared role = %v, want it named", err)
+	}
+
+	self := Config{Roles: Roles{
+		"logic":       {AgentConfig: AgentConfig{Command: "claude"}, After: "logic"},
+		"integration": {AgentConfig: AgentConfig{Command: "claude"}, Integrates: true},
+	}}
+	if err := self.Validate(); err == nil {
+		t.Fatal("a role waiting for itself was accepted, and it would never start")
+	}
+
+	bad := Config{Roles: Roles{
+		"tests":       {AgentConfig: AgentConfig{Command: "claude"}, Expect: "pink"},
+		"integration": {AgentConfig: AgentConfig{Command: "claude"}, Integrates: true},
+	}}
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "pink") {
+		t.Fatalf("an unknown expect = %v, want it named", err)
+	}
+}

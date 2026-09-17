@@ -57,12 +57,35 @@ func (m cdModel) View() string {
 		return b.String()
 	}
 
+	strands := labelStrands()
+	lastTask := ""
 	for i, wt := range m.worktrees {
+		// A strand jumps by its role under one task header: three entries whose
+		// branches differ in the last segment are indistinguishable at a glance,
+		// and the role is what you are choosing between.
+		name := wt.Branch
+		if st, ok := strands[wt.Path]; ok {
+			if st.taskID != lastTask {
+				label := st.goal
+				if label == "" {
+					label = st.taskID
+				}
+				b.WriteString("  " + taskHeaderStyle.Render("◈ "+label) + "\n")
+			}
+			lastTask = st.taskID
+			name = "  " + st.role
+			if st.integrate {
+				name += " (trunk)"
+			}
+		} else {
+			lastTask = ""
+		}
+
 		cursor := "  "
-		label := branchStyle.Render(wt.Branch)
+		label := branchStyle.Render(name)
 		if i == m.cursor {
 			cursor = cursorStyle.Render("> ")
-			label = selectedStyle.Render(wt.Branch)
+			label = selectedStyle.Render(name)
 		}
 		age := ageStyle.Render(git.Age(wt.LastCommit))
 		b.WriteString("  " + cursor + label + " " + age + "\n")

@@ -210,6 +210,14 @@ func Send(taskID, role, text string) error {
 		return fmt.Errorf("%w: %s", ErrNoSession, Name(taskID, role))
 	}
 	name := Name(taskID, role)
+	// Clear whatever is sitting in the agent's input first. Without this a note
+	// is appended to a half-written message left in the box and the two are
+	// sent as one, which is how a review arrived with a stranger's sentence in
+	// front of it. C-u is kill-line in every agent prompt worth supporting, and
+	// on one that does not bind it this is a no-op rather than a hazard.
+	if out, err := run("send-keys", "-t", name, "C-u"); err != nil {
+		return fmt.Errorf("strand: clear input of %s: %w: %s", name, err, out)
+	}
 	// -l sends the text literally, so a note containing a semicolon or a brace
 	// is not read as tmux syntax.
 	if out, err := run("send-keys", "-t", name, "-l", text); err != nil {

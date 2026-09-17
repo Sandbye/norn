@@ -223,17 +223,17 @@ func wireStdio(cmd *exec.Cmd, wtPath string) *exec.Cmd {
 // makeAgentCmd builds the launch command. model overrides agent.Model for this
 // session (empty → fall back to the config default). It only applies to claude
 // (as --model) and to fresh sessions; resume (-c) continues the prior model.
-func makeAgentCmd(agent config.AgentConfig, wtPath string, resume bool, model string) *exec.Cmd {
-	return agentCmd(agent, wtPath, resume, model, false)
+func makeAgentCmd(cfg config.Config, agent config.AgentConfig, wtPath string, resume bool, model string) *exec.Cmd {
+	return agentCmd(cfg, agent, wtPath, resume, model, false)
 }
 
 // strandCmd is makeAgentCmd for an agent that runs as a strand, where nobody
 // may be watching this particular pane.
-func strandCmd(agent config.AgentConfig, wtPath, model string) *exec.Cmd {
-	return agentCmd(agent, wtPath, false, model, true)
+func strandCmd(cfg config.Config, agent config.AgentConfig, wtPath, model string) *exec.Cmd {
+	return agentCmd(cfg, agent, wtPath, false, model, true)
 }
 
-func agentCmd(agent config.AgentConfig, wtPath string, resume bool, model string, strandRun bool) *exec.Cmd {
+func agentCmd(cfg config.Config, agent config.AgentConfig, wtPath string, resume bool, model string, strandRun bool) *exec.Cmd {
 	command := agent.Command
 	if command == "" {
 		command = "claude"
@@ -260,12 +260,19 @@ func agentCmd(agent config.AgentConfig, wtPath string, resume bool, model string
 	if model != "" {
 		args = append(args, "--model", model)
 	}
+	if effort := cfg.EffortFor(model); effort != "" {
+		args = append(args, "--effort", effort)
+	}
 	if strandRun {
 		// A strand is one of several agents working in parallel, and you are
 		// in at most one pane at a time. Manual mode would have the other
 		// strands stop at the first prompt and wait for someone who is looking
 		// elsewhere. auto has a classifier review each action instead.
 		args = append(args, "--permission-mode", "auto")
+		// Prompt suggestions are accepted with Tab, and Tab switches tabs
+		// everywhere else in norn, so muscle memory inside a pane types a
+		// predicted sentence into the agent instead.
+		args = append(args, "--prompt-suggestions", "false")
 	}
 	prompt := ""
 	if data, err := os.ReadFile(wtPath + "/.worktree.md"); err == nil {
@@ -342,8 +349,8 @@ func AgentAvailable(agent config.AgentConfig) bool {
 // overrides the config default for this launch (empty → default); ignored on
 // resume and non-claude. The error is returned rather than swallowed: a failure
 // to start is invisible otherwise, because the screen was just cleared for it.
-func LaunchAgent(agent config.AgentConfig, wtPath string, resume bool, model string) error {
-	return makeAgentCmd(agent, wtPath, resume, model).Run()
+func LaunchAgent(cfg config.Config, agent config.AgentConfig, wtPath string, resume bool, model string) error {
+	return makeAgentCmd(cfg, agent, wtPath, resume, model).Run()
 }
 
 // LaunchAgentPrompt runs the agent in wtPath with prompt as its next message,
@@ -370,4 +377,28 @@ func LaunchAgentPrompt(agent config.AgentConfig, wtPath, model, prompt string) b
 	}
 	wireStdio(exec.Command("claude", append(args, prompt)...), wtPath).Run()
 	return true
+}
+
+// popover renders a small box over the current view: bordered, padded, sized to
+// its content, centered across the terminal and sitting near the top.
+//
+// Not frame(): that one fills the terminal's height, which for a box of six
+// lines means a tall empty rectangle with the content pushed to the bottom.
+func popover(content string, boxWidth, termWidth, termHeight int) string {
+	// Width() is the content box, so the border and padding sit outside it:
+	// asking for more than the terminal can hold is what clips every line.
+	inner := max(min(boxWidth, termWidth-4)-6, 20)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorLavender).
+		Padding(1, 2).
+		Width(inner).
+		Render(content)
+	// Centered both ways: a box pinned to the top of a tall terminal reads as
+	// something that failed to lay out rather than as a deliberate overlay.
+	centered := centerBlock(box, termWidth)
+	if top := (termHeight - lipgloss.Height(centered)) / 2; top > 0 {
+		centered = strings.Repeat("\n", top) + centered
+	}
+	return centered
 }

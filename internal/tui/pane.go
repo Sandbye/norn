@@ -7,7 +7,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/sandbye/norn/internal/pty"
+	"github.com/sandbye/norn/internal/state"
 	"github.com/sandbye/norn/internal/strand"
 )
 
@@ -20,6 +22,11 @@ import (
 // paneRefresh is how often the screen is re-read while a pane is open. Fast
 // enough that typing feels local, and only ever one pane is open.
 const paneRefresh = 40 * time.Millisecond
+
+// paneMargin is the breathing room norn keeps around an agent's screen. One
+// column: enough that text is not welded to the edge, cheap enough that the
+// agent still lays out for something close to the real terminal.
+const paneMargin = 1
 
 // Inside a pane every keystroke belongs to the agent, so norn's own bindings
 // sit behind a leader, the way tmux does it: leader, then one key. Pressing the
@@ -183,21 +190,19 @@ func ctrlByte(name string) (byte, bool) {
 // renderPane draws the attached strand: its screen, and one line saying whose
 // it is and how to get back.
 func (d Dashboard) renderPane() string {
-	title := headerStyle.Render("⟡ " + d.pane.role)
-	if d.pane.branch != "" {
-		title += dimStyle.Render("   " + d.pane.branch)
-	}
+	title := d.paneHeader()
 	body := d.pane.term.Screen()
 	leader := d.cfg.PaneLeaderKey()
-	foot := dimStyle.Render(leader + " ← back · " + leader + " ↓/↑ other strand · everything else goes to the agent")
+	foot := dimStyle.Render("  " + leader + " ← back · ↓/↑ strand · f go to · b board")
 	if d.pane.armed {
-		foot = cursorStyle.Render(leader+" ▸ ") + dimStyle.Render("← back · ↓/↑ other strand · "+leader+" sends a literal one")
+		foot = cursorStyle.Render("  "+leader+" ▸ ") + dimStyle.Render("← back · ↓/↑ strand · f go to · b board · "+leader+" literal")
 	}
 	if d.pane.dead() {
 		foot = errorStyle.Render("this attachment ended") + dimStyle.Render(" · any key returns to threads")
 	}
 	col, row := d.pane.term.Cursor()
-	return fmt.Sprintf("%s\n%s\n%s", title, drawCursor(strings.TrimRight(body, "\n"), col, row), foot)
+	screen := drawCursor(strings.TrimRight(body, "\n"), col, row)
+	return fmt.Sprintf("%s\n%s\n\n%s", title, indent(screen, paneMargin), foot)
 }
 
 // taskSpawnedMsg reports that a split create spawned every strand, so the app
@@ -221,7 +226,10 @@ func (d Dashboard) paneSizeFor(width, height int) (cols, rows int) {
 	// Full width, and the height minus the one title line, the one footer line
 	// and the blank line above each. An agent's UI is written for a terminal,
 	// so anything norn keeps for itself is a column the agent does not get.
-	cols, rows = width, height-4
+	// The agent gets the terminal minus norn's own chrome: two lines above
+	// (mark, strands), two below (blank, keys), and a column of margin each
+	// side so its output does not run into the edge of the screen.
+	cols, rows = width-2*paneMargin, height-5
 	if cols < 20 {
 		cols = 20
 	}
@@ -291,5 +299,48 @@ func drawCursor(body string, col, row int) string {
 		under = " "
 	}
 	lines[row] = string(runes[:col]) + cursorCellStyle.Render(under) + string(runes[col+1:])
+	return strings.Join(lines, "\n")
+}
+
+// paneHeader is the frame that says you are still in norn. One line naming the
+// tree and this strand, one listing the task's other strands with their state,
+// so being inside an agent does not cost you the view of the rest.
+func (d Dashboard) paneHeader() string {
+	mark := lipgloss.NewStyle().Bold(true).Foreground(colorLavender).Render("ᚾᛟᚱᚾ")
+	line := "  " + mark + "  " + headerStyle.Render("⟡ "+d.pane.role)
+	if d.pane.branch != "" {
+		line += dimStyle.Render("  " + d.pane.branch)
+	}
+
+	var chips []string
+	for _, r := range d.rows {
+		if r.TaskID != d.pane.taskID || r.Role == "" {
+			continue
+		}
+		chip := r.Role + strings.TrimSpace(runMark(r))
+		switch {
+		case r.Role == d.pane.role:
+			chips = append(chips, cursorStyle.Render(chip))
+		case r.Bell || r.Run == state.RunFailed:
+			chips = append(chips, dirtyStyle.Render(chip))
+		case r.Run == state.RunMerged:
+			chips = append(chips, activeStyle.Render(chip))
+		default:
+			chips = append(chips, dimStyle.Render(chip))
+		}
+	}
+	if len(chips) == 0 {
+		return line
+	}
+	return line + "\n" + dimStyle.Render("    strands: ") + strings.Join(chips, dimStyle.Render(" · "))
+}
+
+// indent shifts a rendered screen right, without touching its styling.
+func indent(body string, by int) string {
+	pad := strings.Repeat(" ", by)
+	lines := strings.Split(body, "\n")
+	for i := range lines {
+		lines[i] = pad + lines[i]
+	}
 	return strings.Join(lines, "\n")
 }

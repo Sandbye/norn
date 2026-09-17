@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sandbye/norn/internal/config"
@@ -54,8 +56,14 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 			if strand.Alive(taskID, sess.Role) {
 				continue // already running, and re-spawning would lose its work
 			}
+			if rc, ok := cfg.Role(sess.Role); ok && rc.After != "" {
+				// Waiting on another strand: it starts when that one lands, so
+				// its branch forks from a trunk that already holds the work it
+				// is supposed to build on.
+				continue
+			}
 			agent := cfg.AgentFor(sess.Role)
-			argv := strandCmd(agent, sess.Path, agent.Model).Args
+			argv := strandCmd(cfg, agent, sess.Path, agent.Model).Args
 			if err := strand.Spawn(taskID, sess.Role, sess.Path, argv, cols, rows); err != nil {
 				return runStartedMsg{taskID: taskID, err: err}
 			}
@@ -120,6 +128,7 @@ func roleLogPath(taskID, role string) string {
 
 // landedMsg reports the outcome of landing one strand on the trunk.
 type landedMsg struct {
+	taskID  string
 	role    string
 	commits int
 	blocked bool
@@ -131,7 +140,7 @@ type landedMsg struct {
 // A keypress rather than something norn does on exit: with a live pane, exit
 // also means "I quit to look at something", and a merge commit is not undone
 // casually. The merge itself is #71's, unchanged.
-func landStrandCmd(row dashRow) tea.Cmd {
+func landStrandCmd(cfg config.Config, row dashRow) tea.Cmd {
 	return func() tea.Msg {
 		store, err := state.Load()
 		if err != nil {
@@ -156,6 +165,9 @@ func landStrandCmd(row dashRow) tea.Cmd {
 		if n == 0 {
 			return landedMsg{role: row.Role, err: errors.New("nothing to land: no commits on this strand")}
 		}
+		if err := checkExpect(cfg, row); err != nil {
+			return landedMsg{role: row.Role, err: err}
+		}
 
 		msg := fmt.Sprintf("Merge role %s (%s) into %s", row.Role, row.Branch, task.Trunk)
 		if err := git.MergeNoFF(trunk.Path, row.Branch, msg); err != nil {
@@ -164,6 +176,85 @@ func landStrandCmd(row dashRow) tea.Cmd {
 			return landedMsg{role: row.Role, blocked: true, err: err}
 		}
 		_, _ = state.Mutate(func(s *state.Store) bool { return s.SetRun(row.Path, state.RunMerged, 0) })
-		return landedMsg{role: row.Role, commits: n}
+		return landedMsg{taskID: row.TaskID, role: row.Role, commits: n}
+	}
+}
+
+// checkExpect runs the repo's verify in the strand's own worktree and holds the
+// merge unless the result is what the role promised.
+//
+// This is the half of red-first a machine can check: a test strand whose suite
+// passes before the implementation exists has written a test that proves
+// nothing, and letting it land is how the whole sequence becomes decoration.
+func checkExpect(cfg config.Config, row dashRow) error {
+	rc, ok := cfg.Role(row.Role)
+	if !ok || rc.Expect == "" {
+		return nil
+	}
+	if len(cfg.Verify) == 0 {
+		return fmt.Errorf("%s expects %s, but this repo declares no verify commands to check it with", row.Role, rc.Expect)
+	}
+	passed, failing, out := runVerify(row.Path, cfg.Verify)
+	switch {
+	case rc.Expect == config.ExpectGreen && !passed:
+		return fmt.Errorf("%s must leave the tree green, and `%s` fails:\n%s", row.Role, failing, out)
+	case rc.Expect == config.ExpectRed && passed:
+		return fmt.Errorf("%s must leave a failing test, and every verify command passes: a test that does not fail proves nothing", row.Role)
+	}
+	return nil
+}
+
+// runVerify runs the configured commands in dir, stopping at the first failure.
+// The output of that one is returned, since it is the only one worth reading.
+func runVerify(dir string, cmds []string) (passed bool, failing, output string) {
+	for _, c := range cmds {
+		cmd := exec.Command("sh", "-c", c)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return false, c, lastLines(string(out), 12)
+		}
+	}
+	return true, "", ""
+}
+
+// lastLines keeps the tail of a command's output: a failing suite's useful part
+// is at the end, and a full log does not belong in a notice.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// spawnWaitingCmd starts the strands that were waiting for the one that just
+// landed. This is what makes the sequence real rather than advisory: the next
+// role's branch forks from a trunk that already contains its predecessor's
+// work, so a test written before the implementation is a fact of the history.
+func spawnWaitingCmd(cfg config.Config, taskID, landed string, cols, rows int) tea.Cmd {
+	return func() tea.Msg {
+		store, err := state.Load()
+		if err != nil {
+			return runStartedMsg{taskID: taskID, err: err}
+		}
+		started := 0
+		for _, sess := range store.SessionsForTask(taskID) {
+			rc, ok := cfg.Role(sess.Role)
+			if !ok || rc.After != landed || strand.Alive(taskID, sess.Role) {
+				continue
+			}
+			agent := cfg.AgentFor(sess.Role)
+			argv := strandCmd(cfg, agent, sess.Path, agent.Model).Args
+			if err := strand.Spawn(taskID, sess.Role, sess.Path, argv, cols, rows); err != nil {
+				return runStartedMsg{taskID: taskID, err: err}
+			}
+			setStrandRunning(sess.Path)
+			started++
+		}
+		if started == 0 {
+			return nil
+		}
+		return runStartedMsg{taskID: taskID}
 	}
 }

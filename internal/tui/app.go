@@ -65,6 +65,7 @@ const (
 	ResultLaunch                // launch new Claude session
 	ResultResume                // resume existing Claude session
 	ResultCd                    // cd into worktree shell
+	ResultReview                // review a strand's work, then hand it back to that strand
 	ResultSettings              // open the settings view
 )
 
@@ -73,6 +74,11 @@ type Result struct {
 	Action ResultAction
 	Path   string // worktree path
 	Model  string // per-session model override for ResultLaunch (empty → config default)
+	// Review carries what ResultReview needs: the strand's worktree is Path,
+	// and these say what to diff it against and whose session gets the review.
+	Base   string
+	TaskID string
+	Role   string
 	// RoleTail names the other role worktrees of a split create, printed once
 	// the trunk's agent exits. Empty for a single worktree.
 	RoleTail []string
@@ -125,6 +131,15 @@ type errMsg struct{ err error }
 // NewApp builds the unified tabbed program. scope is the repo basename the
 // Threads/dashboard tab is scoped to ("" = all repos). initialView is the tab
 // (or the ViewCd picker) to open on.
+// OpenBoardFor makes the app open on a task's board, which is how norn comes
+// back to where you were after a detour into the diff viewer.
+func (a App) OpenBoardFor(taskID string) App {
+	a.current = ViewThreads
+	a.dashboard.showBoard = taskID != ""
+	a.dashboard.boardTask = taskID
+	return a
+}
+
 func NewApp(cfg config.Config, repoRoot, scope string, initialView View) App {
 	return App{
 		cfg:       cfg,
@@ -231,7 +246,8 @@ func (a App) capturing() bool {
 	switch a.current {
 	case ViewThreads:
 		return a.dashboard.filter.active || a.dashboard.showSummary || a.dashboard.showLog ||
-			a.dashboard.reply.active || a.dashboard.pane.open()
+			a.dashboard.reply.active || a.dashboard.pane.open() ||
+			a.dashboard.switcher.active || a.dashboard.showBoard
 	case ViewTasks:
 		return a.tasks.filter.active || a.tasks.confirming
 	case ViewCreate:
@@ -300,6 +316,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(c1, c2)
 
 	case worktreesLoadedMsg:
+		a.clean.strands = labelStrands()
 		a.err = nil
 		a.clean.worktrees = msg.worktrees
 		a.cd.worktrees = msg.worktrees
@@ -586,7 +603,9 @@ func helpFor(v View) []keyHint {
 			{"⏎", "cd into worktree"}, {"o", "open the agent"}, {"s", "summarize"},
 			{"p", "open PR"}, {"t", "open task"}, {"d", "clean worktree"},
 			{"R", "spawn this task's strands"}, {"→", "enter a strand (ctrl+a ← leaves)"},
-			{"L", "land a finished strand on the trunk"},
+			{"L", "land a finished strand on the trunk"}, {"f", "go to strand (ctrl+a f in a pane)"},
+			{"b", "task board: what is done, what is outstanding"},
+			{"d (in board)", "review a strand's work, hand it back to that strand"},
 			{"/", "filter"}, {"a", "all repos"}, {"r", "refresh"}, {"j/k g/G", "move"},
 		}
 	case ViewTasks:
@@ -636,10 +655,12 @@ func (a App) View() string {
 		return frame(renderHelp(a.current), a.width, a.height)
 	}
 
-	// A strand's pane is full-bleed: an agent draws its own UI, and norn's
-	// centered frame would both steal columns it needs and put a second border
-	// around one it already drew.
-	if a.current == ViewThreads && a.dashboard.pane.open() {
+	// The pane and the popovers draw their own full-screen layout. norn's
+	// centered frame would nest a second border around them and, worse, clip
+	// them: a box sized to the terminal does not fit inside a frame that is
+	// narrower than it.
+	if a.current == ViewThreads &&
+		(a.dashboard.pane.open() || a.dashboard.switcher.active || a.dashboard.showBoard) {
 		return a.dashboard.View()
 	}
 
@@ -786,7 +807,7 @@ func createWorktree(cfg config.Config, repoRoot string, c createModel, cols, row
 		if res.Split() && strand.Available() {
 			for _, t := range res.Threads {
 				agent := cfg.AgentFor(t.Role)
-				argv := strandCmd(agent, t.Path, agent.Model).Args
+				argv := strandCmd(cfg, agent, t.Path, agent.Model).Args
 				if err := strand.Spawn(res.TaskID, t.Role, t.Path, argv, cols, rows); err != nil {
 					return errMsg{err}
 				}

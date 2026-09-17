@@ -113,15 +113,38 @@ func TestLivePaneKeepsItsKeys(t *testing.T) {
 // three strands running you are looking at one pane at most: the others would
 // stop at the first prompt and wait for someone who is elsewhere.
 func TestStrandStartsInAutoMode(t *testing.T) {
-	args := strandCmd(config.AgentConfig{Command: "claude"}, "/wt/logic", "").Args
+	args := strandCmd(config.Config{}, config.AgentConfig{Command: "claude"}, "/wt/logic", "").Args
 	joined := " " + strings.Join(args, " ") + " "
 	if !strings.Contains(joined, " --permission-mode auto ") {
 		t.Fatalf("strand launch is not in auto mode: %v", args)
 	}
 
+	if !strings.Contains(joined, " --prompt-suggestions false ") {
+		t.Fatalf("a strand can still have a suggestion typed into it by Tab: %v", args)
+	}
+
 	// The key you press yourself is unchanged: entering a worktree with `o` is
 	// you sitting down at it, and that is when manual is the right default.
-	if got := makeAgentCmd(config.AgentConfig{Command: "claude"}, "/wt/logic", false, "").Args; strings.Contains(strings.Join(got, " "), "--permission-mode") {
+	if got := makeAgentCmd(config.Config{}, config.AgentConfig{Command: "claude"}, "/wt/logic", false, "").Args; strings.Contains(strings.Join(got, " "), "--permission-mode") {
 		t.Fatalf("an interactive launch changed its permission mode: %v", got)
+	}
+}
+
+// Effort is per model, so opus can think harder than sonnet without a flag on
+// every launch. A model with no entry falls back to "default".
+func TestEffortPerModel(t *testing.T) {
+	cfg := config.Config{Effort: map[string]string{"opus": "xhigh", "default": "high"}}
+
+	args := makeAgentCmd(cfg, config.AgentConfig{Command: "claude"}, "/wt/x", false, "opus").Args
+	if !strings.Contains(" "+strings.Join(args, " ")+" ", " --effort xhigh ") {
+		t.Fatalf("opus did not get its effort: %v", args)
+	}
+	args = makeAgentCmd(cfg, config.AgentConfig{Command: "claude"}, "/wt/x", false, "sonnet").Args
+	if !strings.Contains(" "+strings.Join(args, " ")+" ", " --effort high ") {
+		t.Fatalf("a model with no entry did not fall back to default: %v", args)
+	}
+	args = makeAgentCmd(config.Config{}, config.AgentConfig{Command: "claude"}, "/wt/x", false, "opus").Args
+	if strings.Contains(strings.Join(args, " "), "--effort") {
+		t.Fatalf("an unconfigured repo passed an effort anyway: %v", args)
 	}
 }

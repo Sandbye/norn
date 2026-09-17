@@ -86,6 +86,17 @@ type Config struct {
 	// Theme selects the TUI color palette: "nord" (default) or "frog".
 	Theme string `yaml:"theme,omitempty" json:"theme,omitempty"`
 
+	// Effort is the default reasoning effort per model, for agents that take
+	// one (claude's --effort: low, medium, high, xhigh, max). Keyed by the
+	// model as you write it elsewhere in this config ("opus", "sonnet", or a
+	// full id), with "default" as the fallback for a session that names no
+	// model.
+	//
+	//	effort:
+	//	  opus: xhigh
+	//	  default: high
+	Effort map[string]string `yaml:"effort,omitempty" json:"effort,omitempty"`
+
 	// PaneLeader is the prefix that makes the next key norn's inside a strand's
 	// pane ("ctrl+a" by default). `ctrl+b` is not a candidate: a pane is a real
 	// tmux client, so that one is already tmux's.
@@ -166,6 +177,16 @@ type AgentConfig struct {
 	// empty leaves the agent's own default. The New tab can override it per
 	// session. Non-claude agents pass model via Args instead.
 	Model string `yaml:"model,omitempty" json:"model,omitempty"`
+}
+
+// EffortFor is the effort level configured for a model, or "" when none is.
+// A model with no entry of its own falls back to the "default" key, so one line
+// covers every session and a specific model can still override it.
+func (c Config) EffortFor(model string) string {
+	if e, ok := c.Effort[model]; ok && model != "" {
+		return e
+	}
+	return c.Effort["default"]
 }
 
 // PaneLeaderKey is the prefix that makes the next key norn's while a strand's

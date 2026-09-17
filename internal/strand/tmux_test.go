@@ -206,3 +206,30 @@ func TestSendToMissingStrand(t *testing.T) {
 		t.Fatalf("Send to a missing strand = %v, want ErrNoSession", err)
 	}
 }
+
+// A note replaces whatever was half-typed in the agent's input rather than
+// being appended to it. Without this a review lands glued to the end of a
+// sentence somebody left in the box, and both are sent as one message.
+func TestSendClearsWhatWasTyped(t *testing.T) {
+	id := spawned(t, "logic", "sh", "-c", "read line; printf 'heard:%s' \"$line\"; sleep 30")
+
+	waitFor(t, "the shell to be reading", func() bool {
+		st, err := Read(id, "logic")
+		return err == nil && st.Running
+	})
+	// Something already in the box, unsent.
+	if out, err := run("send-keys", "-t", Name(id, "logic"), "-l", "half a thought"); err != nil {
+		t.Fatalf("seeding the input: %v: %s", err, out)
+	}
+	if err := Send(id, "logic", "[design] the note"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the note to arrive alone", func() bool {
+		out, _ := exec.Command("tmux", "-L", socket, "capture-pane", "-p", "-t", Name(id, "logic")).Output()
+		return strings.Contains(string(out), "heard:[design] the note")
+	})
+	out, _ := exec.Command("tmux", "-L", socket, "capture-pane", "-p", "-t", Name(id, "logic")).Output()
+	if strings.Contains(string(out), "half a thought") {
+		t.Fatalf("the note was appended to what was already typed:\n%s", out)
+	}
+}

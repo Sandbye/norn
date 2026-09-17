@@ -36,7 +36,24 @@ type RoleConfig struct {
 	// Integrates marks the single role that merges the other roles' output.
 	// Exactly one role in the map carries it; Validate rejects zero or several.
 	Integrates bool `yaml:"integrates,omitempty" json:"integrates,omitempty"`
+
+	// After names a role this one waits for. It is not spawned at create; it
+	// starts when that role lands, so its branch forks from a trunk that
+	// already contains the other's work. Empty means it starts with the rest.
+	After string `yaml:"after,omitempty" json:"after,omitempty"`
+
+	// Expect is what the repo's verify must report for this role's work to be
+	// allowed onto the trunk: "red" for a strand whose job is a failing test,
+	// "green" for one that has to leave the tree working. Empty gates nothing.
+	Expect string `yaml:"expect,omitempty" json:"expect,omitempty"`
 }
+
+// Expect values. Red is the half of red-first a machine can check: a test that
+// passes before the implementation exists proves nothing.
+const (
+	ExpectRed   = "red"
+	ExpectGreen = "green"
+)
 
 // UnmarshalYAML merges each block into the role already loaded from a broader
 // config file, keeping keys the narrower file left out.
@@ -77,7 +94,9 @@ func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 		Args       []string `yaml:"args"`
 		Model      string   `yaml:"model"`
 		Integrates bool     `yaml:"integrates"`
-	}{Args: r.Args, Model: r.Model, Integrates: r.Integrates}
+		After      string   `yaml:"after"`
+		Expect     string   `yaml:"expect"`
+	}{Args: r.Args, Model: r.Model, Integrates: r.Integrates, After: r.After, Expect: r.Expect}
 	if err := node.Decode(&v); err != nil {
 		return err
 	}
@@ -94,6 +113,8 @@ func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 	*r = RoleConfig{
 		AgentConfig: AgentConfig{Command: command, Args: v.Args, Model: v.Model},
 		Integrates:  v.Integrates,
+		After:       v.After,
+		Expect:      v.Expect,
 	}
 	return nil
 }
@@ -178,6 +199,20 @@ func (c Config) Validate() error {
 	for _, name := range sortedNames(c.Roles) {
 		if !roleNamePattern.MatchString(name) {
 			return fmt.Errorf("role %q: a role name becomes a branch segment, so use letters, digits, dot, dash or underscore", name)
+		}
+		role := c.Roles[name]
+		if role.After != "" {
+			if _, ok := c.Roles[role.After]; !ok {
+				return fmt.Errorf("role %q waits for %q, which this repo does not declare", name, role.After)
+			}
+			if role.After == name {
+				return fmt.Errorf("role %q waits for itself", name)
+			}
+		}
+		switch role.Expect {
+		case "", ExpectRed, ExpectGreen:
+		default:
+			return fmt.Errorf("role %q: expect is %q, and the only values are %q and %q", name, role.Expect, ExpectRed, ExpectGreen)
 		}
 		if flag := reservedArg(c.Roles[name].Args); flag != "" {
 			return fmt.Errorf("role %q: `args:` sets %s, which norn sets itself when it runs the role (use args for what norn does not model, like `-c` keys)", name, flag)

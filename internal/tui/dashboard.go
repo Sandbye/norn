@@ -49,6 +49,19 @@ type Dashboard struct {
 	// but one while it is open.
 	pane paneState
 
+	// switcher is the go-to-strand picker, reachable from the rail and from
+	// inside a pane.
+	switcher switcherState
+
+	// showBoard is the task board: one screen answering what is done and what
+	// is outstanding, without reading three agent transcripts. boardCursor is
+	// the strand selected in it.
+	showBoard   bool
+	boardCursor int
+	// boardTask pins the board to a task even when the rail's cursor is
+	// elsewhere, which is how norn reopens it after the diff viewer.
+	boardTask string
+
 	showLog   bool
 	logTask   string
 	logRole   string
@@ -195,6 +208,7 @@ type dashRow struct {
 	TaskTrunk     string            // owning task's trunk branch (ephemeral)
 	TaskBlocked   string            // why the owning task needs a person, "" when it does not (ephemeral)
 	Bell          bool              // the strand rang the terminal bell and nobody has looked (ephemeral)
+	Ahead         int               // commits this strand has that the trunk does not (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -309,6 +323,66 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 
+		// The board owns the keyboard while it is open: it is a place to read
+		// and to jump from, so a stray key must not act on the rail behind it.
+		if d.showBoard {
+			rows := d.boardRows(d.visibleRows())
+			switch {
+			case s == "esc" || s == "b" || s == "q":
+				d.showBoard, d.boardTask = false, ""
+			case s == "down" || s == "j":
+				if d.boardCursor < len(rows)-1 {
+					d.boardCursor++
+				}
+			case s == "up" || s == "k":
+				if d.boardCursor > 0 {
+					d.boardCursor--
+				}
+			case s == "right" || s == "enter":
+				if row, ok := boardSelected(rows, d.boardCursor); ok {
+					d.showBoard = false
+					cols, paneRows := d.paneSize()
+					return d, tea.Batch(openPaneCmd(row.TaskID, row.Role, row.Branch, cols, paneRows), paneTick())
+				}
+			case s == "d":
+				// Review this strand's work before it lands. The diff view and
+				// its review sink already exist; this only points them at a
+				// strand and hands the result back to that strand's session.
+				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Branch != row.TaskTrunk {
+					d.showBoard, d.quit = false, true
+					d.result = Result{
+						Action: ResultReview, Path: row.Path,
+						Base: row.TaskTrunk, TaskID: row.TaskID, Role: row.Role,
+					}
+					return d, tea.Quit
+				}
+			case s == "L":
+				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Ahead > 0 {
+					d.showBoard = false
+					d.notice = "landing " + row.Role + "…"
+					return d, landStrandCmd(d.cfg, row)
+				}
+			}
+			return d, nil
+		}
+
+		// The picker is above everything, including a pane: it is how you get
+		// out of one and into another.
+		if d.switcher.active {
+			switch s {
+			case "esc":
+				d.switcher = switcherState{}
+				return d, nil
+			case "enter":
+				return d.enterSelected()
+			}
+			if d.switcher.handleKey(s) {
+				d.switcher.matched = switcherMatches(d.rows, d.switcher.query)
+				return d, nil
+			}
+			return d, nil
+		}
+
 		// An open pane owns the keyboard. Exactly one key is norn's, and
 		// everything else is encoded and handed to the agent untouched.
 		if d.pane.open() {
@@ -328,6 +402,17 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return d, d.loadCmd()
 				case paneKeyIs(s, paneKeysNext), paneKeyIs(s, paneKeysPrev):
 					return d.enterSibling(paneKeyIs(s, paneKeysNext))
+				case s == "f":
+					d.openSwitcher()
+					return d, nil
+				case s == "b":
+					// The board for the task you are inside, which is the one
+					// the pane belongs to rather than whatever the rail's
+					// cursor happens to sit on.
+					taskID := d.pane.taskID
+					d.pane.close()
+					d.showBoard, d.boardCursor, d.boardTask = true, 0, taskID
+					return d, d.loadCmd()
 				case s == leader:
 					// Leader twice sends a literal one, so a key the agent
 					// binds never becomes unreachable.
@@ -460,6 +545,18 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			fallthrough
+		case "b":
+			// The task board. One screen for the whole task, because a split
+			// task's truth is otherwise spread across three transcripts.
+			if d.cursor < len(vis) && vis[d.cursor].TaskID != "" {
+				d.showBoard, d.boardCursor = true, 0
+			} else {
+				d.notice = "no task here: this thread is not part of one"
+			}
+			return d, nil
+		case "f":
+			d.openSwitcher()
+			return d, nil
 		case "l":
 			// What a headless role is doing, and where you talk to it. Right
 			// arrow because the rail is a list and the conversation is what
@@ -497,7 +594,7 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.notice = row.Role + " is already landed"
 				default:
 					d.notice = "landing " + row.Role + "…"
-					return d, landStrandCmd(row)
+					return d, landStrandCmd(d.cfg, row)
 				}
 				return d, nil
 			}
@@ -767,6 +864,10 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.notice = msg.role + ": " + msg.err.Error()
 		default:
 			d.notice = fmt.Sprintf("landed %s, %d commit(s) on the trunk", msg.role, msg.commits)
+			// Whatever was waiting for this role starts now, from a trunk that
+			// contains it.
+			cols, rows := d.paneSize()
+			return d, tea.Batch(d.loadCmd(), spawnWaitingCmd(d.cfg, msg.taskID, msg.role, cols, rows))
 		}
 		return d, d.loadCmd()
 
@@ -871,6 +972,14 @@ func (d Dashboard) View() string {
 			body = renderMarkdown(d.summary, d.width)
 		}
 		return fmt.Sprintf("%s\n\n%s\n\n%s", title, body, dimStyle.Render("r refresh · any key to dismiss"))
+	}
+
+	if d.switcher.active {
+		return d.renderSwitcher()
+	}
+
+	if d.showBoard {
+		return d.renderBoard(d.visibleRows())
 	}
 
 	if d.pane.open() {
@@ -1436,7 +1545,7 @@ func (d Dashboard) dashKeyHelp() string {
 		return dimStyle.Render("type your answer · ⏎ send · ⇥ permission · ctrl+u clear · esc cancel")
 	}
 	// Concise essentials; the full keymap lives in the global `?` help overlay.
-	return dimStyle.Render("⏎ cd · → enter · R spawn · L land · i answer · ? help")
+	return dimStyle.Render("⏎ cd · → enter · R spawn · L land · b board · f go · ? help")
 }
 
 func openPRInBrowser(branch, repoDir string) {
@@ -1589,6 +1698,7 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				// Without this a strand that finished while you were elsewhere
 				// still reads as running, and nothing offers to land it.
 				row.Run = reconcileRun(sess, &row)
+				row.Ahead = strandAhead(store, sess)
 			}
 			if git.CurrentBranch(sess.Path) == "" {
 				// Branch deleted under the worktree: label the sha so the row
@@ -1795,4 +1905,23 @@ func reconcileRun(sess state.Session, row *dashRow) string {
 // asking tmux again.
 func setStrandRun(path, run string) {
 	_, _ = state.Mutate(func(s *state.Store) bool { return s.SetRun(path, run, 0) })
+}
+
+// strandAhead is how many commits a strand has that the trunk does not.
+//
+// Asked of git rather than of the store, because the integrating strand merges
+// branches itself, and a board that only believed norn's own landing key would
+// keep reporting work as outstanding after it had already shipped. Zero means
+// nothing is waiting, whether it landed or was never written.
+func strandAhead(store *state.Store, sess state.Session) int {
+	task := store.FindTask(sess.TaskID)
+	trunk := store.FindTaskTrunk(sess.TaskID)
+	if task == nil || trunk == nil || sess.Branch == task.Trunk {
+		return 0
+	}
+	n, err := git.CommitsAhead(trunk.Path, task.Trunk, sess.Branch)
+	if err != nil {
+		return 0
+	}
+	return n
 }
