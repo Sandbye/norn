@@ -145,7 +145,28 @@ func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef, 
 		Generated:    time.Now().Format("2006-01-02 15:04"),
 	}
 
-	return renderNamed(tmplName, data)
+	out, err := renderNamed(tmplName, data)
+	if err != nil {
+		return "", err
+	}
+	return withRole(out, data)
+}
+
+// withRole appends the role contract to a rendered brief.
+//
+// Appended rather than left to the template, because a template that omits it
+// turns a split into three worktrees working the same task: the role block is
+// what makes a strand a strand, and any template may be replaced by a user's
+// own. Non-split creates render nothing extra.
+func withRole(body string, data Data) (string, error) {
+	if data.Role == nil {
+		return body, nil
+	}
+	block, err := renderNamed("role.md.tmpl", data)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(body, "\n") + "\n\n" + strings.TrimSpace(block) + "\n", nil
 }
 
 // RenderReview renders the review brief for a PR-checkout worktree (norn review
