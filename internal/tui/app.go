@@ -151,14 +151,16 @@ func newCreateFor(cfg config.Config, repoRoot string) createModel {
 	return c
 }
 
-// modelChoices returns the per-session model options for the New tab. Only
-// claude gets a picker (via --model); other agents pass model through Args, so
-// they get no choices (empty → picker hidden). "" means the agent's default.
+// modelChoices returns the per-session model options for the New tab. The
+// options come from the configured agent: claude and codex both take a --model
+// flag, and an agent norn knows no models for gets no choices (empty → picker
+// hidden). "" means the agent's default.
 func modelChoices(cfg config.Config) []string {
-	if cfg.AgentCommand() != "claude" {
+	models := agentModels(cfg.AgentCommand())
+	if len(models) == 0 {
 		return nil
 	}
-	choices := []string{"", "sonnet", "opus", "haiku"}
+	choices := append([]string{""}, models...)
 	// Keep a custom configured default selectable even if it's not an alias.
 	if cfg.Agent.Model != "" {
 		found := false
@@ -536,6 +538,7 @@ func helpFor(v View) []keyHint {
 		return []keyHint{
 			{"⏎", "cd into worktree"}, {"o", "open the agent"}, {"s", "summarize"},
 			{"p", "open PR"}, {"t", "open task"}, {"d", "clean worktree"},
+			{"R", "run this task's headless roles"}, {"l", "a role's run log"},
 			{"/", "filter"}, {"a", "all repos"}, {"r", "refresh"}, {"j/k g/G", "move"},
 		}
 	case ViewTasks:

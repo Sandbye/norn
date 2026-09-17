@@ -33,8 +33,9 @@ type settingRow struct {
 
 func settingRows() []settingRow {
 	return []settingRow{
-		{"Agent", "command", []string{"agent", "command"}, kindPicker, []string{"claude", "opencode", "aider", "gemini"}},
-		{"Agent", "model", []string{"agent", "model"}, kindPicker, []string{"sonnet", "opus", "haiku"}},
+		{"Agent", "command", []string{"agent", "command"}, kindPicker, []string{"claude", "codex", "opencode", "aider", "gemini"}},
+		// Models are per agent, so the row's choices are computed, not static.
+		{"Agent", "model", []string{"agent", "model"}, kindPicker, nil},
 		{"Agent", "ai_naming", []string{"ai_naming"}, kindBool, nil},
 		{"Worktrees", "worktree_dir", []string{"worktree_dir"}, kindString, nil},
 		{"Worktrees", "pr_base", []string{"pr_base"}, kindString, nil},
@@ -343,12 +344,60 @@ func (m settingsModel) choicesFor(r settingRow) []string {
 	switch strings.Join(r.keys, ".") {
 	case "template":
 		base = prompt.List()
+	case "agent.model":
+		base = agentModels(m.cfg.AgentCommand())
 	case "theme":
 		return ThemeNames() // fixed set, no custom
 	default:
 		base = append(base, r.choices...)
 	}
 	return append(base, "(custom…)")
+}
+
+// agentModels lists the models worth offering for an agent. Claude has stable
+// aliases norn can name. For every other vendor it cannot: a hardcoded list of
+// model ids is wrong within a release, so codex is offered the model its own
+// config already records and everyone else gets the free-text entry.
+func agentModels(agent string) []string {
+	switch agent {
+	case "claude":
+		return []string{"sonnet", "opus", "haiku"}
+	case "codex":
+		if m := codexModel(); m != "" {
+			return []string{m}
+		}
+	}
+	return nil
+}
+
+// codexModel reads the model from codex's own config, which is the one place
+// that is true without norn tracking another vendor's lineup.
+func codexModel() string {
+	home := os.Getenv("CODEX_HOME")
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		home = filepath.Join(h, ".codex")
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.toml"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, "model")
+		if !ok {
+			continue
+		}
+		rest = strings.TrimSpace(rest)
+		if !strings.HasPrefix(rest, "=") {
+			continue // model_reasoning_effort and friends
+		}
+		return strings.Trim(strings.TrimSpace(strings.TrimPrefix(rest, "=")), `"`)
+	}
+	return ""
 }
 
 func (m settingsModel) updateText(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
