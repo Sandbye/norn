@@ -1561,7 +1561,7 @@ func cmdInit(repoRoot string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("✓ Project config created:\n  %s\n\nDetected stack: %s\nBase branch:    %s\n\nNext: edit it (forbid/format/review/docs), then `work --doctor` to validate.\n", short(target, home), stack, baseBranch)
+	fmt.Printf("✓ Project config created:\n  %s\n\nDetected stack: %s\nBase branch:    %s\n\nNext: edit it (forbid/format/review/docs), then `norn --doctor` to validate.\n", short(target, home), stack, baseBranch)
 }
 
 // detectStack returns a short tag for the repo's primary language ecosystem.
@@ -1688,7 +1688,7 @@ func short(p, home string) string {
 	return p
 }
 
-// cmdDoctor checks the full work + hook + skill installation. Reports per-check
+// cmdDoctor checks the full norn + hook + skill installation. Reports per-check
 // status with a fix hint. Exit code = number of failures.
 func cmdDoctor(cfg config.Config, repoRoot string) {
 	home, _ := os.UserHomeDir()
@@ -1851,7 +1851,7 @@ func checkDocsPaths(home string) doctorCheck {
 		return doctorCheck{
 			name:   fmt.Sprintf("docs paths resolve (%d)", total),
 			detail: "missing: " + strings.Join(missing, ", "),
-			fix:    "clone the doc repos or run `work --refresh-docs`",
+			fix:    "clone the doc repos or run `norn --refresh-docs`",
 			warn:   true,
 		}
 	}

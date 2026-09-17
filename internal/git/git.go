@@ -491,7 +491,7 @@ func CreateWorktreeFrom(repoRoot, worktreeDir, branch, startRef string, remoteSt
 	}
 
 	// Push the empty branch immediately so origin tracks it from day one.
-	// Without this, the dashboard's PR lookup and `work diff` against origin/<branch>
+	// Without this, the dashboard's PR lookup and `norn diff` against origin/<branch>
 	// produce false negatives until the user pushes manually. Best-effort:
 	// failures don't block worktree creation (offline / auth issues happen).
 	// Silent on failure (offline / auth): printing here would leak under the

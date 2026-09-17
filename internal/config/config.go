@@ -112,7 +112,7 @@ type Config struct {
 	BranchFormat string `yaml:"branch_format,omitempty" json:"branch_format,omitempty"`
 
 	// HotfixTarget is the PR target for branches whose name starts with
-	// HotfixPrefix (default "hotfix/"). When set, /open-pr and `work diff`
+	// HotfixPrefix (default "hotfix/"). When set, /open-pr and `norn diff`
 	// route hotfix branches to this branch instead of PRBase.
 	HotfixTarget string `yaml:"hotfix_target,omitempty" json:"hotfix_target,omitempty"`
 
@@ -137,7 +137,7 @@ type Config struct {
 	// Docs: named pointers at canonical team / personal documentation. Skills
 	// read these by key (e.g. `docs.pr_guidelines`) instead of baking rules in.
 	// Paths can be absolute, ~-prefixed, or repo-relative.
-	// `work --refresh-docs` pulls every git repo containing one of these paths.
+	// `norn --refresh-docs` pulls every git repo containing one of these paths.
 	Docs map[string]string `yaml:"docs,omitempty" json:"docs,omitempty"`
 
 	// DoneWhen: shell commands that constitute "actually done" beyond /precheck.
