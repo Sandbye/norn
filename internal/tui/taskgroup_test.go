@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sandbye/norn/internal/claude"
+	"github.com/sandbye/norn/internal/state"
 )
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -104,5 +105,31 @@ func TestSidebarTaskHeaderFallsBackToTrunk(t *testing.T) {
 	out := stripANSI(d.renderSidebar(d.rows, 40, 20))
 	if !strings.Contains(out, "feature/multi/CU-1") {
 		t.Fatalf("header did not fall back to the trunk branch:\n%s", out)
+	}
+}
+
+// A headless role has no claude transcript to read a live state from, so its
+// run state is what decides where it sits. A failed one belongs in NEEDS YOU,
+// not in QUIET with the threads nobody has to look at.
+func TestThreadGroupFromRunState(t *testing.T) {
+	failed := trow("feature/multi/CU-1/assets", "t1", "assets", claude.StateIdle, 5)
+	failed.Run = state.RunFailed
+	if g := threadGroup(failed); g != groupNeedsYou {
+		t.Fatalf("failed role grouped %d, want NEEDS YOU (%d)", g, groupNeedsYou)
+	}
+
+	running := trow("feature/multi/CU-1/logic", "t1", "logic", claude.StateIdle, 5)
+	running.Run = state.RunRunning
+	if g := threadGroup(running); g != groupWorking {
+		t.Fatalf("running role grouped %d, want WORKING (%d)", g, groupWorking)
+	}
+
+	blocked := trow("feature/multi/CU-1/trunk", "t1", "integration", claude.StateIdle, 5)
+	blocked.TaskBlocked = "logic: merge conflict"
+	if g := threadGroup(blocked); g != groupNeedsYou {
+		t.Fatalf("blocked task grouped %d, want NEEDS YOU (%d)", g, groupNeedsYou)
+	}
+	if label := taskLabel(blocked); !strings.Contains(label, "blocked") {
+		t.Fatalf("task header = %q, want it to say blocked", label)
 	}
 }

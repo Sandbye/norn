@@ -174,6 +174,7 @@ type dashRow struct {
 	Question      string            // what the agent last said, only when waiting (ephemeral)
 	TaskGoal      string            // owning task's goal, "" when standalone (ephemeral)
 	TaskTrunk     string            // owning task's trunk branch (ephemeral)
+	TaskBlocked   string            // why the owning task needs a person, "" when it does not (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -731,8 +732,16 @@ var groupLabels = map[int]string{
 // threadGroup buckets a row by its live agent state. idle and unknown share a
 // bucket: both mean "nothing is happening here", and splitting them would put a
 // header above a single row for no gain.
+//
+// A headless role is bucketed by its run state instead, because live agent
+// state is read from a claude transcript and a role served by another agent has
+// none: without this, a failed codex role would sit in QUIET.
 func threadGroup(r dashRow) int {
 	switch {
+	case r.TaskBlocked != "" || r.Run == state.RunFailed:
+		return groupNeedsYou
+	case r.Run == state.RunRunning:
+		return groupWorking
 	case needsUser(r.AgentState):
 		return groupNeedsYou
 	case r.AgentState == claude.StateWorking:
@@ -869,7 +878,7 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		lastTask = r.TaskID
 		name := r.Branch
 		if r.Role != "" {
-			name = r.Role // under a task header the role is the distinguishing part
+			name = r.Role + runMark(r) // under a task header the role is the distinguishing part
 		}
 		nameW := max(branchW-len(indent), 4)
 		age := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt))
@@ -914,16 +923,34 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 }
 
 // taskLabel names a task cluster in the rail: its goal, falling back to the
-// trunk branch when the task carries no goal yet.
+// trunk branch when the task carries no goal yet. A blocked task says so in the
+// header, since the conflict sits in the trunk worktree and not in the role row
+// whose merge hit it.
 func taskLabel(r dashRow) string {
+	label := "task"
 	switch {
 	case r.TaskGoal != "":
-		return r.TaskGoal
+		label = r.TaskGoal
 	case r.TaskTrunk != "":
-		return r.TaskTrunk
-	default:
-		return "task"
+		label = r.TaskTrunk
 	}
+	if r.TaskBlocked != "" {
+		label += " · blocked"
+	}
+	return label
+}
+
+// runMark suffixes a role row with what its headless run did, for the states
+// worth a glance from the rail: failed and merged. Running needs no mark, since
+// the group header already says WORKING.
+func runMark(r dashRow) string {
+	switch r.Run {
+	case state.RunFailed:
+		return " ✗"
+	case state.RunMerged:
+		return " ✓"
+	}
+	return ""
 }
 
 // compactAge is shortAge trimmed for the sidebar's narrow age column ("now"
@@ -1007,6 +1034,8 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 	if r.TaskID != "" {
 		row("task", taskLabel(r))
 		row("role", r.Role)
+		row("run", r.Run)
+		wrapRow("task blocked", r.TaskBlocked, dirtyStyle)
 	}
 	row("kind", r.Kind)
 	row("cu", r.ClickUpID)
@@ -1258,7 +1287,7 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			}
 			row := dashRow{Session: sess, WorktreeAlive: true}
 			if task := store.FindTask(sess.TaskID); task != nil {
-				row.TaskGoal, row.TaskTrunk = task.Goal, task.Trunk
+				row.TaskGoal, row.TaskTrunk, row.TaskBlocked = task.Goal, task.Trunk, task.Blocked
 			}
 			if git.CurrentBranch(sess.Path) == "" {
 				// Branch deleted under the worktree: label the sha so the row

@@ -176,6 +176,9 @@ func main() {
 		case "create", "new", "c":
 			runCreate(cfg, repoRoot, args[1:])
 			return
+		case "run":
+			runTask(cfg, args[1:])
+			return
 		case "review":
 			runReview(cfg, repoRoot, args[1:])
 			return
@@ -2433,6 +2436,8 @@ Usage:
   norn create --branch <b>
                           Check an existing branch out into a worktree: that exact
                           ref, no task lookup, no new branch. Accepts origin/<b>
+  norn run [<task-id>]    Run a split task's roles headless and merge each into the
+                          trunk when it exits (no id → the task this worktree is in)
   norn review <pr#>       Check out a PR into a worktree + launch the agent to review it
   norn --clean            Open on the Clean tab
   norn settings           Open on the Settings tab

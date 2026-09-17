@@ -47,6 +47,7 @@ norn                      # the TUI
 norn create "add caching" # new worktree + branch, launch a session
 norn create --branch foo  # worktree on an existing branch (that ref, no new branch; --checkout is an alias)
 norn create "x" --roles logic,assets # one trunk + one worktree per role (see Roles)
+norn run                  # run this task's headless roles, merge each into the trunk
 norn review 42            # check out PR #42 into a worktree, agent reviews it
 norn diff                 # review uncommitted changes (or: --base, <pr#>)
 norn --help               # everything
@@ -129,6 +130,17 @@ main
 ```
 
 The trunk takes a leaf of its own rather than being `feature/multi-model/CU-123`: git stores a ref as a file, so a branch of that name is exactly what would stop the role branches under it from existing.
+
+`norn run` drives the split to done:
+
+```bash
+norn run          # from any of the task's worktrees
+norn run <task-id>
+```
+
+Every non-integrating role runs headless in its own worktree (`claude -p` for claude, `codex exec --json` for codex, on the normal login in both cases), and process exit is the done signal. A role that exits 0 with commits is merged into the trunk with `--no-ff`; one that exits non-zero shows as failed with the trunk untouched; a merge that conflicts leaves the conflict in the trunk worktree for you and marks the task blocked. norn never opens or merges the PR: the integrating role stays interactive and opens the single PR from the trunk once the roles have landed.
+
+Each role's JSONL output goes to `~/.local/state/norn/runs/<task-id>/<role>.log`, since nobody is watching the run. Run state is written as it changes, so a `norn run` you kill can be re-run: a role that finished unwatched merges on the next run instead of starting over.
 
 The integrating role is always included, so `--roles logic` still gives you two worktrees. Picking nothing, or picking only the integrating role, is one plain worktree on the usual branch name. Each worktree's `.worktree.md` names the role that owns it, the trunk it merges into, and the roles running in parallel; every row shares one task id, and a create that fails part-way removes the worktrees and branches it had already made. `norn create` with no hint offers the same picker in the New tab.
 

@@ -22,6 +22,18 @@ const StatusActive = "active"
 const StatusMerged = "merged"
 const StatusAbandoned = "abandoned"
 
+// Run states of a role thread driven headless by `norn run`. Empty means no
+// headless run has touched the thread, which is every standalone worktree and
+// the integrating role, since that one stays interactive.
+//
+// RunDone and RunMerged are deliberately separate: a supervisor killed between
+// the role's exit and the merge leaves RunDone on disk, and that is exactly the
+// row a later `norn run` picks up and merges.
+const RunRunning = "running"
+const RunDone = "done"
+const RunMerged = "merged"
+const RunFailed = "failed"
+
 // Session is one worktree-level row.
 type Session struct {
 	ID             string    `json:"id"`              // <repo>:<branch>
@@ -42,6 +54,17 @@ type Session struct {
 	// and omitempty so a store written before tasks existed loads unchanged.
 	TaskID string `json:"task_id,omitempty"`
 	Role   string `json:"role,omitempty"`
+
+	// Run is how far this role's headless run got: running, done, merged or
+	// failed. Written as it changes rather than at the end of the supervisor,
+	// so a `norn run` that is killed leaves a store a later one can read.
+	Run string `json:"run,omitempty"`
+
+	// RunPID is the agent process of a RunRunning row. A later `norn run`
+	// cannot wait on a process it did not spawn, but it can ask whether that
+	// pid is still alive, which is the difference between "another supervisor
+	// is on this role" and "the supervisor died and this role is finished".
+	RunPID int `json:"run_pid,omitempty"`
 }
 
 // Task is one piece of work split across several worktrees. Every Session
@@ -53,6 +76,11 @@ type Task struct {
 	Goal      string    `json:"goal,omitempty"`
 	Trunk     string    `json:"trunk"`
 	CreatedAt time.Time `json:"created_at"`
+
+	// Blocked is why the task needs a person, and empty when it does not. A
+	// merge that conflicts sets it: norn stops there and leaves the trunk
+	// worktree mid-merge rather than resolving or aborting on your behalf.
+	Blocked string `json:"blocked,omitempty"`
 }
 
 // Store is the on-disk session list, loaded into memory.
@@ -194,6 +222,10 @@ func (s *Store) Upsert(sess Session) *Session {
 			sess.TaskID = existing.TaskID
 			sess.Role = existing.Role
 		}
+		if sess.Run == "" {
+			sess.Run = existing.Run
+			sess.RunPID = existing.RunPID
+		}
 		*existing = sess
 		return existing
 	}
@@ -249,6 +281,10 @@ func (s *Store) UpsertByPath(sess Session) *Session {
 		if sess.TaskID == "" {
 			sess.TaskID = existing.TaskID
 			sess.Role = existing.Role
+		}
+		if sess.Run == "" {
+			sess.Run = existing.Run
+			sess.RunPID = existing.RunPID
 		}
 		*existing = sess
 		return existing
@@ -387,6 +423,9 @@ func (s *Store) UpsertTask(t Task) *Task {
 		if t.CreatedAt.IsZero() {
 			t.CreatedAt = existing.CreatedAt
 		}
+		if t.Blocked == "" {
+			t.Blocked = existing.Blocked
+		}
 		*existing = t
 		return existing
 	}
@@ -409,6 +448,39 @@ func (s *Store) SessionsForTask(id string) []Session {
 		}
 	}
 	return out
+}
+
+// SetRun records how far a role thread's headless run got, keyed on worktree
+// path because that is the stable identity of a thread. pid belongs to a
+// RunRunning row and is cleared by every other state, so a stale pid can never
+// be read as a live agent. Reports whether anything changed, so a Mutate caller
+// can skip a write that says nothing.
+func (s *Store) SetRun(path, run string, pid int) bool {
+	sess := s.FindByPath(path)
+	if sess == nil {
+		return false
+	}
+	if run != RunRunning {
+		pid = 0
+	}
+	if sess.Run == run && sess.RunPID == pid {
+		return false
+	}
+	sess.Run, sess.RunPID = run, pid
+	sess.LastActivityAt = time.Now()
+	return true
+}
+
+// SetTaskBlocked sets or clears why a task needs a person. Clearing has its own
+// call rather than an UpsertTask with an empty Blocked, which preserves the
+// field instead of clearing it.
+func (s *Store) SetTaskBlocked(id, reason string) bool {
+	t := s.FindTask(id)
+	if t == nil || t.Blocked == reason {
+		return false
+	}
+	t.Blocked = reason
+	return true
 }
 
 // PruneTasks drops tasks no session points at any more, and clears a TaskID
