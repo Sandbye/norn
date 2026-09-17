@@ -436,6 +436,22 @@ func (s *Store) UpsertTask(t Task) *Task {
 	return &s.Tasks[len(s.Tasks)-1]
 }
 
+// FindTaskTrunk returns the session row sitting on a task's trunk branch, which
+// is where every merge happens. Nil when the task has no trunk worktree, which
+// means someone removed it.
+func (s *Store) FindTaskTrunk(id string) *Session {
+	task := s.FindTask(id)
+	if task == nil {
+		return nil
+	}
+	for i := range s.Sessions {
+		if s.Sessions[i].TaskID == id && s.Sessions[i].Branch == task.Trunk {
+			return &s.Sessions[i]
+		}
+	}
+	return nil
+}
+
 // SessionsForTask returns the rows belonging to a task, in store order.
 func (s *Store) SessionsForTask(id string) []Session {
 	if id == "" {

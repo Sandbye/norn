@@ -37,6 +37,7 @@ func settingRows() []settingRow {
 		// Models are per agent, so the row's choices are computed, not static.
 		{"Agent", "model", []string{"agent", "model"}, kindPicker, nil},
 		{"Agent", "ai_naming", []string{"ai_naming"}, kindBool, nil},
+		{"Agent", "pane_leader", []string{"pane_leader"}, kindPicker, []string{"ctrl+a", "ctrl+s", "ctrl+x", "ctrl+space"}},
 		{"Worktrees", "worktree_dir", []string{"worktree_dir"}, kindString, nil},
 		{"Worktrees", "pr_base", []string{"pr_base"}, kindString, nil},
 		{"Worktrees", "branch_base", []string{"branch_base"}, kindString, nil},
@@ -178,6 +179,8 @@ func resolvedDisplay(cfg config.Config, r settingRow) string {
 			return cfg.Agent.Model
 		}
 		return "default"
+	case "pane_leader":
+		return cfg.PaneLeaderKey()
 	case "ai_naming":
 		return boolStr(cfg.AINaming)
 	case "notify":

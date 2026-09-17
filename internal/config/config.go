@@ -86,6 +86,11 @@ type Config struct {
 	// Theme selects the TUI color palette: "nord" (default) or "frog".
 	Theme string `yaml:"theme,omitempty" json:"theme,omitempty"`
 
+	// PaneLeader is the prefix that makes the next key norn's inside a strand's
+	// pane ("ctrl+a" by default). `ctrl+b` is not a candidate: a pane is a real
+	// tmux client, so that one is already tmux's.
+	PaneLeader string `yaml:"pane_leader,omitempty" json:"pane_leader,omitempty"`
+
 	// Template names the default prompt template for new task worktrees, by
 	// basename (e.g. `task`, or a custom one dropped in the user templates dir).
 	// Empty means the built-in `task` template. Overridable per-create with
@@ -161,6 +166,16 @@ type AgentConfig struct {
 	// empty leaves the agent's own default. The New tab can override it per
 	// session. Non-claude agents pass model via Args instead.
 	Model string `yaml:"model,omitempty" json:"model,omitempty"`
+}
+
+// PaneLeaderKey is the prefix that makes the next key norn's while a strand's
+// pane has the keyboard. Configurable because it has to miss whatever the
+// agent inside uses, and that differs per agent and per person.
+func (c Config) PaneLeaderKey() string {
+	if c.PaneLeader != "" {
+		return c.PaneLeader
+	}
+	return "ctrl+a"
 }
 
 type User struct {

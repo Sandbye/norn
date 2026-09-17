@@ -1,15 +1,18 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sandbye/norn/internal/config"
+	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/paths"
 	"github.com/sandbye/norn/internal/runlog"
+	"github.com/sandbye/norn/internal/state"
+	"github.com/sandbye/norn/internal/strand"
 )
 
 // runStartedMsg reports whether the detached supervisor got off the ground.
@@ -21,35 +24,55 @@ type runStartedMsg struct {
 	err    error
 }
 
-// startRoleRunCmd spawns `norn run <task-id>` detached and returns at once, so
-// the rail keeps rendering while the roles work. Detached rather than
-// tea.ExecProcess: a role is tens of minutes of real work, and handing the
-// terminal over for that long would cost every other thread on the dashboard.
+// startRoleRunCmd spawns a live strand per role of the task, each in its own
+// detached tmux session, and returns at once.
 //
-// os.Executable, not "norn": a norn built from a branch has to run its own
-// supervisor, not whichever one is first on PATH.
-func startRoleRunCmd(taskID string) tea.Cmd {
+// tmux owns the agents, not norn: quitting the TUI leaves every strand working,
+// and the pane is a client that comes and goes. That is also why this does not
+// wait for anything. A strand's exit is read back from tmux when the rail asks.
+func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 	return func() tea.Msg {
-		bin, err := os.Executable()
+		if !strand.Available() {
+			return runStartedMsg{taskID: taskID, err: strand.ErrNoTmux}
+		}
+		store, err := state.Load()
 		if err != nil {
 			return runStartedMsg{taskID: taskID, err: err}
 		}
-		log, err := runLog(taskID)
-		if err != nil {
-			return runStartedMsg{taskID: taskID, err: err}
+		if store.FindTask(taskID) == nil {
+			return runStartedMsg{taskID: taskID, err: fmt.Errorf("no task %q in the session store", taskID)}
 		}
-		cmd := exec.Command(bin, "run", taskID)
-		cmd.Stdout, cmd.Stderr = log, log
-		// Its own session, so quitting the TUI (or Ctrl-C in it) does not take
-		// the roles down with it.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-		if err := cmd.Start(); err != nil {
-			log.Close()
-			return runStartedMsg{taskID: taskID, err: fmt.Errorf("start %s run: %w", filepath.Base(bin), err)}
+
+		started := 0
+		for _, sess := range store.SessionsForTask(taskID) {
+			// The trunk is a strand like any other: it is where a conflict gets
+			// resolved and where the PR is opened, and both have to be possible
+			// without leaving norn.
+			if sess.Role == "" {
+				continue
+			}
+			if strand.Alive(taskID, sess.Role) {
+				continue // already running, and re-spawning would lose its work
+			}
+			agent := cfg.AgentFor(sess.Role)
+			argv := strandCmd(agent, sess.Path, agent.Model).Args
+			if err := strand.Spawn(taskID, sess.Role, sess.Path, argv, cols, rows); err != nil {
+				return runStartedMsg{taskID: taskID, err: err}
+			}
+			setStrandRunning(sess.Path)
+			started++
 		}
-		go func() { _ = cmd.Wait(); log.Close() }() // reap, so it leaves no zombie
+		if started == 0 {
+			return runStartedMsg{taskID: taskID, err: errors.New("every strand of this task is already running")}
+		}
 		return runStartedMsg{taskID: taskID}
 	}
+}
+
+// setStrandRunning records that a strand is live, so the rail says so and a
+// restart knows to look for its session.
+func setStrandRunning(path string) {
+	_, _ = state.Mutate(func(s *state.Store) bool { return s.SetRun(path, state.RunRunning, 0) })
 }
 
 // runLogDir is where a task's run logs live: the supervisor's own progress
@@ -93,4 +116,54 @@ func loadRunLogCmd(taskID, role string) tea.Cmd {
 // supervisor opens for it.
 func roleLogPath(taskID, role string) string {
 	return filepath.Join(runLogDir(taskID), role+".log")
+}
+
+// landedMsg reports the outcome of landing one strand on the trunk.
+type landedMsg struct {
+	role    string
+	commits int
+	blocked bool
+	err     error
+}
+
+// landStrandCmd merges a finished strand into its task's trunk.
+//
+// A keypress rather than something norn does on exit: with a live pane, exit
+// also means "I quit to look at something", and a merge commit is not undone
+// casually. The merge itself is #71's, unchanged.
+func landStrandCmd(row dashRow) tea.Cmd {
+	return func() tea.Msg {
+		store, err := state.Load()
+		if err != nil {
+			return landedMsg{role: row.Role, err: err}
+		}
+		task := store.FindTask(row.TaskID)
+		if task == nil {
+			return landedMsg{role: row.Role, err: fmt.Errorf("no task %q in the session store", row.TaskID)}
+		}
+		trunk := store.FindTaskTrunk(row.TaskID)
+		if trunk == nil {
+			return landedMsg{role: row.Role, err: fmt.Errorf("task %s has no trunk worktree", row.TaskID)}
+		}
+		if row.Branch == task.Trunk {
+			return landedMsg{role: row.Role, err: errors.New("the trunk is what strands land on")}
+		}
+
+		n, err := git.CommitsAhead(trunk.Path, task.Trunk, row.Branch)
+		if err != nil {
+			return landedMsg{role: row.Role, err: err}
+		}
+		if n == 0 {
+			return landedMsg{role: row.Role, err: errors.New("nothing to land: no commits on this strand")}
+		}
+
+		msg := fmt.Sprintf("Merge role %s (%s) into %s", row.Role, row.Branch, task.Trunk)
+		if err := git.MergeNoFF(trunk.Path, row.Branch, msg); err != nil {
+			reason := fmt.Sprintf("%s: %v", row.Role, err)
+			_, _ = state.Mutate(func(s *state.Store) bool { return s.SetTaskBlocked(row.TaskID, reason) })
+			return landedMsg{role: row.Role, blocked: true, err: err}
+		}
+		_, _ = state.Mutate(func(s *state.Store) bool { return s.SetRun(row.Path, state.RunMerged, 0) })
+		return landedMsg{role: row.Role, commits: n}
+	}
 }

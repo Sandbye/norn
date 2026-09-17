@@ -2,12 +2,42 @@ package tui
 
 import (
 	"context"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
+	"github.com/sandbye/norn/internal/state"
 )
+
+// replyLog is where a role's exchange is recorded. Empty for a thread that is
+// not a role, which has no run log to write to.
+type replyLog struct{ path string }
+
+// replyLogFor returns the log to record a reply in, or a no-op for a row that
+// is not a role in a split task.
+func replyLogFor(r dashRow) replyLog {
+	if r.TaskID == "" || r.Role == "" {
+		return replyLog{}
+	}
+	return replyLog{path: roleLogPath(r.TaskID, r.Role)}
+}
+
+// append writes one plain line to the run log. Failing to record the exchange
+// must not fail the reply itself: the answer is already on screen, and the log
+// is the copy.
+func (l replyLog) append(line string) {
+	if l.path == "" || line == "" {
+		return
+	}
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(strings.Join(strings.Fields(line), " ") + "\n")
+}
 
 // Answering a waiting thread from the dashboard. Most waiting threads need one
 // word (yes, the second option, go ahead), and paying a full context switch for
@@ -78,7 +108,12 @@ type replySentMsg struct {
 // replyCmd sends one line to a worktree's existing session. mode is passed to
 // --permission-mode: empty keeps Claude Code's -p default, under which anything
 // needing approval is denied rather than waiting for someone who isn't there.
-func replyCmd(path, branch, text string, grant config.Grant) tea.Cmd {
+//
+// A role's exchange is also appended to its run log, so `l` shows the whole
+// conversation rather than only the part norn started. The reply runs with
+// --output-format json, so what lands is your line and the agent's answer, not
+// the tool calls in between: for those, run it again from the worktree.
+func replyCmd(path, branch, text string, grant config.Grant, log replyLog) tea.Cmd {
 	return func() tea.Msg {
 		// Address the session by id. --continue guesses "most recent" and
 		// refuses outright while the daemon holds the session, which is the
@@ -87,14 +122,19 @@ func replyCmd(path, branch, text string, grant config.Grant) tea.Cmd {
 		if s, ok := claude.SessionFor(claude.Sessions(context.Background()), path); ok {
 			live = &s
 		}
+		log.append("you: " + text)
 		res, err := claude.ReplyTo(context.Background(), path, live, text, claude.PermissionModeFor(string(grant)))
 		if err != nil {
+			log.append("reply failed: " + err.Error())
 			return replySentMsg{branch: branch, err: err}
 		}
 		if res.IsError {
+			log.append(strings.TrimSpace(res.Text))
 			return replySentMsg{branch: branch, text: res.Text, err: errReplyRefused}
 		}
-		return replySentMsg{branch: branch, text: strings.TrimSpace(res.Text)}
+		answer := strings.TrimSpace(res.Text)
+		log.append(answer)
+		return replySentMsg{branch: branch, text: answer}
 	}
 }
 
@@ -126,6 +166,17 @@ func replyRefusal(r dashRow) string {
 		return "that worktree is gone"
 	case !claude.HasSession(r.Path):
 		return "no session to answer in this worktree"
+	}
+	// A headless role is judged by its run, not by the live agent state an
+	// interactive thread has. It is never "waiting": it ran to completion and
+	// exited, and talking to it is resuming that finished session.
+	if r.Role != "" && r.Run != "" {
+		if r.Run == state.RunRunning {
+			return "that role is still running, so let it finish first"
+		}
+		return ""
+	}
+	switch {
 	case r.AgentState == claude.StateWorking:
 		return "that thread is still working, so there is nothing to answer yet"
 	case r.AgentState != claude.StateWaiting:
@@ -135,7 +186,7 @@ func replyRefusal(r dashRow) string {
 }
 
 func canReply(r dashRow) bool {
-	return r.WorktreeAlive && r.AgentState == claude.StateWaiting && claude.HasSession(r.Path)
+	return replyRefusal(r) == ""
 }
 
 // quoteOneLine renders sent text for a one-line status: newlines collapsed,

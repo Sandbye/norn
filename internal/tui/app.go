@@ -11,6 +11,8 @@ import (
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/prompt"
+	"github.com/sandbye/norn/internal/state"
+	"github.com/sandbye/norn/internal/strand"
 	"github.com/sandbye/norn/internal/task"
 	"github.com/sandbye/norn/internal/worktree"
 )
@@ -101,6 +103,10 @@ type App struct {
 func (a App) Result() Result { return a.result }
 
 type worktreesLoadedMsg struct {
+	worktrees []git.Worktree
+}
+
+type localCheckedMsg struct {
 	worktrees []git.Worktree
 }
 
@@ -224,7 +230,8 @@ func (a App) Init() tea.Cmd {
 func (a App) capturing() bool {
 	switch a.current {
 	case ViewThreads:
-		return a.dashboard.filter.active || a.dashboard.showSummary || a.dashboard.reply.active
+		return a.dashboard.filter.active || a.dashboard.showSummary || a.dashboard.showLog ||
+			a.dashboard.reply.active || a.dashboard.pane.open()
 	case ViewTasks:
 		return a.tasks.filter.active || a.tasks.confirming
 	case ViewCreate:
@@ -269,7 +276,10 @@ func (a App) gotoTab(v View) (App, tea.Cmd) {
 		a.create = newCreateFor(a.cfg, a.repoRoot)
 		a.create.width, a.create.height = a.width, a.height
 	case ViewClean:
-		return a, checkRemote(a.repoRoot, a.clean.worktrees, a.cfg.BaseBranches)
+		return a, tea.Batch(
+			checkLocal(a.repoRoot, a.clean.worktrees),
+			checkRemote(a.repoRoot, a.clean.worktrees, a.cfg.BaseBranches),
+		)
 	}
 	return a, nil
 }
@@ -294,11 +304,35 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.clean.worktrees = msg.worktrees
 		a.cd.worktrees = msg.worktrees
 		if a.current == ViewClean {
-			return a, checkRemote(a.repoRoot, msg.worktrees, a.cfg.BaseBranches)
+			return a, tea.Batch(
+				checkLocal(a.repoRoot, msg.worktrees),
+				checkRemote(a.repoRoot, msg.worktrees, a.cfg.BaseBranches),
+			)
+		}
+		return a, nil
+
+	case localCheckedMsg:
+		// Dirty flags only: the remote answer may already be in, and this must
+		// not undo it.
+		dirty := map[string]bool{}
+		for _, wt := range msg.worktrees {
+			dirty[wt.Path] = wt.Dirty
+		}
+		for i := range a.clean.worktrees {
+			a.clean.worktrees[i].Dirty = dirty[a.clean.worktrees[i].Path]
 		}
 		return a, nil
 
 	case remoteCheckedMsg:
+		// Keep the dirty flags: they come from the local pass, which usually
+		// lands first but carries no remote data of its own.
+		dirty := map[string]bool{}
+		for _, wt := range a.clean.worktrees {
+			dirty[wt.Path] = wt.Dirty
+		}
+		for i := range msg.worktrees {
+			msg.worktrees[i].Dirty = msg.worktrees[i].Dirty || dirty[msg.worktrees[i].Path]
+		}
 		a.clean.worktrees = msg.worktrees
 		a.clean.remoteChecked = true
 		// A hand-off from Threads targets one worktree; the done-autoselect would
@@ -322,6 +356,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.clean.showResults = true
 		a.clean.results = msg.outcomes
 		return a, nil
+
+	case taskSpawnedMsg:
+		// Back to the rail, not into an agent. The strands are all running;
+		// which one you look at first is your call, and a create that drops you
+		// inside one is the hand-off this design removed.
+		a.current = ViewThreads
+		a.dashboard.notice = "strands running · → enters one"
+		return a, a.dashboard.loadCmd()
 
 	case worktreeCreatedMsg:
 		a.quit = true
@@ -441,16 +483,21 @@ func (a App) delegate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.current = ViewCreate
 			if a.create.confirmed {
 				a.create = a.create.startCreating()
-				return a, createWorktree(a.cfg, a.repoRoot, a.create)
+				cols, rows := a.dashboard.paneSizeFor(a.width, a.height)
+				return a, createWorktree(a.cfg, a.repoRoot, a.create, cols, rows)
 			}
-			return a, nil
+			// A huh form draws nothing until it is initialised, so without this
+			// a picked task lands on a blank screen and its fields appear only
+			// once some keystroke happens to drive an update.
+			return a, a.create.form.Init()
 		}
 
 	case ViewCreate:
 		a.create, cmd = a.create.Update(msg)
 		if a.create.confirmed {
 			a.create = a.create.startCreating()
-			return a, createWorktree(a.cfg, a.repoRoot, a.create)
+			cols, rows := a.dashboard.paneSizeFor(a.width, a.height)
+			return a, createWorktree(a.cfg, a.repoRoot, a.create, cols, rows)
 		}
 		if a.create.cancelled {
 			return a.gotoTab(ViewThreads)
@@ -538,7 +585,8 @@ func helpFor(v View) []keyHint {
 		return []keyHint{
 			{"⏎", "cd into worktree"}, {"o", "open the agent"}, {"s", "summarize"},
 			{"p", "open PR"}, {"t", "open task"}, {"d", "clean worktree"},
-			{"R", "run this task's headless roles"}, {"l", "a role's run log"},
+			{"R", "spawn this task's strands"}, {"→", "enter a strand (ctrl+a ← leaves)"},
+			{"L", "land a finished strand on the trunk"},
 			{"/", "filter"}, {"a", "all repos"}, {"r", "refresh"}, {"j/k g/G", "move"},
 		}
 	case ViewTasks:
@@ -588,6 +636,13 @@ func (a App) View() string {
 		return frame(renderHelp(a.current), a.width, a.height)
 	}
 
+	// A strand's pane is full-bleed: an agent draws its own UI, and norn's
+	// centered frame would both steal columns it needs and put a second border
+	// around one it already drew.
+	if a.current == ViewThreads && a.dashboard.pane.open() {
+		return a.dashboard.View()
+	}
+
 	var body string
 	switch a.current {
 	case ViewThreads:
@@ -634,16 +689,25 @@ func loadWorktrees(worktreeDir, repoRoot string) tea.Cmd {
 	}
 }
 
-func checkRemote(repoRoot string, wts []git.Worktree, bases []string) tea.Cmd {
+// checkLocal answers what git can say without the network: which worktrees are
+// dirty. Split from checkRemote so it lands immediately, because dirty is what
+// decides whether a row will be skipped, and it used to queue behind a fetch of
+// somebody else's repo.
+func checkLocal(repoRoot string, wts []git.Worktree) tea.Cmd {
 	return func() tea.Msg {
-		_ = git.FetchPrune(repoRoot)
 		// Retroactive: worktrees created before `.norn/` joined the exclude list
 		// would otherwise read as dirty forever. info/exclude is repo-shared, so
 		// one call covers them all.
 		git.ExcludeLocalMeta(repoRoot)
-		checked := git.CheckRemoteGone(repoRoot, wts)
+		return localCheckedMsg{git.CheckDirty(append([]git.Worktree(nil), wts...))}
+	}
+}
+
+func checkRemote(repoRoot string, wts []git.Worktree, bases []string) tea.Cmd {
+	return func() tea.Msg {
+		_ = git.FetchPrune(repoRoot)
+		checked := git.CheckRemoteGone(repoRoot, append([]git.Worktree(nil), wts...))
 		checked = git.CheckMerged(repoRoot, checked, bases)
-		checked = git.CheckDirty(checked)
 		return remoteCheckedMsg{checked}
 	}
 }
@@ -656,11 +720,30 @@ func removeWorktreesCmd(repoRoot, worktreeDir string, toRemove []git.RemoveReque
 	return func() tea.Msg {
 		var outcomes []git.RemoveOutcome
 		for _, req := range toRemove {
+			// The strand's agent goes with its worktree. Left running it keeps
+			// a session, a model and a directory that no longer exists, and it
+			// still answers `→` from the rail.
+			killStrandAt(req.Path)
 			outcomes = append(outcomes, git.RemoveWorktree(repoRoot, req))
 		}
 		git.CleanEmptyDirs(worktreeDir)
 		return cleanRemovedMsg{outcomes: outcomes}
 	}
+}
+
+// killStrandAt ends the tmux session belonging to a worktree, if it has one.
+// Best effort: a worktree removal must not fail because a session was already
+// gone, which is the normal case for anything that was never a strand.
+func killStrandAt(path string) {
+	store, err := state.Load()
+	if err != nil {
+		return
+	}
+	sess := store.FindByPath(path)
+	if sess == nil || sess.TaskID == "" || sess.Role == "" {
+		return
+	}
+	_ = strand.Kill(sess.TaskID, sess.Role)
 }
 
 // taskRefOf converts a picked task into the prompt's TaskRef (nil-safe).
@@ -673,7 +756,7 @@ func taskRefOf(t *task.Task) *prompt.TaskRef {
 
 // createWorktree runs the New tab's create. It takes the form model rather than
 // its fields: the create already needs seven of them, and a split adds roles.
-func createWorktree(cfg config.Config, repoRoot string, c createModel) tea.Cmd {
+func createWorktree(cfg config.Config, repoRoot string, c createModel, cols, rows int) tea.Cmd {
 	return func() tea.Msg {
 		branch := git.MakeBranch(c.kind, c.hint, cfg.BranchFormat)
 		if cfg.AINaming && cfg.HeadlessClaude() && claude.Available() && git.BranchLacksSlug(branch) {
@@ -694,6 +777,22 @@ func createWorktree(cfg config.Config, repoRoot string, c createModel) tea.Cmd {
 		var tail []string
 		for _, t := range res.Threads[1:] {
 			tail = append(tail, fmt.Sprintf("  %-10s %s", t.Role, t.Path))
+		}
+		// A split stays inside norn. Every strand, trunk included, is spawned
+		// in its own tmux session and entered with `→`; handing the terminal to
+		// the trunk's agent would put you back in the tab-out this exists to
+		// remove. A single worktree keeps the old hand-off: there is no rail to
+		// come back to, and one agent in one terminal is what it always was.
+		if res.Split() && strand.Available() {
+			for _, t := range res.Threads {
+				agent := cfg.AgentFor(t.Role)
+				argv := strandCmd(agent, t.Path, agent.Model).Args
+				if err := strand.Spawn(res.TaskID, t.Role, t.Path, argv, cols, rows); err != nil {
+					return errMsg{err}
+				}
+				setStrandRunning(t.Path)
+			}
+			return taskSpawnedMsg{taskID: res.TaskID, trunkRole: res.Trunk().Role, trunkBranch: res.Trunk().Branch}
 		}
 		return worktreeCreatedMsg{path: res.Trunk().Path, model: c.model, tail: tail}
 	}

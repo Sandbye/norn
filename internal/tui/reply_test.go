@@ -8,6 +8,7 @@ import (
 
 	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
+	"github.com/sandbye/norn/internal/state"
 )
 
 // stubClaude puts an executable named claude on PATH. The dashboard gates the
@@ -380,4 +381,112 @@ func TestReplyLineOnlyShowsOnItsOwnThread(t *testing.T) {
 			t.Errorf("cursor on %s: pending line shown = %v, want %v", r.Branch, shown, onTarget)
 		}
 	}
+}
+
+// A headless role is never "waiting": it ran to completion and exited, and its
+// live agent state reads idle. Judging it by that rule would make every
+// finished role unanswerable, which is the whole point of being able to reply.
+func TestCanReplyToAFinishedRole(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	const wt = "/wt/feature/x/logic"
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(wt)
+	dir := filepath.Join(home, "projects", slug)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	role := func(run string) dashRow {
+		r := qrow("feature/x/logic", claude.StateIdle, 1)
+		r.Path, r.WorktreeAlive = wt, true
+		r.TaskID, r.Role, r.Run = "t1", "logic", run
+		return r
+	}
+	for _, run := range []string{state.RunMerged, state.RunDone, state.RunFailed} {
+		if !canReply(role(run)) {
+			t.Errorf("a %s role cannot be answered: %q", run, replyRefusal(role(run)))
+		}
+	}
+	if why := replyRefusal(role(state.RunRunning)); why == "" {
+		t.Error("a running role was offered a reply, which would resume a session still in use")
+	}
+
+	// A thread that is not a role keeps the waiting-only rule.
+	plain := qrow("fix/rounding", claude.StateIdle, 1)
+	plain.Path, plain.WorktreeAlive = wt, true
+	if canReply(plain) {
+		t.Error("an idle non-role thread became answerable")
+	}
+}
+
+// The exchange goes into the role's own run log, so the viewer holds both
+// halves of the conversation and not only the part norn started.
+func TestReplyLogRecordsBothSides(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+	r := qrow("feature/x/logic", claude.StateIdle, 1)
+	r.TaskID, r.Role = "t1", "logic"
+
+	log := replyLogFor(r)
+	if log.path == "" {
+		t.Fatal("a role got no run log to record into")
+	}
+	if err := os.MkdirAll(filepath.Dir(log.path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log.append("you: rerun the tests")
+	log.append("done, they pass")
+
+	data, err := os.ReadFile(log.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "you: rerun the tests\ndone, they pass\n" {
+		t.Fatalf("run log = %q", got)
+	}
+
+	// A thread that is not a role has nowhere to record, and must not panic.
+	replyLogFor(qrow("fix/rounding", claude.StateIdle, 1)).append("anything")
+}
+
+// The run log is a conversation, not a file view: every printable key types
+// into it. A pane where `r` refreshes and `q` quits is a pane you cannot write
+// "run the tests" in, which is the whole reason it has an input.
+func TestRunLogPaneTypesInsteadOfActing(t *testing.T) {
+	d := Dashboard{}
+	d.rows = groupRows([]dashRow{roleRow()})
+	d.showLog, d.logTask, d.logRole, d.logRow = true, "t1", "logic", roleRow()
+	d.reply.active = true
+
+	for _, s := range []string{"r", "q", "d", "R", "l"} {
+		m, _ := d.Update(key(s))
+		d = m.(Dashboard)
+		if !d.showLog {
+			t.Fatalf("key %q closed the conversation", s)
+		}
+		if d.quit {
+			t.Fatalf("key %q quit from the conversation", s)
+		}
+	}
+	if d.reply.text != "rqdRl" {
+		t.Fatalf("text = %q, want the keys typed", d.reply.text)
+	}
+
+	// esc is the way out, and it leaves nothing armed behind it.
+	m, _ := d.Update(key("esc"))
+	d = m.(Dashboard)
+	if d.showLog || d.reply.active || d.reply.text != "" {
+		t.Fatalf("esc left the pane armed: showLog=%v active=%v text=%q", d.showLog, d.reply.active, d.reply.text)
+	}
+}
+
+// roleRow is a finished role: what the conversation pane opens on.
+func roleRow() dashRow {
+	r := qrow("feature/x/logic", claude.StateIdle, 1)
+	r.Path, r.WorktreeAlive = "/wt/feature/x/logic", true
+	r.TaskID, r.Role, r.Run = "t1", "logic", state.RunMerged
+	return r
 }

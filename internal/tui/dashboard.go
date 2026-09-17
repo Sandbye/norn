@@ -22,6 +22,7 @@ import (
 	"github.com/sandbye/norn/internal/prompt"
 	"github.com/sandbye/norn/internal/runlog"
 	"github.com/sandbye/norn/internal/state"
+	"github.com/sandbye/norn/internal/strand"
 )
 
 // Dashboard is a live view of all known worktree sessions across repos.
@@ -44,9 +45,14 @@ type Dashboard struct {
 	// Run-log viewer: a headless role has no session to open, so this is the
 	// only way to see what it is doing. Read-only, and refreshed on the tick
 	// while a role is still writing to the file.
+	// pane is the live strand norn is attached to, if any. It takes every key
+	// but one while it is open.
+	pane paneState
+
 	showLog   bool
 	logTask   string
 	logRole   string
+	logRow    dashRow // the role as it was when the viewer opened, for `i`
 	logEvents []runlog.Event
 	logErr    error
 	quit      bool
@@ -188,6 +194,7 @@ type dashRow struct {
 	TaskGoal      string            // owning task's goal, "" when standalone (ephemeral)
 	TaskTrunk     string            // owning task's trunk branch (ephemeral)
 	TaskBlocked   string            // why the owning task needs a person, "" when it does not (ephemeral)
+	Bell          bool              // the strand rang the terminal bell and nobody has looked (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -274,6 +281,11 @@ func (d Dashboard) Init() tea.Cmd {
 func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		if d.pane.open() {
+			d.width, d.height = msg.Width, msg.Height
+			cols, rows := d.paneSize()
+			_ = d.pane.term.Resize(cols, rows)
+		}
 		d.width = msg.Width
 		d.height = msg.Height
 
@@ -297,14 +309,74 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 
+		// An open pane owns the keyboard. Exactly one key is norn's, and
+		// everything else is encoded and handed to the agent untouched.
+		if d.pane.open() {
+			// Never trap: a pane whose attachment has ended lets any key out,
+			// since a pane that eats every key with nothing on the other end
+			// can only be escaped by killing the terminal.
+			if d.pane.dead() {
+				d.pane.close()
+				return d, d.loadCmd()
+			}
+			leader := d.cfg.PaneLeaderKey()
+			if d.pane.armed {
+				d.pane.armed = false
+				switch {
+				case paneKeyIs(s, paneKeysLeave):
+					d.pane.close()
+					return d, d.loadCmd()
+				case paneKeyIs(s, paneKeysNext), paneKeyIs(s, paneKeysPrev):
+					return d.enterSibling(paneKeyIs(s, paneKeysNext))
+				case s == leader:
+					// Leader twice sends a literal one, so a key the agent
+					// binds never becomes unreachable.
+				default:
+					// Not one of norn's, so the key goes to the agent below.
+				}
+			} else if s == leader {
+				d.pane.armed = true
+				return d, nil
+			}
+			if b := encodeKey(msg); len(b) > 0 {
+				if err := d.pane.term.Write(b); err != nil {
+					d.pane.err = err
+				}
+			}
+			return d, nil
+		}
+
 		// Run-log viewer swallows keys the same way: `r` refreshes, anything
 		// else closes it.
 		if d.showLog {
-			if s == "r" {
-				return d, loadRunLogCmd(d.logTask, d.logRole)
+			switch s {
+			case "esc":
+				d.showLog = false
+				d.logEvents, d.logErr = nil, nil
+				d.reply.active, d.reply.text = false, ""
+				return d, nil
+			case "tab":
+				d.reply.grant = d.reply.grant.Next()
+				return d, nil
+			case "enter":
+				text := strings.TrimSpace(d.reply.text)
+				if text == "" {
+					return d, nil
+				}
+				if why := replyRefusal(d.logRow); why != "" {
+					d.reply.text, d.reply.sent = "", why
+					return d, nil
+				}
+				d.reply.text, d.reply.sent, d.reply.pending = "", "", text
+				return d, tea.Batch(
+					replyCmd(d.logRow.Path, d.logRow.Branch, text, d.reply.grant, replyLogFor(d.logRow)),
+					d.spinner.Tick,
+				)
 			}
-			d.showLog = false
-			d.logEvents, d.logErr = nil, nil
+			// Everything else types, the way every agent CLI behaves: a chat
+			// pane that swallows a keystroke into an action is a pane you
+			// cannot write "r" in.
+			d.reply.handleKey(s)
 			return d, nil
 		}
 
@@ -334,7 +406,7 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Keep the sent text on screen: it is the only record of your own
 				// half of the exchange, since the pane only ever shows the agent's.
 				d.reply.pending, d.reply.sent = text, ""
-				return d, tea.Batch(replyCmd(path, branch, text, d.reply.grant), d.spinner.Tick)
+				return d, tea.Batch(replyCmd(path, branch, text, d.reply.grant, replyLogFor(d.reply.target)), d.spinner.Tick)
 			}
 			if d.reply.handleKey(s) {
 				return d, nil
@@ -375,18 +447,59 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.cursor = len(vis) - 1
 		case "r":
 			return d, d.loadCmd()
+		case "right":
+			// A live strand is the thing itself; a finished one has only its
+			// log. Same key for both, because from the rail they are one idea:
+			// show me this strand.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.TaskID != "" && row.Role != "" && strand.Alive(row.TaskID, row.Role) {
+					cols, rows := d.paneSize()
+					d.notice = "attaching to " + row.Role + "…"
+					return d, tea.Batch(openPaneCmd(row.TaskID, row.Role, row.Branch, cols, rows), paneTick())
+				}
+			}
+			fallthrough
 		case "l":
-			// What a headless role is doing. Only roles have one: an
-			// interactive thread is opened with `o` instead.
+			// What a headless role is doing, and where you talk to it. Right
+			// arrow because the rail is a list and the conversation is what
+			// sits to the right of it. Only roles have one: an interactive
+			// thread is opened with `o` instead.
 			if d.cursor < len(vis) {
 				row := vis[d.cursor]
 				if row.TaskID == "" || row.Role == "" {
 					d.notice = "no run log: this thread is not a role in a split task"
 					return d, nil
 				}
-				d.showLog, d.logTask, d.logRole = true, row.TaskID, row.Role
+				d.showLog, d.logTask, d.logRole, d.logRow = true, row.TaskID, row.Role, row
 				d.logEvents, d.logErr = nil, nil
+				// The input is live from the moment it opens: this is a
+				// conversation with the role, not a file you happen to be
+				// shown. reply.active keeps the keystrokes here rather than
+				// letting the dashboard's own keys act on the row behind it.
+				d.reply.active, d.reply.text, d.reply.sent = true, "", ""
+				d.reply.path, d.reply.branch, d.reply.target = row.Path, row.Branch, row
+				d.reply.grant = d.cfg.ReplyGrant()
 				return d, loadRunLogCmd(row.TaskID, row.Role)
+			}
+		case "L":
+			// Land this strand on the trunk. Explicit, because with a live pane
+			// an exit also means "I quit to look at something", and a merge
+			// commit is not undone casually.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				switch {
+				case row.TaskID == "" || row.Role == "":
+					d.notice = "only a strand lands: this thread is not part of a task"
+				case row.Run == state.RunRunning:
+					d.notice = row.Role + " is still running"
+				case row.Run == state.RunMerged:
+					d.notice = row.Role + " is already landed"
+				default:
+					d.notice = "landing " + row.Role + "…"
+					return d, landStrandCmd(row)
+				}
+				return d, nil
 			}
 		case "R":
 			// Start this task's headless roles. Detached, so the rail keeps
@@ -399,7 +512,8 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return d, nil
 				}
 				d.notice = "starting " + taskLabel(row) + "…"
-				return d, startRoleRunCmd(row.TaskID)
+				cols, rows := d.paneSize()
+				return d, startRoleRunCmd(d.cfg, row.TaskID, cols, rows)
 			}
 		case "a":
 			if d.scopeRepo != "" {
@@ -522,7 +636,12 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			d.reply.sent = "answered " + msg.branch + ": " + quoteOneLine(sent)
 		}
-		// The thread has moved: it was waiting, now it is working again.
+		// The thread has moved: it was waiting, now it is working again. With
+		// the conversation open, reload it too rather than waiting for the
+		// tick: the answer is already in the log by the time this arrives.
+		if d.showLog {
+			return d, tea.Batch(d.loadCmd(), loadRunLogCmd(d.logTask, d.logRole))
+		}
 		return d, d.loadCmd()
 
 	case dashLoadedMsg:
@@ -622,12 +741,41 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.logEvents, d.logErr = msg.events, msg.err
 		}
 
+	case paneOpenedMsg:
+		d.notice = ""
+		if msg.err != nil {
+			d.err = msg.err
+			return d, nil
+		}
+		d.pane = paneState{term: msg.term, taskID: msg.taskID, role: msg.role, branch: msg.branch}
+		return d, paneTick()
+
+	case paneTickMsg:
+		if !d.pane.open() {
+			return d, nil // the pane closed; let the tick lapse
+		}
+		// The agent exiting is not norn's cue to close the pane: tmux holds the
+		// dead pane, and its last screen is usually the thing you want to read.
+		return d, paneTick()
+
+	case landedMsg:
+		switch {
+		case msg.blocked:
+			d.notice = ""
+			d.err = fmt.Errorf("%s: %w", msg.role, msg.err)
+		case msg.err != nil:
+			d.notice = msg.role + ": " + msg.err.Error()
+		default:
+			d.notice = fmt.Sprintf("landed %s, %d commit(s) on the trunk", msg.role, msg.commits)
+		}
+		return d, d.loadCmd()
+
 	case runStartedMsg:
 		// A failed start is the only thing worth interrupting for. What the
 		// roles do next arrives through the store, on the tick.
 		d.err = msg.err
 		if msg.err == nil {
-			d.notice = "roles running, log: " + runLogDir(msg.taskID)
+			d.notice = "strands running · → enters one"
 			return d, d.loadCmd()
 		}
 		d.notice = ""
@@ -671,8 +819,24 @@ func (d Dashboard) renderRunLog() string {
 		}
 		body = strings.Join(lines, "\n")
 	}
-	return fmt.Sprintf("%s\n\n%s\n\n%s", title, body,
-		dimStyle.Render("follows the run · r refresh · any key to dismiss · full JSONL: "+roleLogPath(d.logTask, d.logRole)))
+	// The exchange in progress, then the prompt. Same shape as the agent CLIs:
+	// what has happened scrolls above, you type at the bottom.
+	var foot string
+	switch {
+	case d.reply.pending != "":
+		foot = d.spinner.View() + dimStyle.Render(" ") + quoteOneLine(d.reply.pending)
+	case d.reply.sent != "":
+		foot = dimStyle.Render(truncate(d.reply.sent, max(d.width-8, 20)))
+	}
+	prompt := cursorStyle.Render("▸ ") + d.reply.text + cursorStyle.Render("▏") +
+		dimStyle.Render("   ["+d.reply.grant.Label()+"]")
+
+	out := title + "\n\n" + body
+	if foot != "" {
+		out += "\n\n" + foot
+	}
+	return out + "\n\n" + prompt + "\n" +
+		dimStyle.Render("⏎ send · tab grant · esc back · follows the run · full JSONL: "+roleLogPath(d.logTask, d.logRole))
 }
 
 // runLogLine styles one event by kind: what it said, what it ran, how it ended.
@@ -707,6 +871,10 @@ func (d Dashboard) View() string {
 			body = renderMarkdown(d.summary, d.width)
 		}
 		return fmt.Sprintf("%s\n\n%s\n\n%s", title, body, dimStyle.Render("r refresh · any key to dismiss"))
+	}
+
+	if d.pane.open() {
+		return d.renderPane()
 	}
 
 	if d.showLog {
@@ -860,11 +1028,12 @@ func threadGroup(r dashRow) int {
 	switch {
 	case r.TaskBlocked != "" || r.Run == state.RunFailed:
 		return groupNeedsYou
-	case r.Run == state.RunRunning:
-		return groupWorking
-	case needsUser(r.AgentState):
+	// Waiting beats running. A strand whose process is alive but whose agent is
+	// asking a question is the definition of needing you, and grouping it by
+	// the process left it reading as WORKING until it timed out.
+	case needsUser(r.AgentState) || r.Bell:
 		return groupNeedsYou
-	case r.AgentState == claude.StateWorking:
+	case r.Run == state.RunRunning, r.AgentState == claude.StateWorking:
 		return groupWorking
 	default:
 		return groupQuiet
@@ -1069,6 +1238,11 @@ func runMark(r dashRow) string {
 		return " ✗"
 	case state.RunMerged:
 		return " ✓"
+	case state.RunDone:
+		return " ⤒" // finished and waiting to be landed
+	}
+	if r.Bell {
+		return " !"
 	}
 	return ""
 }
@@ -1262,7 +1436,7 @@ func (d Dashboard) dashKeyHelp() string {
 		return dimStyle.Render("type your answer · ⏎ send · ⇥ permission · ctrl+u clear · esc cancel")
 	}
 	// Concise essentials; the full keymap lives in the global `?` help overlay.
-	return dimStyle.Render("⏎ cd · o open · i answer · R run roles · l log · m main · ? help")
+	return dimStyle.Render("⏎ cd · → enter · R spawn · L land · i answer · ? help")
 }
 
 func openPRInBrowser(branch, repoDir string) {
@@ -1408,6 +1582,13 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			row := dashRow{Session: sess, WorktreeAlive: true}
 			if task := store.FindTask(sess.TaskID); task != nil {
 				row.TaskGoal, row.TaskTrunk, row.TaskBlocked = task.Goal, task.Trunk, task.Blocked
+			}
+			if sess.Role != "" && sess.TaskID != "" {
+				row.Bell = strand.Rang(sess.TaskID, sess.Role)
+				// The store says what norn last wrote; tmux says what is true.
+				// Without this a strand that finished while you were elsewhere
+				// still reads as running, and nothing offers to land it.
+				row.Run = reconcileRun(sess, &row)
 			}
 			if git.CurrentBranch(sess.Path) == "" {
 				// Branch deleted under the worktree: label the sha so the row
@@ -1581,4 +1762,37 @@ func max0(n int) int {
 		return 0
 	}
 	return n
+}
+
+// reconcileRun answers what a strand is actually doing, from tmux rather than
+// from what norn last wrote. A store value is a memory; the session is the fact.
+func reconcileRun(sess state.Session, row *dashRow) string {
+	st, err := strand.Read(sess.TaskID, sess.Role)
+	switch {
+	case err != nil:
+		// No session: either it was never spawned, or it is finished and
+		// already landed. Neither is "running".
+		if sess.Run == state.RunRunning {
+			setStrandRun(sess.Path, "")
+			return ""
+		}
+		return sess.Run
+	case st.Running:
+		return state.RunRunning
+	case st.ExitCode == 0:
+		if sess.Run == state.RunMerged {
+			return state.RunMerged
+		}
+		setStrandRun(sess.Path, state.RunDone)
+		return state.RunDone
+	default:
+		setStrandRun(sess.Path, state.RunFailed)
+		return state.RunFailed
+	}
+}
+
+// setStrandRun persists a reconciled state, so the next reader agrees without
+// asking tmux again.
+func setStrandRun(path, run string) {
+	_, _ = state.Mutate(func(s *state.Store) bool { return s.SetRun(path, run, 0) })
 }

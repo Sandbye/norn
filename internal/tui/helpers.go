@@ -224,6 +224,16 @@ func wireStdio(cmd *exec.Cmd, wtPath string) *exec.Cmd {
 // session (empty → fall back to the config default). It only applies to claude
 // (as --model) and to fresh sessions; resume (-c) continues the prior model.
 func makeAgentCmd(agent config.AgentConfig, wtPath string, resume bool, model string) *exec.Cmd {
+	return agentCmd(agent, wtPath, resume, model, false)
+}
+
+// strandCmd is makeAgentCmd for an agent that runs as a strand, where nobody
+// may be watching this particular pane.
+func strandCmd(agent config.AgentConfig, wtPath, model string) *exec.Cmd {
+	return agentCmd(agent, wtPath, false, model, true)
+}
+
+func agentCmd(agent config.AgentConfig, wtPath string, resume bool, model string, strandRun bool) *exec.Cmd {
 	command := agent.Command
 	if command == "" {
 		command = "claude"
@@ -249,6 +259,13 @@ func makeAgentCmd(agent config.AgentConfig, wtPath string, resume bool, model st
 	args := []string{}
 	if model != "" {
 		args = append(args, "--model", model)
+	}
+	if strandRun {
+		// A strand is one of several agents working in parallel, and you are
+		// in at most one pane at a time. Manual mode would have the other
+		// strands stop at the first prompt and wait for someone who is looking
+		// elsewhere. auto has a classifier review each action instead.
+		args = append(args, "--permission-mode", "auto")
 	}
 	prompt := ""
 	if data, err := os.ReadFile(wtPath + "/.worktree.md"); err == nil {

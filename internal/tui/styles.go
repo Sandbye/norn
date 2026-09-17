@@ -223,3 +223,6 @@ func buildStyles() {
 	commentBodyStyle = lipgloss.NewStyle().Foreground(colorYellow)
 	boxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorSurface).Padding(0, 1)
 }
+
+// cursorCellStyle marks where the agent's cursor sits inside a strand pane.
+var cursorCellStyle = lipgloss.NewStyle().Reverse(true)
