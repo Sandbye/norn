@@ -41,6 +41,13 @@ var ErrUnsupportedAgent = errors.New("no headless runner for this agent")
 //
 // The permission level is `act` for both: a role that cannot write files or run
 // its own tests cannot produce the commits this whole contract merges.
+//
+// `args:` is passed through for both agents, so the field means one thing
+// everywhere a role runs unattended. Anything norn sets itself is rejected by
+// config.Validate, so a role's args cannot quietly override the contract: they
+// reach the knobs norn has no opinion on, `-c model_reasoning_effort=low` above
+// all, since reasoning effort is the largest lever on what a role costs and
+// norn picking it would be picking your budget.
 func Command(ctx context.Context, agent config.AgentConfig, dir, brief string) (*exec.Cmd, error) {
 	command := agent.Command
 	if command == "" {
@@ -62,6 +69,7 @@ func Command(ctx context.Context, agent config.AgentConfig, dir, brief string) (
 		if brief != "" {
 			args = append(args, "--append-system-prompt", brief)
 		}
+		args = append(args, agent.Args...)
 	case "codex":
 		// workspace-write plus --approve-for-me is codex's reading of the same
 		// grant: commands run, reviewed automatically instead of by a person.
@@ -69,6 +77,7 @@ func Command(ctx context.Context, agent config.AgentConfig, dir, brief string) (
 		if agent.Model != "" {
 			args = append(args, "--model", agent.Model)
 		}
+		args = append(args, agent.Args...)
 		prompt := Instruction
 		if brief != "" {
 			prompt = Instruction + "\n\n" + brief

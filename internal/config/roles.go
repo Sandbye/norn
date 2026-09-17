@@ -153,9 +153,24 @@ func (c Config) AgentFor(role string) AgentConfig {
 // worktree-add failure halfway through a create rather than as bad config.
 var roleNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
+// ReservedArgs are the flags norn sets itself when it runs a role unattended.
+// A role's `args:` may not repeat one: `--sandbox danger-full-access` would
+// silently widen a grant norn does not make configurable, and a second `--json`
+// or `--output-format` can make the event stream unparseable, which surfaces as
+// a role that failed for no visible reason.
+//
+// Listed here rather than in internal/headless because config cannot import it
+// (headless imports config). A test in that package asserts the list still
+// covers every flag it sets, so the two cannot drift apart silently.
+var ReservedArgs = []string{
+	"-p", "--output-format", "--verbose", "--permission-mode", "--append-system-prompt",
+	"--json", "--sandbox", "--approve-for-me", "-m", "--model",
+}
+
 // Validate reports config that parses but cannot be acted on: the split needs
-// one agent to merge the work and norn will not pick that agent for you, and a
-// role name has to survive being put in a branch.
+// one agent to merge the work and norn will not pick that agent for you, a role
+// name has to survive being put in a branch, and a role's args have to leave
+// norn's own flags alone.
 func (c Config) Validate() error {
 	if len(c.Roles) == 0 {
 		return nil
@@ -163,6 +178,9 @@ func (c Config) Validate() error {
 	for _, name := range sortedNames(c.Roles) {
 		if !roleNamePattern.MatchString(name) {
 			return fmt.Errorf("role %q: a role name becomes a branch segment, so use letters, digits, dot, dash or underscore", name)
+		}
+		if flag := reservedArg(c.Roles[name].Args); flag != "" {
+			return fmt.Errorf("role %q: `args:` sets %s, which norn sets itself when it runs the role (use args for what norn does not model, like `-c` keys)", name, flag)
 		}
 	}
 	var integrating []string
@@ -180,6 +198,23 @@ func (c Config) Validate() error {
 		sort.Strings(integrating)
 		return fmt.Errorf("roles %s: each sets `integrates: true`, and only one role may", strings.Join(integrating, ", "))
 	}
+}
+
+// reservedArg returns the first argument that collides with a flag norn owns,
+// in both the `--flag value` and `--flag=value` spellings, or "" when none do.
+func reservedArg(args []string) string {
+	for _, a := range args {
+		name := a
+		if i := strings.IndexByte(a, '='); i > 0 {
+			name = a[:i]
+		}
+		for _, r := range ReservedArgs {
+			if name == r {
+				return r
+			}
+		}
+	}
+	return ""
 }
 
 func sortedNames(roles Roles) []string {

@@ -68,6 +68,59 @@ func TestCodexRunArgs(t *testing.T) {
 	}
 }
 
+// A role's own args reach codex, which is the only way to set what norn has no
+// opinion on: reasoning effort is the largest lever on what an unattended role
+// costs. They sit last, so a repeated flag resolves in the role's favour, and
+// the prompt stays the final argument.
+func TestCodexPassesRoleArgs(t *testing.T) {
+	agent := config.AgentConfig{Command: "codex", Model: "gpt-5", Args: []string{"-c", `model_reasoning_effort="low"`}}
+	_, args := argsFor(t, agent, "")
+	if !has(args, "-c", `model_reasoning_effort="low"`) {
+		t.Fatalf("role args did not reach codex: %v", args)
+	}
+	if args[len(args)-1] != Instruction {
+		t.Fatalf("args displaced the prompt: %v", args)
+	}
+	if i, j := index(args, "--model"), index(args, "-c"); i > j {
+		t.Fatalf("role args did not land after norn's own flags: %v", args)
+	}
+
+	// A claude role's args are honored too: a field that is authoritative
+	// enough to fail validation but not to do anything is a flag that neither
+	// errors nor applies, which costs an hour to notice.
+	_, claudeArgs := argsFor(t, config.AgentConfig{Args: []string{"--add-dir", "/w/shared"}}, "")
+	if !has(claudeArgs, "--add-dir", "/w/shared") {
+		t.Fatalf("claude run dropped the role's args: %v", claudeArgs)
+	}
+}
+
+// Every flag the runner sets must be in config.ReservedArgs, which is what
+// stops a role's `args:` from repeating one. The list lives in config because
+// config cannot import this package, so this test is the only thing keeping the
+// two in step.
+func TestReservedArgsCoversEveryFlagSet(t *testing.T) {
+	for _, agent := range []config.AgentConfig{{}, {Command: "codex"}} {
+		_, args := argsFor(t, agent, "brief")
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") {
+				continue // a value or the prompt, not a flag
+			}
+			if index(config.ReservedArgs, a) < 0 {
+				t.Fatalf("%s sets %q but config.ReservedArgs does not list it, so a role could repeat it", agent.Command, a)
+			}
+		}
+	}
+}
+
+func index(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
 // An agent with no runner fails the start by name. Launching it with another
 // agent's flags would have it exit 0 having done nothing, which reads as a role
 // that finished and merges an empty branch.

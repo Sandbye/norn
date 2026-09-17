@@ -224,3 +224,29 @@ func TestLoadValidatesRoles(t *testing.T) {
 		t.Fatalf("roleless load: err %v, roles %v, agent %q", err, cfg.Roles, cfg.AgentCommand())
 	}
 }
+
+// A role's args may not repeat a flag norn sets itself: `--sandbox
+// danger-full-access` would widen the grant an unattended role runs at, and the
+// failure belongs at config load where it is visible, not at spawn.
+func TestRoleArgsRejectReservedFlags(t *testing.T) {
+	cfg := Config{Roles: Roles{
+		"logic":  {AgentConfig: AgentConfig{Command: "claude"}, Integrates: true},
+		"design": {AgentConfig: AgentConfig{Command: "codex", Args: []string{"--sandbox", "danger-full-access"}}},
+	}}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "--sandbox") {
+		t.Fatalf("Validate = %v, want it to reject --sandbox by name", err)
+	}
+
+	// The `--flag=value` spelling is the same collision.
+	cfg.Roles["design"] = RoleConfig{AgentConfig: AgentConfig{Command: "codex", Args: []string{"--model=gpt-5"}}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "--model") {
+		t.Fatalf("Validate = %v, want it to reject --model=... too", err)
+	}
+
+	// What args are for: keys norn does not model.
+	cfg.Roles["design"] = RoleConfig{AgentConfig: AgentConfig{Command: "codex", Args: []string{"-c", "model_reasoning_effort=low"}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected a legitimate -c key: %v", err)
+	}
+}
