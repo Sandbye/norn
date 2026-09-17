@@ -138,6 +138,8 @@ norn run          # from any of the task's worktrees
 norn run <task-id>
 ```
 
+`R` on the Threads tab does the same for the task under the cursor, detached, so the rail keeps rendering while the roles work: rows move to WORKING and then to merged or failed on the normal tick.
+
 Every non-integrating role runs headless in its own worktree (`claude -p` for claude, `codex exec --json` for codex, on the normal login in both cases), and process exit is the done signal. A role that exits 0 with commits is merged into the trunk with `--no-ff`; one that exits non-zero shows as failed with the trunk untouched; a merge that conflicts leaves the conflict in the trunk worktree for you and marks the task blocked. norn never opens or merges the PR: the integrating role stays interactive and opens the single PR from the trunk once the roles have landed.
 
 A role's `args:` reaches the knobs norn has no opinion on, whichever agent serves it, `-c model_reasoning_effort=low` on a Codex role above all, since reasoning effort is the largest lever on what an unattended role costs. Args that repeat a flag norn sets itself are rejected when the config loads, so a role cannot quietly widen the sandbox or break the event stream the run is read from.

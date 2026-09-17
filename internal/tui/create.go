@@ -167,10 +167,13 @@ func (m createModel) createFailed() createModel {
 	return m
 }
 
-// hasFormFields reports whether buildForm would produce any field at all — a
+// hasFormFields reports whether buildForm would produce any field at all: a
 // task-seeded create with one base and no choices has nothing left to show.
+// Roles count, or a repo that splits its work could never split a task-seeded
+// create.
 func (m createModel) hasFormFields() bool {
-	return !m.seeded || len(m.baseBranches) > 1 || len(m.templates) > 1 || len(m.models) > 0
+	return !m.seeded || len(m.baseBranches) > 1 || len(m.templates) > 1 ||
+		len(m.models) > 0 || len(roleOptions(m.roles)) > 0
 }
 
 // roleOptions lists the roles a create may pick. Empty for a repo with fewer
@@ -246,15 +249,20 @@ func filterTasks(tasks []task.Task, query string) []task.Task {
 }
 
 // withTask seeds the create form from a task (picked here or on the Tasks tab):
-// the task defines the hint, so the form drops the hint field. Single base →
-// confirm immediately; otherwise open the form focused for base/template/model.
+// the task defines the hint, so the form drops the hint field. Nothing left to
+// ask means confirm immediately; otherwise open the form focused on whatever is
+// still a choice, base, template, model or roles.
 func (m createModel) withTask(t task.Task) createModel {
 	tt := t
 	m.selectedTask = &tt
 	m.hint = fmt.Sprintf("#%s %s", t.ID, t.Title)
 	m.seeded = true
+	// One base is not a choice, so take it either way; the create resolves an
+	// empty one from the project config.
 	if len(m.baseBranches) == 1 {
 		m.baseBranch = m.baseBranches[0]
+	}
+	if !m.hasFormFields() {
 		m.confirmed = true
 		return m
 	}

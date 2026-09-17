@@ -20,6 +20,7 @@ import (
 	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/notify"
 	"github.com/sandbye/norn/internal/prompt"
+	"github.com/sandbye/norn/internal/runlog"
 	"github.com/sandbye/norn/internal/state"
 )
 
@@ -29,19 +30,31 @@ import (
 // in the background to learn PR state. State file is the source of truth
 // for which sessions exist; git worktree list reconciles dead sessions.
 type Dashboard struct {
-	cfg      config.Config
-	store    *state.Store
-	rows     []dashRow
-	cursor   int
-	width    int
-	height   int
-	err      error
-	quit     bool
-	result   Result
-	lastLoad time.Time
+	cfg    config.Config
+	store  *state.Store
+	rows   []dashRow
+	cursor int
+	width  int
+	height int
+	err    error
+	// notice is a one-line answer to a key that did nothing, so a no-op key
+	// does not read as a hang. Cleared by the next keypress.
+	notice string
+
+	// Run-log viewer: a headless role has no session to open, so this is the
+	// only way to see what it is doing. Read-only, and refreshed on the tick
+	// while a role is still writing to the file.
+	showLog   bool
+	logTask   string
+	logRole   string
+	logEvents []runlog.Event
+	logErr    error
+	quit      bool
+	result    Result
+	lastLoad  time.Time
 
 	// scopeRepo: when non-empty, only sessions for this repo basename are shown.
-	// Set automatically when `work -d` runs inside a git repo. Press `a` to
+	// Set automatically when `norn -d` runs inside a git repo. Press `a` to
 	// clear and see all repos.
 	scopeRepo string
 
@@ -284,6 +297,17 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 
+		// Run-log viewer swallows keys the same way: `r` refreshes, anything
+		// else closes it.
+		if d.showLog {
+			if s == "r" {
+				return d, loadRunLogCmd(d.logTask, d.logRole)
+			}
+			d.showLog = false
+			d.logEvents, d.logErr = nil, nil
+			return d, nil
+		}
+
 		// Reply input: while open, letters type into the reply, so it is checked
 		// before the filter and before any action key.
 		if d.reply.active {
@@ -337,6 +361,7 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		vis := d.visibleRows()
 		switch s {
 		case "j", "down", "ctrl+n":
+			d.notice = ""
 			if d.cursor < len(vis)-1 {
 				d.cursor++
 			}
@@ -350,6 +375,32 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.cursor = len(vis) - 1
 		case "r":
 			return d, d.loadCmd()
+		case "l":
+			// What a headless role is doing. Only roles have one: an
+			// interactive thread is opened with `o` instead.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.TaskID == "" || row.Role == "" {
+					d.notice = "no run log: this thread is not a role in a split task"
+					return d, nil
+				}
+				d.showLog, d.logTask, d.logRole = true, row.TaskID, row.Role
+				d.logEvents, d.logErr = nil, nil
+				return d, loadRunLogCmd(row.TaskID, row.Role)
+			}
+		case "R":
+			// Start this task's headless roles. Detached, so the rail keeps
+			// rendering: the supervisor writes every transition to the store
+			// and the rows pick it up on the normal tick.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.TaskID == "" {
+					d.notice = "not part of a split task: make one with a role in the New tab"
+					return d, nil
+				}
+				d.notice = "starting " + taskLabel(row) + "…"
+				return d, startRoleRunCmd(row.TaskID)
+			}
 		case "a":
 			if d.scopeRepo != "" {
 				d.scopeRepo = ""
@@ -444,10 +495,16 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case dashTickMsg:
-		return d, tea.Batch(
+		cmds := []tea.Cmd{
 			d.loadCmd(),
 			tea.Tick(5*time.Second, func(t time.Time) tea.Msg { return dashTickMsg(t) }),
-		)
+		}
+		if d.showLog {
+			// The agent is appending to the file as it works, so the viewer
+			// follows it rather than showing the moment it was opened.
+			cmds = append(cmds, loadRunLogCmd(d.logTask, d.logRole))
+		}
+		return d, tea.Batch(cmds...)
 
 	case markTickMsg:
 		if !active.Spin {
@@ -560,6 +617,21 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, cmd
 		}
 
+	case logLoadedMsg:
+		if msg.role == d.logRole {
+			d.logEvents, d.logErr = msg.events, msg.err
+		}
+
+	case runStartedMsg:
+		// A failed start is the only thing worth interrupting for. What the
+		// roles do next arrives through the store, on the tick.
+		d.err = msg.err
+		if msg.err == nil {
+			d.notice = "roles running, log: " + runLogDir(msg.taskID)
+			return d, d.loadCmd()
+		}
+		d.notice = ""
+
 	case summaryMsg:
 		// Non-modal: finishing does NOT pop the overlay. Cache it and flag the
 		// row as ready; the user opens it with `s` when they want it.
@@ -575,6 +647,46 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return d, nil
+}
+
+// renderRunLog shows a headless role's own account of itself: one line per
+// thing it said or did, newest at the bottom, the way you would watch a session
+// you were sitting in.
+func (d Dashboard) renderRunLog() string {
+	title := headerStyle.Render("Run log: " + d.logRole)
+	body := dimStyle.Render("nothing yet — the role has not written to its log")
+	switch {
+	case d.logErr != nil:
+		body = errorStyle.Render("read log: " + d.logErr.Error())
+	case len(d.logEvents) > 0:
+		rows := max(d.height-8, 6)
+		events := d.logEvents
+		if len(events) > rows {
+			events = events[len(events)-rows:]
+		}
+		w := max(d.width-8, 30)
+		lines := make([]string, 0, len(events))
+		for _, ev := range events {
+			lines = append(lines, runLogLine(ev, w))
+		}
+		body = strings.Join(lines, "\n")
+	}
+	return fmt.Sprintf("%s\n\n%s\n\n%s", title, body,
+		dimStyle.Render("follows the run · r refresh · any key to dismiss · full JSONL: "+roleLogPath(d.logTask, d.logRole)))
+}
+
+// runLogLine styles one event by kind: what it said, what it ran, how it ended.
+func runLogLine(ev runlog.Event, w int) string {
+	switch ev.Kind {
+	case runlog.KindTool:
+		return dimStyle.Render("  ▸ ") + branchStyle.Render(truncate(ev.Text, w-4))
+	case runlog.KindResult:
+		return activeStyle.Render("  ● " + truncate(ev.Text, w-4))
+	case runlog.KindNote:
+		return dimStyle.Render("  · " + truncate(ev.Text, w-4))
+	default:
+		return "  " + truncate(ev.Text, w-2)
+	}
 }
 
 func (d Dashboard) View() string {
@@ -595,6 +707,10 @@ func (d Dashboard) View() string {
 			body = renderMarkdown(d.summary, d.width)
 		}
 		return fmt.Sprintf("%s\n\n%s\n\n%s", title, body, dimStyle.Render("r refresh · any key to dismiss"))
+	}
+
+	if d.showLog {
+		return d.renderRunLog()
 	}
 
 	header := d.renderHeader()
@@ -663,6 +779,10 @@ func (d Dashboard) View() string {
 		// One line: claude's own errors run long, and a wrapped status pushes the
 		// help line around under the table.
 		body += "\n\n" + dimStyle.Render(truncate(d.reply.sent, max(avail-2, 20)))
+	}
+
+	if d.notice != "" {
+		body += "\n\n" + dimStyle.Render(truncate(d.notice, max(avail-2, 20)))
 	}
 
 	// Filter line above the help.
@@ -1142,7 +1262,7 @@ func (d Dashboard) dashKeyHelp() string {
 		return dimStyle.Render("type your answer · ⏎ send · ⇥ permission · ctrl+u clear · esc cancel")
 	}
 	// Concise essentials; the full keymap lives in the global `?` help overlay.
-	return dimStyle.Render("⏎ cd · o open · i answer · m main · ? help")
+	return dimStyle.Render("⏎ cd · o open · i answer · R run roles · l log · m main · ? help")
 }
 
 func openPRInBrowser(branch, repoDir string) {

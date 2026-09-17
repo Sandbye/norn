@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"github.com/sandbye/norn/internal/task"
 	"strings"
 	"testing"
 
@@ -95,5 +96,30 @@ func TestCreateErrorSurvivesNextKey(t *testing.T) {
 	next, _ := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	if next.(App).err == nil {
 		t.Error("banner cleared by the next keystroke while the create was in flight")
+	}
+}
+
+// A task-seeded create must still offer the split. The roles picker is the only
+// field left when the repo has one base branch, so a create started from the
+// Tasks tab would otherwise confirm immediately and no task from the tracker
+// could ever be split across roles.
+func TestTaskSeededCreateOffersRoles(t *testing.T) {
+	m := newCreateModel([]string{"main"})
+	m.roles = []string{"integration", "logic"}
+	m.form = m.buildForm()
+
+	seeded := m.withTask(task.Task{ID: "71", Title: "headless roles"})
+	if seeded.confirmed {
+		t.Fatal("task-seeded create confirmed itself, so the roles picker never showed")
+	}
+	if seeded.baseBranch != "main" {
+		t.Fatalf("base = %q, want the only base branch", seeded.baseBranch)
+	}
+
+	// Without roles there is nothing left to ask, so the old shortcut stands.
+	plain := newCreateModel([]string{"main"})
+	plain.form = plain.buildForm()
+	if got := plain.withTask(task.Task{ID: "1", Title: "x"}); !got.confirmed {
+		t.Fatal("a create with no choices left should confirm immediately")
 	}
 }
