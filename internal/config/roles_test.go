@@ -380,3 +380,40 @@ func TestReviewingRole(t *testing.T) {
 		t.Fatal("a role that reviews its own integration was accepted")
 	}
 }
+
+// A shape can leave out the role another role declares `after:`. The wait is
+// then not real, and treating it as real leaves the whole task unstartable.
+func TestStartsAfterInDropsAbsentRoles(t *testing.T) {
+	cfg := Config{Roles: map[string]RoleConfig{
+		"plan":        {Plans: true},
+		"tests":       {After: "plan"},
+		"logic":       {After: "tests"},
+		"review":      {Reviews: true},
+		"integration": {Integrates: true},
+	}}
+	small := map[string]bool{"logic": true, "integration": true}
+
+	if got := cfg.StartsAfter("logic"); got != "tests" {
+		t.Fatalf("declared wait changed: %q", got)
+	}
+	if got := cfg.StartsAfterIn("logic", small); got != "" {
+		t.Fatalf("logic waits for %q, which this task does not have", got)
+	}
+	if got := cfg.StartsAfterIn("integration", small); got != "" {
+		t.Fatalf("integration waits for %q with no planner in the task", got)
+	}
+
+	full := map[string]bool{"plan": true, "tests": true, "logic": true, "review": true, "integration": true}
+	if got := cfg.StartsAfterIn("logic", full); got != "tests" {
+		t.Fatalf("logic should wait for tests, got %q", got)
+	}
+	if got := cfg.StartsAfterIn("integration", full); got != "plan" {
+		t.Fatalf("integration should wait for the planner, got %q", got)
+	}
+	if got := cfg.StartsAfterIn("review", map[string]bool{"review": true, "integration": true}); got != "" {
+		t.Fatalf("reviewer waits for code strands that do not exist: %q", got)
+	}
+	if got := cfg.StartsAfterIn("review", full); got != "*" {
+		t.Fatalf("reviewer should wait for the code strands, got %q", got)
+	}
+}

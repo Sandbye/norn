@@ -35,6 +35,75 @@ type runStartedMsg struct {
 // tmux owns the agents, not norn: quitting the TUI leaves every strand working,
 // and the pane is a client that comes and goes. That is also why this does not
 // wait for anything. A strand's exit is read back from tmux when the rail asks.
+// planStrand is a role's entry in its task's plan, when a planner created it.
+//
+// A plan carries the same three things a declared role does: what it runs on,
+// what it waits for, and what verify must say. Those were read only at creation
+// time, so a plan-created strand's `after:` was forgotten the moment norn
+// restarted and its `expect:` was never checked at all.
+func planStrand(taskID, role string) (plan.Strand, bool) {
+	p, err := plan.Read(taskID)
+	if err != nil {
+		return plan.Strand{}, false
+	}
+	for _, s := range p.Strands {
+		if s.Role == role {
+			return s, true
+		}
+	}
+	return plan.Strand{}, false
+}
+
+// waitFor is the strand this one starts after: the plan's answer when the plan
+// created it, the config's otherwise.
+func waitFor(cfg config.Config, taskID, role string, present map[string]bool) string {
+	if s, ok := planStrand(taskID, role); ok {
+		if s.After != "" && present[s.After] {
+			return s.After
+		}
+		return ""
+	}
+	return cfg.StartsAfterIn(role, present)
+}
+
+// agentFor is the agent a strand runs, honouring a plan's per-strand override.
+func agentFor(cfg config.Config, taskID, role string) config.AgentConfig {
+	agent := cfg.AgentFor(role)
+	if s, ok := planStrand(taskID, role); ok {
+		if s.Agent != "" {
+			agent.Command = s.Agent
+		}
+		if s.Model != "" {
+			agent.Model = s.Model
+		}
+	}
+	return agent
+}
+
+// hasLanded reports whether a role's work is already on the trunk. R is also
+// the catch-up key: a strand whose predecessor landed while norn was not
+// watching must start now rather than wait for a landing that already happened.
+func hasLanded(store *state.Store, taskID, role string) bool {
+	for _, s := range store.SessionsForTask(taskID) {
+		if s.Role == role {
+			return s.Run == state.RunMerged
+		}
+	}
+	return false
+}
+
+// rolesOf is the set of roles a task actually has, which is what a wait is
+// checked against.
+func rolesOf(sessions []state.Session) map[string]bool {
+	present := map[string]bool{}
+	for _, s := range sessions {
+		if s.Role != "" {
+			present[s.Role] = true
+		}
+	}
+	return present
+}
+
 func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 	return func() tea.Msg {
 		if !strand.Available() {
@@ -48,6 +117,7 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 			return runStartedMsg{taskID: taskID, err: fmt.Errorf("no task %q in the session store", taskID)}
 		}
 
+		present := rolesOf(store.SessionsForTask(taskID))
 		started := 0
 		for _, sess := range store.SessionsForTask(taskID) {
 			// The trunk is a strand like any other: it is where a conflict gets
@@ -73,13 +143,13 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 				started++
 				continue
 			}
-			if cfg.StartsAfter(sess.Role) != "" {
+			if after := waitFor(cfg, taskID, sess.Role, present); after != "" && !hasLanded(store, taskID, after) {
 				// Waiting on another strand: it starts when that one lands, so
 				// its branch forks from a trunk that already holds the work it
 				// is supposed to build on.
 				continue
 			}
-			agent := cfg.AgentFor(sess.Role)
+			agent := agentFor(cfg, taskID, sess.Role)
 			argv := strandCmd(cfg, agent, sess.Path, agent.Model).Args
 			if err := strand.Spawn(taskID, sess.Role, sess.Path, argv, cols, rows); err != nil {
 				return runStartedMsg{taskID: taskID, err: err}
@@ -88,7 +158,7 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 			started++
 		}
 		if started == 0 {
-			return runStartedMsg{taskID: taskID, err: errors.New("every strand of this task is already running")}
+			return runStartedMsg{taskID: taskID, err: errors.New("nothing to start: every strand is already running or waits for one that is")}
 		}
 		return runStartedMsg{taskID: taskID}
 	}
@@ -212,6 +282,18 @@ func landStrandCmd(cfg config.Config, row dashRow) tea.Cmd {
 	}
 }
 
+// expectOf is what verify must report before this strand may land: the plan's
+// word when a plan created it, the role's declaration otherwise.
+func expectOf(cfg config.Config, taskID, role string) string {
+	if s, ok := planStrand(taskID, role); ok {
+		return s.Expect
+	}
+	if rc, ok := cfg.Role(role); ok {
+		return rc.Expect
+	}
+	return ""
+}
+
 // checkExpect runs the repo's verify in the strand's own worktree and holds the
 // merge unless the result is what the role promised.
 //
@@ -219,18 +301,18 @@ func landStrandCmd(cfg config.Config, row dashRow) tea.Cmd {
 // passes before the implementation exists has written a test that proves
 // nothing, and letting it land is how the whole sequence becomes decoration.
 func checkExpect(cfg config.Config, row dashRow) error {
-	rc, ok := cfg.Role(row.Role)
-	if !ok || rc.Expect == "" {
+	expect := expectOf(cfg, row.TaskID, row.Role)
+	if expect == "" {
 		return nil
 	}
 	if len(cfg.Verify) == 0 {
-		return fmt.Errorf("%s expects %s, but this repo declares no verify commands to check it with", row.Role, rc.Expect)
+		return fmt.Errorf("%s expects %s, but this repo declares no verify commands to check it with", row.Role, expect)
 	}
 	passed, failing, out := runVerify(row.Path, cfg.Verify)
 	switch {
-	case rc.Expect == config.ExpectGreen && !passed:
+	case expect == config.ExpectGreen && !passed:
 		return fmt.Errorf("%s must leave the tree green, and `%s` fails:\n%s", row.Role, failing, out)
-	case rc.Expect == config.ExpectRed && passed:
+	case expect == config.ExpectRed && passed:
 		return fmt.Errorf("%s must leave a failing test, and every verify command passes: a test that does not fail proves nothing", row.Role)
 	}
 	return nil
@@ -270,12 +352,13 @@ func spawnWaitingCmd(cfg config.Config, taskID, landed string, cols, rows int) t
 		if err != nil {
 			return runStartedMsg{taskID: taskID, err: err}
 		}
+		present := rolesOf(store.SessionsForTask(taskID))
 		started := 0
 		for _, sess := range store.SessionsForTask(taskID) {
-			if cfg.StartsAfter(sess.Role) != landed || strand.Alive(taskID, sess.Role) {
+			if waitFor(cfg, taskID, sess.Role, present) != landed || strand.Alive(taskID, sess.Role) {
 				continue
 			}
-			agent := cfg.AgentFor(sess.Role)
+			agent := agentFor(cfg, taskID, sess.Role)
 			argv := strandCmd(cfg, agent, sess.Path, agent.Model).Args
 			if err := strand.Spawn(taskID, sess.Role, sess.Path, argv, cols, rows); err != nil {
 				return runStartedMsg{taskID: taskID, err: err}

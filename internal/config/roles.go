@@ -54,6 +54,35 @@ func (c Config) ShapeNames() []string {
 // planner when there is one: until the plan lands there is nothing to
 // integrate, and an integrator spawned early designs the fix itself, in
 // parallel with the planner doing the same thing.
+// StartsAfterIn is StartsAfter for a task that holds only `present` roles.
+//
+// A wait is only real when the role waited for is in the task. A shape can
+// legitimately omit one: `small: [logic, integration]` takes `logic` out of the
+// test-first chain it declares `after: tests` for. Reading the wait from the
+// config alone left every strand of that task waiting for a strand that was
+// never created, so nothing ever started.
+func (c Config) StartsAfterIn(role string, present map[string]bool) string {
+	after := c.StartsAfter(role)
+	switch {
+	case after == "":
+		return ""
+	case after == "*":
+		// The reviewer waits for the code strands, so with none in the task
+		// there is nothing to wait for.
+		for name := range present {
+			rc := c.Roles[name]
+			if name != role && !rc.Reviews && !rc.Integrates {
+				return "*"
+			}
+		}
+		return ""
+	case present[after]:
+		return after
+	default:
+		return ""
+	}
+}
+
 func (c Config) StartsAfter(role string) string {
 	rc, ok := c.Roles[role]
 	if !ok {
@@ -125,6 +154,12 @@ type RoleConfig struct {
 	// the agent's judgement and yours, never the agent's alone.
 	Plans bool `yaml:"plans,omitempty" json:"plans,omitempty"`
 
+	// TestFirst makes a planning role split every piece of work into a failing
+	// test strand and an implementation strand that waits for it. Without it
+	// the planner decides, and a planner that decides usually does not: on the
+	// first real task it wrote "no test strand, each owns its tests".
+	TestFirst bool `yaml:"test_first,omitempty" json:"test_first,omitempty"`
+
 	// Reviews marks a role that reads the combined trunk and reports, instead
 	// of writing product code. It starts once every code strand has landed,
 	// which is the first moment the whole change exists in one place.
@@ -186,7 +221,8 @@ func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 		Expect     string   `yaml:"expect"`
 		Plans      bool     `yaml:"plans"`
 		Reviews    bool     `yaml:"reviews"`
-	}{Args: r.Args, Model: r.Model, Integrates: r.Integrates, After: r.After, Expect: r.Expect, Plans: r.Plans, Reviews: r.Reviews}
+		TestFirst  bool     `yaml:"test_first"`
+	}{Args: r.Args, Model: r.Model, Integrates: r.Integrates, After: r.After, Expect: r.Expect, Plans: r.Plans, Reviews: r.Reviews, TestFirst: r.TestFirst}
 	if err := node.Decode(&v); err != nil {
 		return err
 	}
@@ -207,6 +243,7 @@ func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 		Expect:      v.Expect,
 		Plans:       v.Plans,
 		Reviews:     v.Reviews,
+		TestFirst:   v.TestFirst,
 	}
 	return nil
 }
@@ -300,6 +337,9 @@ func (c Config) Validate() error {
 			if role.After == name {
 				return fmt.Errorf("role %q waits for itself", name)
 			}
+		}
+		if role.TestFirst && !role.Plans {
+			return fmt.Errorf("role %q sets test_first without plans, and only a planning role decides how work splits", name)
 		}
 		if role.Reviews && (role.Integrates || role.Plans) {
 			return fmt.Errorf("role %q reviews as well as planning or integrating, and a reviewer has to be someone other than the author", name)
