@@ -48,6 +48,10 @@ func newFixture(t *testing.T) fixture {
 	if out, err := exec.Command("git", "init", "-q", "-b", "main", main).CombinedOutput(); err != nil {
 		t.Skipf("git init unavailable: %v: %s", err, out)
 	}
+	// norn merges with its own process, which inherits the environment rather
+	// than this file's git helper, and a CI runner has no identity to inherit.
+	gitRun(t, main, "config", "user.name", "norn test")
+	gitRun(t, main, "config", "user.email", "test@norn.invalid")
 	gitRun(t, main, "commit", "-q", "--allow-empty", "-m", "init")
 
 	f := fixture{
