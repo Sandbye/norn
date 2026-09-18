@@ -318,6 +318,15 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.width = msg.Width
 		d.height = msg.Height
 
+	case tea.MouseMsg:
+		// The wheel belongs to whatever is under it. In a pane that is the
+		// agent's own program, which scrolls its own history far better than a
+		// copy of its screen could.
+		if d.pane.open() && (msg.Type == tea.MouseWheelUp || msg.Type == tea.MouseWheelDown) {
+			d.pane.term.Wheel(msg.Type == tea.MouseWheelUp, msg.X, max(msg.Y-1, 0))
+		}
+		return d, nil
+
 	case tea.KeyMsg:
 		s := msg.String()
 

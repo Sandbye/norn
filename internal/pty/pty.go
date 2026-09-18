@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 )
@@ -148,6 +150,24 @@ func (t *Term) Write(p []byte) error {
 	}
 	_, err := t.file.Write(p)
 	return err
+}
+
+// Wheel scrolls the program the way a mouse would, at (col, row), zero-based.
+//
+// The emulator decides what reaches the program: an agent that asked for mouse
+// reporting gets the event, and one that did not gets nothing, which is the
+// same thing that happens in a real terminal.
+func (t *Term) Wheel(up bool, col, row int) {
+	if t.closed.Load() {
+		return
+	}
+	button := ansi.MouseWheelDown
+	if up {
+		button = ansi.MouseWheelUp
+	}
+	t.mu.Lock()
+	t.vt.SendMouse(uv.MouseWheelEvent{X: col, Y: row, Button: button})
+	t.mu.Unlock()
 }
 
 // Resize tells the program its terminal changed size. Without it a pane that

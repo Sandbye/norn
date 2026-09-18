@@ -251,7 +251,9 @@ func runAppOn(cfg config.Config, repoRoot string, initialView tui.View, boardTas
 		scope = originRepoName(repoRoot)
 	}
 	app := tui.NewApp(cfg, repoRoot, scope, initialView).OpenBoardFor(boardTask)
-	p := tea.NewProgram(app, tea.WithAltScreen())
+	// Mouse reporting is on so the wheel reaches a strand's agent; the rail
+	// itself ignores mouse events.
+	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	m, err := p.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
