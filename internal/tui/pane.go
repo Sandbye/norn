@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -193,16 +194,19 @@ func (d Dashboard) renderPane() string {
 	title := d.paneHeader()
 	body := d.pane.term.Screen()
 	leader := d.cfg.PaneLeaderKey()
-	foot := dimStyle.Render("  " + leader + " ← back · ↓/↑ strand · f go to · b board")
+	foot := paneBarStyle.Width(max(d.width, 1)).Render("  " + leader + " ← back · ↓/↑ strand · f go to · b board")
 	if d.pane.armed {
-		foot = cursorStyle.Render("  "+leader+" ▸ ") + dimStyle.Render("← back · ↓/↑ strand · f go to · b board · "+leader+" literal")
+		foot = paneArmedStyle.Width(max(d.width, 1)).Render("  " + leader + " ▸  ← back · ↓/↑ strand · f go to · b board · " + leader + " literal")
 	}
 	if d.pane.dead() {
-		foot = errorStyle.Render("this attachment ended") + dimStyle.Render(" · any key returns to threads")
+		foot = paneArmedStyle.Width(max(d.width, 1)).Render("  this attachment ended · any key returns to threads")
 	}
 	col, row := d.pane.term.Cursor()
 	screen := drawCursor(strings.TrimRight(body, "\n"), col, row)
-	return fmt.Sprintf("%s\n%s\n\n%s", title, indent(screen, paneMargin), foot)
+	// The screen sits between the two bars with one blank line above it, so the
+	// agent's own output is not welded to norn's chrome, and the footer hugs
+	// the bottom the way the header hugs the top.
+	return fmt.Sprintf("%s\n\n%s\n%s", title, indent(screen, paneMargin), foot)
 }
 
 // taskSpawnedMsg reports that a split create spawned every strand, so the app
@@ -273,43 +277,19 @@ func (d Dashboard) enterSibling(forward bool) (tea.Model, tea.Cmd) {
 // by visible column rather than by byte offset.
 var paneANSI = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-// drawCursor marks the agent's cursor cell in the rendered screen.
-//
-// Drawn rather than placed: Bubble Tea v1 writes its own cursor move after the
-// view, so an escape sequence inside the frame is overwritten and the real
-// cursor ends up parked on norn's footer. Inverting the cell puts it where the
-// agent thinks it is, which is the only place it is any use.
-func drawCursor(body string, col, row int) string {
-	lines := strings.Split(body, "\n")
-	if row < 0 || row >= len(lines) {
-		return body
-	}
-	// Column is in cells, and the line carries styling, so walk the visible
-	// runes rather than indexing bytes.
-	plain := paneANSI.ReplaceAllString(lines[row], "")
-	runes := []rune(plain)
-	if col < 0 {
-		return body
-	}
-	for len(runes) <= col {
-		runes = append(runes, ' ')
-	}
-	under := string(runes[col])
-	if under == "" {
-		under = " "
-	}
-	lines[row] = string(runes[:col]) + cursorCellStyle.Render(under) + string(runes[col+1:])
-	return strings.Join(lines, "\n")
-}
-
-// paneHeader is the frame that says you are still in norn. One line naming the
-// tree and this strand, one listing the task's other strands with their state,
-// so being inside an agent does not cost you the view of the rest.
+// paneHeader is the bar that says you are still in norn while somebody else's
+// UI fills the screen. One filled line rather than two dim ones: a glance has
+// to say this is a strand of a task, not a bare terminal.
 func (d Dashboard) paneHeader() string {
-	mark := lipgloss.NewStyle().Bold(true).Foreground(colorLavender).Render("ᚾᛟᚱᚾ")
-	line := "  " + mark + "  " + headerStyle.Render("⟡ "+d.pane.role)
+	left := paneMarkStyle.Render(" ᚾᛟᚱᚾ ") + paneTitleStyle.Render(" ⟡ "+d.pane.role+" ")
 	if d.pane.branch != "" {
-		line += dimStyle.Render("  " + d.pane.branch)
+		// The task segment, not the whole branch: a truncated 40-character ref
+		// says less than the part that differs between strands.
+		leaf := d.pane.branch
+		if i := strings.LastIndexByte(leaf, '/'); i >= 0 && i+1 < len(leaf) {
+			leaf = leaf[:i]
+		}
+		left += paneBarStyle.Render("· " + truncate(leaf, max(d.width/3, 12)) + " ")
 	}
 
 	var chips []string
@@ -317,23 +297,81 @@ func (d Dashboard) paneHeader() string {
 		if r.TaskID != d.pane.taskID || r.Role == "" {
 			continue
 		}
-		chip := r.Role + strings.TrimSpace(runMark(r))
+		chip := " " + r.Role + runMark(r) + " "
 		switch {
 		case r.Role == d.pane.role:
-			chips = append(chips, cursorStyle.Render(chip))
+			chips = append(chips, paneChipHereStyle.Render(chip))
 		case r.Bell || r.Run == state.RunFailed:
-			chips = append(chips, dirtyStyle.Render(chip))
-		case r.Run == state.RunMerged:
-			chips = append(chips, activeStyle.Render(chip))
+			chips = append(chips, paneChipNeedsStyle.Render(chip))
 		default:
-			chips = append(chips, dimStyle.Render(chip))
+			chips = append(chips, paneBarStyle.Render(chip))
 		}
 	}
-	if len(chips) == 0 {
-		return line
+	right := strings.Join(chips, paneBarStyle.Render("·")) + paneBarStyle.Render(" ")
+
+	gap := d.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		return paneBarStyle.Width(max(d.width, 1)).Render(left)
 	}
-	return line + "\n" + dimStyle.Render("    strands: ") + strings.Join(chips, dimStyle.Render(" · "))
+	return left + paneBarStyle.Render(strings.Repeat(" ", gap)) + right
 }
+
+// drawCursor marks the agent's cursor cell in the rendered screen.
+//
+// Drawn rather than placed: Bubble Tea v1 writes its own cursor move after the
+// view, so an escape inside the frame is overwritten and the real cursor ends
+// up parked on norn's footer.
+//
+// The line's own styling is kept, which matters more than it sounds: an agent
+// draws its input placeholder in faint text, and a version of this that
+// stripped the line's escapes made that hint render like something you had
+// typed.
+func drawCursor(body string, col, row int) string {
+	lines := strings.Split(body, "\n")
+	if row < 0 || row >= len(lines) || col < 0 {
+		return body
+	}
+
+	var out strings.Builder
+	line := lines[row]
+	visible := 0
+	for i := 0; i < len(line); {
+		if loc := paneANSI.FindStringIndex(line[i:]); loc != nil && loc[0] == 0 {
+			out.WriteString(line[i : i+loc[1]]) // an escape occupies no column
+			i += loc[1]
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(line[i:])
+		if visible == col {
+			out.WriteString(cursorCell(string(r)))
+		} else {
+			out.WriteRune(r)
+		}
+		visible++
+		i += size
+	}
+	// A cursor past the end of the drawn text sits on empty space.
+	for visible <= col {
+		if visible == col {
+			out.WriteString(cursorCell(" "))
+		} else {
+			out.WriteByte(' ')
+		}
+		visible++
+	}
+
+	lines[row] = out.String()
+	return strings.Join(lines, "\n")
+}
+
+// cursorCell marks one cell as the cursor, turning off only what it turned on.
+//
+// Written by hand rather than with lipgloss, which closes a style with a full
+// reset (\x1b[0m): inside an agent's line that also cancels whatever was
+// active, so the faint text of an input placeholder rendered from the cursor
+// onwards as ordinary white text, and read as something the user had typed.
+// \x1b[27m ends reverse video and nothing else.
+func cursorCell(s string) string { return "\x1b[7m" + s + "\x1b[27m" }
 
 // indent shifts a rendered screen right, without touching its styling.
 func indent(body string, by int) string {
