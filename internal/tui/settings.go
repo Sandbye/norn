@@ -70,10 +70,14 @@ type settingLayer struct {
 type settingsModel struct {
 	cfg      config.Config
 	repoRoot string
-	layers   []settingLayer // Global, Repo (personal), Repo (shared)
-	layer    int            // index into layers
-	rows     []settingRow
-	cursor   int
+	layers   []settingLayer // every repo, this repo (you), this repo (team)
+	// onlySet narrows the list to what this scope sets itself, the way an
+	// editor's "modified" filter does: the common question is "what does this
+	// file actually decide", and the full list buries it.
+	onlySet bool
+	layer   int // index into layers
+	rows    []settingRow
+	cursor  int
 
 	mode       settingsMode
 	input      string
@@ -88,15 +92,17 @@ type editorDoneMsg struct{ err error }
 
 // NewSettings builds the settings model. repoRoot may be "" (global only).
 func NewSettings(cfg config.Config, repoRoot string) settingsModel {
+	// Named for what they mean rather than for where they live: "which file is
+	// this" is a question about norn's internals, and "who does this apply to"
+	// is the one you are actually answering.
 	layers := []settingLayer{
-		{"Global", filepath.Join(paths.Config(), "config.yaml")},
+		{"every repo", filepath.Join(paths.Config(), "config.yaml")},
 	}
 	if repoRoot != "" {
-		// Personal per-repo (not committed) and shared repo config.
 		if p := config.ProjectConfigPath(repoRoot); p != "" {
-			layers = append(layers, settingLayer{"Repo · personal", p})
+			layers = append(layers, settingLayer{"this repo, just me", p})
 		}
-		layers = append(layers, settingLayer{"Repo · shared", paths.RepoConfig(repoRoot)})
+		layers = append(layers, settingLayer{"this repo, the team", paths.RepoConfig(repoRoot)})
 	}
 	return settingsModel{
 		cfg:      cfg,
@@ -283,7 +289,7 @@ func (m settingsModel) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor--
 		}
 	case "down", "j":
-		if m.cursor < len(m.rows)-1 {
+		if m.cursor < len(m.visibleRows())-1 {
 			m.cursor++
 		}
 	case "right", "l":
@@ -296,10 +302,24 @@ func (m settingsModel) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.layer = (m.layer - 1 + len(m.layers)) % len(m.layers)
 			m.status = ""
 		}
+	case "m":
+		m.onlySet = !m.onlySet
+		m.cursor = 0
+		m.status = ""
+	case "r":
+		// Remove this key from this scope, so the value falls back to whatever
+		// the layer beneath sets. Editing yaml by hand was the only way to undo
+		// a setting before.
+		r := m.visibleRows()[m.cursor]
+		if !m.setHere(r) {
+			m.status = strings.Join(r.keys, ".") + " is not set in " + m.layerName()
+			break
+		}
+		m.unset(r.keys)
 	case "e":
 		return m, m.editYAML()
 	case " ", "space":
-		r := m.rows[m.cursor]
+		r := m.visibleRows()[m.cursor]
 		if r.kind == kindBool {
 			cur, _ := m.rowValue(r)
 			m.applyBool(r.keys, cur != "on" && cur != "true")
@@ -311,7 +331,7 @@ func (m settingsModel) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m settingsModel) enterEdit() (tea.Model, tea.Cmd) {
-	r := m.rows[m.cursor]
+	r := m.visibleRows()[m.cursor]
 	switch r.kind {
 	case kindBool:
 		cur, _ := m.rowValue(r)
@@ -409,7 +429,7 @@ func (m settingsModel) updateText(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = sModeList
 		m.input = ""
 	case "enter":
-		r := m.rows[m.cursor]
+		r := m.visibleRows()[m.cursor]
 		m.applyString(r.keys, strings.TrimSpace(m.input))
 		m.mode = sModeList
 		m.input = ""
@@ -447,7 +467,7 @@ func (m settingsModel) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input = ""
 			return m, nil
 		}
-		r := m.rows[m.cursor]
+		r := m.visibleRows()[m.cursor]
 		m.applyString(r.keys, choice)
 		m.mode = sModeList
 	}
@@ -466,23 +486,44 @@ func (m settingsModel) View() string {
 			tabs = append(tabs, dimStyle.Render(l.name))
 		}
 	}
-	header := strings.Join(tabs, dimStyle.Render(" · "))
+	header := dimStyle.Render("writing to ") + strings.Join(tabs, dimStyle.Render(" · "))
 	if len(m.layers) > 1 {
-		header += dimStyle.Render("   ←/→ layer")
+		header += dimStyle.Render("   ←/→ change")
 	}
-	b.WriteString(header + "\n\n")
+	b.WriteString(header + "\n")
+	if len(m.layers) > 1 {
+		// The precedence, in the order it actually applies, said once rather
+		// than left to be inferred from which value happens to show.
+		b.WriteString(dimStyle.Render("  most specific wins: this repo just me › this repo the team › every repo") + "\n")
+	}
+	b.WriteString("\n")
+
+	rows := m.visibleRows()
+	if len(rows) == 0 {
+		b.WriteString(dimStyle.Render("  nothing is set in " + m.layerName() + " · m shows everything"))
+		return b.String()
+	}
 
 	lastSection := ""
-	for i, r := range m.rows {
+	for i, r := range rows {
 		if r.section != lastSection {
 			b.WriteString(subtitleStyle.Render(r.section) + "\n")
 			lastSection = r.section
 		}
-		cursor := "  "
+		// A bar in the gutter for a key this scope sets itself, the way an
+		// editor marks a modified line: "does this file decide this" is the
+		// question, and a suffix at the end of the row does not answer it at a
+		// glance.
+		gutter := " "
+		if m.setHere(r) {
+			gutter = selectedStyle.Render("│")
+		}
+		cursor := gutter + " "
 		if i == m.cursor {
-			cursor = cursorStyle.Render("> ")
+			cursor = gutter + cursorStyle.Render(">")
 		}
 		val, inherited := m.rowValue(r)
+		source := m.sourceOf(r)
 		valStr := val
 		if r.kind == kindBool {
 			if val == "true" || val == "on" {
@@ -493,7 +534,7 @@ func (m settingsModel) View() string {
 		}
 		shown := branchStyle.Render(valStr)
 		if inherited {
-			shown = dimStyle.Render(valStr + " ·inherited")
+			shown = dimStyle.Render(valStr + "  " + source)
 		}
 
 		label := fmt.Sprintf("%-14s", r.label)
@@ -526,7 +567,10 @@ func (m settingsModel) View() string {
 	if m.status != "" {
 		b.WriteString(activeStyle.Render(m.status) + "\n")
 	}
-	help := "j/k move · ⏎ edit · space toggle · ←/→ layer · e $EDITOR · ⇥ tab"
+	help := "⏎ edit · space toggle · ←/→ scope · m only set here · r unset · e $EDITOR"
+	if m.onlySet {
+		help = "⏎ edit · space toggle · ←/→ scope · m show all · r unset · e $EDITOR"
+	}
 	switch m.mode {
 	case sModeText:
 		help = "type value · ⏎ save · esc cancel   (empty clears the key)"
@@ -535,4 +579,65 @@ func (m settingsModel) View() string {
 	}
 	b.WriteString(helpStyle.Render(help))
 	return b.String()
+}
+
+// sourceOf says where a row's effective value comes from, in the words the
+// layer tabs use. A value with no source is norn's own default.
+//
+// Shown on every inherited row because "inherited" alone is the question rather
+// than the answer: from the team's file, from your own, or from nowhere.
+func (m settingsModel) sourceOf(r settingRow) string {
+	// Most specific first, which is also the order that decides the winner.
+	for i := len(m.layers) - 1; i >= 0; i-- {
+		ed, err := config.OpenEditor(m.layers[i].path)
+		if err != nil {
+			continue
+		}
+		if _, ok := ed.GetString(r.keys); ok {
+			return "· from " + m.layers[i].name
+		}
+	}
+	return "· default"
+}
+
+// visibleRows is the list as filtered by the "set here" toggle.
+func (m settingsModel) visibleRows() []settingRow {
+	if !m.onlySet {
+		return m.rows
+	}
+	var out []settingRow
+	for _, r := range m.rows {
+		if m.setHere(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// setHere reports whether the active scope sets this key itself, rather than
+// inheriting it. This is what the gutter marks.
+func (m settingsModel) setHere(r settingRow) bool {
+	ed, err := config.OpenEditor(m.activePath())
+	if err != nil {
+		return false
+	}
+	_, ok := ed.GetString(r.keys)
+	return ok
+}
+
+// unset removes a key from the active scope and reloads, so the row
+// immediately shows the value it falls back to.
+func (m *settingsModel) unset(keys []string) {
+	ed, err := config.OpenEditor(m.activePath())
+	if err != nil {
+		m.status = err.Error()
+		return
+	}
+	ed.Delete(keys)
+	if err := ed.Save(); err != nil {
+		m.status = err.Error()
+		return
+	}
+	m.reload()
+	m.status = "removed " + strings.Join(keys, ".") + " from " + m.layerName()
 }

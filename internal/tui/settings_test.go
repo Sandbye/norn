@@ -94,13 +94,20 @@ func TestSettingsSingleLayer(t *testing.T) {
 }
 
 func TestSettingsLayers(t *testing.T) {
-	// A repo yields Global + personal + shared layers.
+	// A repo yields three layers, and they are named for who a setting applies
+	// to rather than for the file it lands in: which file is norn's business,
+	// who it affects is the question being answered.
 	m := NewSettings(config.DefaultConfig(), t.TempDir())
 	if len(m.layers) != 3 {
 		t.Fatalf("expected 3 layers for a repo, got %d", len(m.layers))
 	}
-	if m.layerName() != "Global" {
-		t.Errorf("first layer should be Global, got %q", m.layerName())
+	if m.layerName() != "every repo" {
+		t.Errorf("first layer should be the broadest, got %q", m.layerName())
+	}
+	// Most specific last, since that is the order ←/→ walks and the order that
+	// decides which value wins.
+	if got := m.layers[len(m.layers)-1].name; got != "this repo, the team" {
+		t.Errorf("last layer = %q", got)
 	}
 }
 
@@ -113,5 +120,36 @@ func TestSettingsChoices(t *testing.T) {
 	}
 	if choices[0] != "claude" {
 		t.Errorf("first agent choice = %q", choices[0])
+	}
+}
+
+// The gutter and the filter answer the question the layer tabs cannot: does
+// THIS scope set this key, or is it inherited? Editors solve it with a modified
+// marker plus a filter, and norn had neither.
+func TestSettingsSetHereAndFilter(t *testing.T) {
+	m := newTestSettings(t)
+
+	agent := m.rows[0] // agent.command
+	if m.setHere(agent) {
+		t.Fatal("a fresh scope reports a key as set here")
+	}
+	m.applyString(agent.keys, "codex")
+	if !m.setHere(agent) {
+		t.Fatal("a key written to this scope is not marked as set here")
+	}
+
+	m.onlySet = true
+	vis := m.visibleRows()
+	if len(vis) != 1 || vis[0].label != agent.label {
+		t.Fatalf("the filter showed %d rows, want only the one set here", len(vis))
+	}
+
+	// Unsetting falls back to the layer beneath rather than writing a blank.
+	m.unset(agent.keys)
+	if m.setHere(agent) {
+		t.Fatal("the key survived being unset")
+	}
+	if len(m.visibleRows()) != 0 {
+		t.Fatal("the filter still shows a key this scope no longer sets")
 	}
 }
