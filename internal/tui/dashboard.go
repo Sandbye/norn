@@ -579,6 +579,19 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.reply.grant = d.cfg.ReplyGrant()
 				return d, loadRunLogCmd(row.TaskID, row.Role)
 			}
+		case "P":
+			// Approve the pull request. The last gate in the pipeline is a
+			// person reading the combined change, and an integrator that could
+			// open a PR on its own would make every earlier gate decorative.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.TaskID == "" {
+					d.notice = "not part of a task"
+					return d, nil
+				}
+				d.notice = "told the integrator the PR is approved"
+				return d, approvePRCmd(d.cfg, row.TaskID)
+			}
 		case "L":
 			// Land this strand on the trunk. Explicit, because with a live pane
 			// an exit also means "I quit to look at something", and a merge
@@ -1585,7 +1598,7 @@ func (d Dashboard) dashKeyHelp() string {
 		return dimStyle.Render("type your answer · ⏎ send · ⇥ permission · ctrl+u clear · esc cancel")
 	}
 	// Concise essentials; the full keymap lives in the global `?` help overlay.
-	return dimStyle.Render("⏎ cd · → enter · R spawn · L land · b board · f go · ? help")
+	return dimStyle.Render("⏎ cd · → enter · R spawn · L land · P pr · b board · ? help")
 }
 
 func openPRInBrowser(branch, repoDir string) {

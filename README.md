@@ -131,6 +131,28 @@ main
 
 The trunk takes a leaf of its own rather than being `feature/multi-model/CU-123`: git stores a ref as a file, so a branch of that name is exactly what would stop the role branches under it from existing.
 
+A shape can express a whole pipeline, and every arrow in it is a gate you hold:
+
+```yaml
+roles:
+  plan:        { agent: claude, plans: true }
+  tests:       { agent: claude, after: plan,  expect: red }
+  logic:       { agent: claude, after: tests, expect: green }
+  refactor:    { agent: claude, after: logic, expect: green }
+  review:      { agent: claude, reviews: true }
+  integration: { agent: claude, integrates: true }
+shapes:
+  feature: [plan, tests, logic, refactor, review, integration]
+```
+
+A role with `after:` starts only when that role lands, and landing is your
+keypress, so the plan is read before the tests exist and the failing tests are
+read before the implementation does. `expect: red` refuses to land while the
+repo's verify passes, which is the half of test-first a machine can check;
+`expect: green` refuses while it fails. A `reviews:` role starts when the last
+code strand lands, reads the combined change and sends findings back with `norn
+tell`. The integrating role never opens the pull request until you press `P`.
+
 `norn run` drives the split to done:
 
 ```bash

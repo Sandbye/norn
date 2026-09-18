@@ -429,3 +429,21 @@ func resumeArgs(cfg config.Config, agent config.AgentConfig, dir string) []strin
 	}
 	return strandCmd(cfg, agent, dir, agent.Model).Args
 }
+
+// approvePRCmd tells the integrating strand that the person has reviewed the
+// combined change and it may open the pull request.
+//
+// A message rather than a flag in the store, because the integrator is an agent
+// in a terminal: what it acts on is what arrives in its session.
+func approvePRCmd(cfg config.Config, taskID string) tea.Cmd {
+	return func() tea.Msg {
+		role, ok := cfg.IntegratingRoleName()
+		if !ok {
+			return landedMsg{taskID: taskID, err: errors.New("this repo declares no integrating role")}
+		}
+		if err := strand.Send(taskID, role, "The PR is approved: I have reviewed the combined change. Open it now, following this repository's pull request template."); err != nil {
+			return landedMsg{taskID: taskID, role: role, err: err}
+		}
+		return nil
+	}
+}
