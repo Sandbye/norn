@@ -290,3 +290,34 @@ func TestNoRoleNoBlock(t *testing.T) {
 		t.Fatalf("a standalone worktree got a role block:\n%s", out)
 	}
 }
+
+// Global config is shared by every repo, so a project that tracks work on
+// GitHub must not be handed another tracker's context.
+func TestTrackerDataIsScopedToTheRepo(t *testing.T) {
+	cfg := config.Config{
+		User:    config.User{Name: "Test User", ClickUpUID: "123"},
+		ClickUp: &config.ClickUp{Team: "42", Lists: map[string]string{"backlog": "1"}},
+		Tasks:   config.TasksConfig{Provider: "github"},
+	}
+	got, err := Render(cfg, "task", "a hint", "main", "task", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(got), "clickup") {
+		t.Errorf("a github project's brief mentions ClickUp:\n%s", got)
+	}
+
+	cfg.Tasks.Provider = "clickup"
+	if d := dataFor(cfg); d.ClickUp == nil || d.User.ClickUpUID != "123" {
+		t.Error("a clickup project lost its tracker context")
+	}
+	cfg.Tasks.Provider = "github"
+	if d := dataFor(cfg); d.ClickUp != nil || d.User.ClickUpUID != "" {
+		t.Error("a github project still carries clickup context")
+	}
+}
+
+// dataFor is what Render builds, exposed for the test above.
+func dataFor(cfg config.Config) Data {
+	return Data{User: userFor(cfg), Tracker: tracker(cfg), ClickUp: clickupWithoutToken(cfg)}
+}

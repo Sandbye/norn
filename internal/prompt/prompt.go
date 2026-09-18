@@ -35,7 +35,8 @@ func SetTemplateDir(dir string) { overrideDir = dir }
 func DataFields() []string {
 	return []string{
 		".User.Name / .User.Email / .User.ClickUpUID",
-		".ClickUp.Lists (map name→id; nil-gate with {{if .ClickUp}})",
+		".Tracker (github | clickup | none)",
+		".ClickUp.Lists (map name→id; nil unless .Tracker is clickup)",
 		".Verify (commands)  .Setup (setup command)",
 		".Base (fork branch)  .PRBase (PR target)  .BranchFormat",
 		".HintBlock  .Kind  .Generated",
@@ -98,11 +99,17 @@ type Data struct {
 	Hint      string // the raw hint (frontmatter); HintBlock is the prose form
 	HintBlock string
 	User      config.User
-	ClickUp   *config.ClickUp
-	Verify    []string
-	Setup     string
-	Base      string // branch this worktree was forked from (diff baseline)
-	PRBase    string // default PR target (cfg.pr_base — may equal Base or differ)
+	// Tracker is the repo's task provider ("github", "clickup", "none"), so a
+	// template can say what this project actually uses.
+	Tracker string
+	// ClickUp is nil unless this repo's tracker is ClickUp. Global config is
+	// shared across every repo, and a brief that describes the wrong tracker
+	// sends the agent to a workspace this project has nothing to do with.
+	ClickUp *config.ClickUp
+	Verify  []string
+	Setup   string
+	Base    string // branch this worktree was forked from (diff baseline)
+	PRBase  string // default PR target (cfg.pr_base — may equal Base or differ)
 	// BranchFormat is the repo's branch-name template, so a brief states the
 	// platform's actual shape instead of a hardcoded one that drifts.
 	BranchFormat string
@@ -117,15 +124,37 @@ type Data struct {
 // drives the hint block and workflow data regardless of which file renders.
 // `base` is the branch the worktree was forked from — agents must diff against
 // it, not assume `master`.
-// clickupWithoutToken copies the ClickUp config with the credential stripped.
-// Templates render into .worktree.md, which is a plain file in the worktree.
-func clickupWithoutToken(c *config.ClickUp) *config.ClickUp {
-	if c == nil {
+// clickupWithoutToken copies the ClickUp config with the credential stripped,
+// and only when this repo's tracker is ClickUp. Templates render into
+// .worktree.md, which is a plain file in the worktree.
+func clickupWithoutToken(cfg config.Config) *config.ClickUp {
+	c := cfg.ClickUp
+	if c == nil || cfg.Tasks.Provider != "clickup" {
 		return nil
 	}
 	cp := *c
 	cp.Token = ""
 	return &cp
+}
+
+// userFor is the person, with the tracker-specific parts of their identity
+// dropped when this repo does not use that tracker. A ClickUp user id in a
+// GitHub project's brief is an invitation to go looking in the wrong place.
+func userFor(cfg config.Config) config.User {
+	u := cfg.User
+	if cfg.Tasks.Provider != "clickup" {
+		u.ClickUpUID = ""
+	}
+	return u
+}
+
+// tracker names the repo's task provider, defaulting to none rather than to
+// whatever the global config happens to hold.
+func tracker(cfg config.Config) string {
+	if cfg.Tasks.Provider == "" {
+		return "none"
+	}
+	return cfg.Tasks.Provider
 }
 
 // branchFormat is the repo's branch template, defaulted so a brief never shows
@@ -147,8 +176,9 @@ func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef, 
 		Kind:         kind,
 		Hint:         hint,
 		HintBlock:    hintBlock(kind, hint),
-		User:         cfg.User,
-		ClickUp:      clickupWithoutToken(cfg.ClickUp),
+		User:         userFor(cfg),
+		Tracker:      tracker(cfg),
+		ClickUp:      clickupWithoutToken(cfg),
 		Verify:       cfg.Verify,
 		Setup:        cfg.Setup,
 		Base:         base,
@@ -204,8 +234,9 @@ func RenderReview(cfg config.Config, tmpl string, pr *PRRef) (string, error) {
 		Kind:         "review",
 		Hint:         pr.Title,
 		HintBlock:    hintBlock("review", pr.Title),
-		User:         cfg.User,
-		ClickUp:      clickupWithoutToken(cfg.ClickUp),
+		User:         userFor(cfg),
+		Tracker:      tracker(cfg),
+		ClickUp:      clickupWithoutToken(cfg),
 		Verify:       cfg.Verify,
 		Setup:        cfg.Setup,
 		Base:         pr.Base,
