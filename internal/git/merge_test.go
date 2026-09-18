@@ -20,6 +20,10 @@ func splitTask(t *testing.T) (trunkPath, trunkBranch, rolePath, roleBranch strin
 	if out, err := exec.Command("git", "init", "-q", "-b", "main", main).CombinedOutput(); err != nil {
 		t.Skipf("git init unavailable: %v: %s", err, out)
 	}
+	// MergeNoFF commits with this process's git, which has no identity on a CI
+	// runner, so the fixture repo carries one.
+	run(t, main, "config", "user.name", "norn test")
+	run(t, main, "config", "user.email", "test@norn.invalid")
 	run(t, main, "commit", "-q", "--allow-empty", "-m", "init")
 
 	trunkBranch, roleBranch = "feature/x/trunk", "feature/x/logic"

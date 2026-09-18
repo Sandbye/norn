@@ -94,7 +94,9 @@ func TestExitCode(t *testing.T) {
 // A resized pane has to tell the program, or the agent keeps wrapping to the
 // width it started with.
 func TestResizeReachesTheProgram(t *testing.T) {
-	term, err := Start(exec.Command("sh", "-c", "trap 'printf \"cols:$(tput cols)\"' WINCH; sleep 5"), 40, 10)
+	// stty rather than tput: tput needs a terminfo entry for $TERM, and a CI
+	// runner often has no TERM at all.
+	term, err := Start(exec.Command("sh", "-c", "trap 'printf \"cols:$(stty size | cut -d\" \" -f2)\"' WINCH; sleep 5"), 40, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

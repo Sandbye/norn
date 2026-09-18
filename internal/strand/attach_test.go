@@ -29,19 +29,19 @@ func TestAttachRendersAndAcceptsInput(t *testing.T) {
 	}
 	defer term.Close()
 
-	deadline := time.Now().Add(10 * time.Second)
-	wrote := false
+	// The prompt is not a signal worth waiting for: a shell's PS1 differs by
+	// distro and can be empty. Keep typing until the output shows up instead.
+	deadline := time.Now().Add(15 * time.Second)
+	next := time.Now()
 	for time.Now().Before(deadline) {
-		screen := term.Screen()
-		if !wrote && strings.Contains(screen, "$") {
-			// The shell prompt is up, so the client is drawing.
+		if strings.Contains(term.Screen(), "marker-ok") {
+			return
+		}
+		if time.Now().After(next) {
 			if err := term.Write([]byte("printf marker-ok\r")); err != nil {
 				t.Fatal(err)
 			}
-			wrote = true
-		}
-		if strings.Contains(screen, "marker-ok") {
-			return
+			next = time.Now().Add(time.Second)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
