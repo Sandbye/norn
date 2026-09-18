@@ -239,3 +239,23 @@ func Rang(taskID, role string) bool {
 	out, err := run("display-message", "-p", "-t", Name(taskID, role), "#{window_bell_flag}")
 	return err == nil && strings.TrimSpace(out) == "1"
 }
+
+// Respawn replaces a strand's dead pane with a fresh program, keeping the same
+// session.
+//
+// An agent that exits leaves a pane tmux holds open (remain-on-exit), which is
+// what preserves its last screen and its exit code. Without this the strand is
+// readable and unusable: the session exists, so nothing will spawn it again.
+func Respawn(taskID, role, dir string, argv []string) error {
+	if !Available() {
+		return ErrNoTmux
+	}
+	if !Alive(taskID, role) {
+		return fmt.Errorf("%w: %s", ErrNoSession, Name(taskID, role))
+	}
+	args := append([]string{"respawn-pane", "-k", "-t", Name(taskID, role), "-c", dir, "--"}, argv...)
+	if out, err := run(args...); err != nil {
+		return fmt.Errorf("strand: respawn %s: %w: %s", Name(taskID, role), err, out)
+	}
+	return nil
+}

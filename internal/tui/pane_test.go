@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -146,5 +148,29 @@ func TestEffortPerModel(t *testing.T) {
 	args = makeAgentCmd(config.Config{}, config.AgentConfig{Command: "claude"}, "/wt/x", false, "opus").Args
 	if strings.Contains(strings.Join(args, " "), "--effort") {
 		t.Fatalf("an unconfigured repo passed an effort anyway: %v", args)
+	}
+}
+
+// The brief goes to a launched agent by path, not by value. Passed as an
+// argument it made the tmux spawn fail with "command too long" for whichever
+// role had the longest brief, and the planner's is the longest of all.
+func TestStrandBriefGoesByPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".worktree.md"), []byte("a brief"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := strandCmd(config.Config{}, config.AgentConfig{Command: "claude"}, dir, "").Args
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--append-system-prompt-file "+filepath.Join(dir, ".worktree.md")) {
+		t.Fatalf("the brief is not passed by path: %v", args)
+	}
+	if strings.Contains(joined, "a brief") {
+		t.Fatalf("the brief's contents are still on the command line: %v", args)
+	}
+
+	// A worktree with no brief passes neither, rather than an empty flag.
+	bare := strandCmd(config.Config{}, config.AgentConfig{Command: "claude"}, t.TempDir(), "").Args
+	if strings.Contains(strings.Join(bare, " "), "--append-system-prompt") {
+		t.Fatalf("a missing brief still produced the flag: %v", bare)
 	}
 }

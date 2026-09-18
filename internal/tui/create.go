@@ -43,6 +43,15 @@ type createModel struct {
 	// the field entirely then.
 	roles       []string
 	pickedRoles []string
+	// shapes are the declared shape names; picking one replaces the role
+	// selection, since a shape is a role list somebody already agreed on.
+	shapes      []string
+	pickedShape string
+	// shapeVal is what the shape select writes into, so the roles group can ask
+	// whether a shape is chosen while the form is still open. A pointer because
+	// the model is copied by value through Bubble Tea and the closure has to
+	// read the same memory the field writes.
+	shapeVal *string
 
 	// The New-tab form (hint + base + template + model) is a huh form. It's
 	// rebuilt when seeding from a task (the hint field is dropped then).
@@ -101,15 +110,46 @@ func (m *createModel) buildForm() *huh.Form {
 		fields = append(fields, huh.NewSelect[string]().Key("model").
 			Title("Model").Options(modelOptions(m.models)...))
 	}
+	// Shapes first, because a named shape is the normal way to start a kind of
+	// work and the role list is the escape hatch under it.
+	if len(m.shapes) > 0 {
+		// The "no shape" choice is named rather than blank: an empty row in a
+		// picker reads as a bug, not as an option.
+		opts := []huh.Option[string]{huh.NewOption("(pick roles myself)", "")}
+		for _, name := range m.shapes {
+			opts = append(opts, huh.NewOption(name, name))
+		}
+		m.shapeVal = new(string)
+		fields = append(fields, huh.NewSelect[string]().Key("shape").
+			Title("Shape").Description("a named set of roles").
+			Options(opts...).Value(m.shapeVal))
+	}
 	// One role is not a split, so the picker only shows where there is a second
 	// role to pick. The integrating role is added back by the create itself, so
 	// it is not in the list: it is not a choice.
-	if opts := roleOptions(m.roles); len(opts) > 0 {
-		fields = append(fields, huh.NewMultiSelect[string]().Key("roles").
-			Title("Split across roles").Description("none = one worktree").
-			Options(opts...))
+	// huh panics on a group with no fields, and a task-seeded create with one
+	// base and no shapes has none.
+	var groups []*huh.Group
+	if len(fields) > 0 {
+		groups = append(groups, huh.NewGroup(fields...))
 	}
-	return huh.NewForm(huh.NewGroup(fields...)).
+	if opts := roleOptions(m.roles); len(opts) > 0 {
+		roles := huh.NewMultiSelect[string]().Key("roles").
+			Title("Split across roles").Description("none = one worktree").Options(opts...)
+		group := huh.NewGroup(roles)
+		if shape := m.shapeVal; shape != nil {
+			// A chosen shape has already answered this, so the question goes
+			// away rather than being shown and then ignored.
+			group = group.WithHideFunc(func() bool { return *shape != "" })
+		}
+		groups = append(groups, group)
+	}
+	if len(groups) == 0 {
+		// Never rendered: hasFormFields reports false and the create confirms
+		// straight away. The form still has to exist for the model to be whole.
+		groups = append(groups, huh.NewGroup(huh.NewNote().Title("nothing to choose")))
+	}
+	return huh.NewForm(groups...).
 		WithShowHelp(true).WithWidth(m.formWidth()).WithTheme(nornHuhTheme())
 }
 
@@ -138,6 +178,12 @@ func (m *createModel) readForm() {
 	}
 	if len(m.models) > 0 {
 		m.model = m.form.GetString("model") // "" (default) is a valid choice
+	}
+	if len(m.shapes) > 0 {
+		m.pickedShape = m.form.GetString("shape")
+		if m.shapeVal != nil && *m.shapeVal != "" {
+			m.pickedShape = *m.shapeVal
+		}
 	}
 	if len(m.roles) > 1 {
 		// Comma-ok: the field is only in the form when there are roles to pick,
@@ -173,7 +219,7 @@ func (m createModel) createFailed() createModel {
 // create.
 func (m createModel) hasFormFields() bool {
 	return !m.seeded || len(m.baseBranches) > 1 || len(m.templates) > 1 ||
-		len(m.models) > 0 || len(roleOptions(m.roles)) > 0
+		len(m.models) > 0 || len(roleOptions(m.roles)) > 0 || len(m.shapes) > 0
 }
 
 // roleOptions lists the roles a create may pick. Empty for a repo with fewer
@@ -234,11 +280,23 @@ func filterTasks(tasks []task.Task, query string) []task.Task {
 		t     task.Task
 		score int
 	}
+	// The id is part of what you search: a task is usually named by its number
+	// in conversation ("#1067"), and typing that matched nothing before.
+	q := strings.TrimPrefix(strings.TrimSpace(query), "#")
 	var hits []scored
 	for _, t := range tasks {
-		if s, ok := fuzzyScore(query, t.Group+" "+t.Title); ok {
-			hits = append(hits, scored{t, s})
+		score, ok := fuzzyScore(q, t.ID+" "+t.Group+" "+t.Title)
+		if !ok {
+			continue
 		}
+		// An id you typed in full is not a fuzzy hit among others, it is the
+		// one you meant.
+		if strings.EqualFold(t.ID, q) {
+			score += 1000
+		} else if strings.HasPrefix(strings.ToLower(t.ID), strings.ToLower(q)) {
+			score += 500
+		}
+		hits = append(hits, scored{t, score})
 	}
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
 	out := make([]task.Task, len(hits))

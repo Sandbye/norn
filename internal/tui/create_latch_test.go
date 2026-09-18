@@ -123,3 +123,40 @@ func TestTaskSeededCreateOffersRoles(t *testing.T) {
 		t.Fatal("a create with no choices left should confirm immediately")
 	}
 }
+
+// A task is named by its number in conversation, so the picker has to find it
+// that way: the filter searched title and group only, and typing "1067" or
+// "#1067" matched nothing at all.
+func TestFilterTasksByID(t *testing.T) {
+	tasks := []task.Task{
+		{ID: "1067", Title: "workspace include globs match directories"},
+		{ID: "1075", Title: "unbundle cjs with css and same name files"},
+		{ID: "959", Title: "external CSS assets not inlined"},
+	}
+
+	for _, q := range []string{"1067", "#1067", " 1067 "} {
+		got := filterTasks(tasks, q)
+		if len(got) == 0 || got[0].ID != "1067" {
+			t.Fatalf("query %q gave %v, want 1067 first", q, ids(got))
+		}
+	}
+
+	// A prefix still ranks the right one first rather than whatever the fuzzy
+	// scorer liked in the titles.
+	if got := filterTasks(tasks, "107"); len(got) == 0 || got[0].ID != "1075" {
+		t.Fatalf("prefix query gave %v, want 1075 first", ids(got))
+	}
+
+	// Searching by words still works.
+	if got := filterTasks(tasks, "css"); len(got) == 0 {
+		t.Fatal("a word query stopped matching")
+	}
+}
+
+func ids(ts []task.Task) []string {
+	out := make([]string, len(ts))
+	for i, t := range ts {
+		out[i] = t.ID
+	}
+	return out
+}

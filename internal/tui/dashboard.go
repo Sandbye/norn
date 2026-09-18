@@ -19,6 +19,7 @@ import (
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/notify"
+	"github.com/sandbye/norn/internal/plan"
 	"github.com/sandbye/norn/internal/prompt"
 	"github.com/sandbye/norn/internal/runlog"
 	"github.com/sandbye/norn/internal/state"
@@ -209,6 +210,7 @@ type dashRow struct {
 	TaskBlocked   string            // why the owning task needs a person, "" when it does not (ephemeral)
 	Bell          bool              // the strand rang the terminal bell and nobody has looked (ephemeral)
 	Ahead         int               // commits this strand has that the trunk does not (ephemeral)
+	Plan          *plan.Plan        // the fan-out this strand proposes, when it is a planner (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -436,9 +438,7 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if d.showLog {
 			switch s {
 			case "esc":
-				d.showLog = false
-				d.logEvents, d.logErr = nil, nil
-				d.reply.active, d.reply.text = false, ""
+				d.closeLog()
 				return d, nil
 			case "tab":
 				d.reply.grant = d.reply.grant.Next()
@@ -588,8 +588,10 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch {
 				case row.TaskID == "" || row.Role == "":
 					d.notice = "only a strand lands: this thread is not part of a task"
-				case row.Run == state.RunRunning:
-					d.notice = row.Role + " is still running"
+				// A running strand can land: `L` is your decision, and what
+				// merges is what it committed. Refusing while it ran made a
+				// planning strand unlandable, since it stays alive waiting for
+				// you and its run state never leaves "running".
 				case row.Run == state.RunMerged:
 					d.notice = row.Role + " is already landed"
 				default:
@@ -864,6 +866,9 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.notice = msg.role + ": " + msg.err.Error()
 		default:
 			d.notice = fmt.Sprintf("landed %s, %d commit(s) on the trunk", msg.role, msg.commits)
+			if len(msg.created) > 0 {
+				d.notice += " · created " + strings.Join(msg.created, ", ")
+			}
 			// Whatever was waiting for this role starts now, from a trunk that
 			// contains it.
 			cols, rows := d.paneSize()
@@ -1268,7 +1273,10 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		indent := ""
 		if r.TaskID != "" {
 			if r.TaskID != lastTask {
-				label := taskLabel(r)
+				// The header carries the task's progress, because "how far is
+				// this" was otherwise only answerable from the board or from
+				// git, and it is the question you ask every time you look.
+				label := taskLabel(r) + taskProgress(d.rows, r.TaskID)
 				all = append(all, sidebarLine{taskHeaderStyle.Render(fitCell("◈ "+label, w)), -1})
 			}
 			indent = "  "
@@ -1353,6 +1361,12 @@ func runMark(r dashRow) string {
 	if r.Bell {
 		return " !"
 	}
+	if r.Ahead > 0 {
+		// Committed work the trunk does not have. A live strand that has
+		// finished says so only inside its own pane, and "still running" is
+		// true of the process while being wrong about the work.
+		return " ⤒"
+	}
 	return ""
 }
 
@@ -1430,6 +1444,32 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 			}
 		}
 	}
+	// The plan goes above the state rows, not below them: it is what you are
+	// deciding on, and the detail pane is a fixed box that clips whatever sits
+	// at the bottom.
+	if r.Plan != nil {
+		b.WriteString(subtitleStyle.Render("proposes") + "\n")
+		if r.Plan.Summary != "" {
+			b.WriteString(dimStyle.Render("  "+truncate(r.Plan.Summary, max(w-4, 20))) + "\n")
+		}
+		const shown = 4 // the pane has no scrollback; the file holds the rest
+		for i, st := range r.Plan.Strands {
+			if i == shown {
+				b.WriteString(dimStyle.Render(fmt.Sprintf("  +%d more in .norn/strands.yaml", len(r.Plan.Strands)-shown)) + "\n")
+				break
+			}
+			line := "  " + branchStyle.Render(st.Role)
+			if st.After != "" {
+				line += dimStyle.Render(" after " + st.After)
+			}
+			if st.Expect != "" {
+				line += dimStyle.Render(" · " + st.Expect)
+			}
+			b.WriteString(line + dimStyle.Render("  "+truncate(oneLine(st.Brief), max(w-len(st.Role)-8, 20))) + "\n")
+		}
+		b.WriteString(activeStyle.Render("  L creates these") + "\n\n")
+	}
+
 	row("state", glyphStyle(r.AgentState).Render(stateLabel(r.AgentState)))
 	wrapRow("blocked", r.Blocked, dirtyStyle)
 	row("pr", prDetail(r))
@@ -1699,6 +1739,12 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				// still reads as running, and nothing offers to land it.
 				row.Run = reconcileRun(sess, &row)
 				row.Ahead = strandAhead(store, sess)
+				// A plan is the one thing a planning strand produces, and it is
+				// what you decide on, so it belongs on screen rather than in a
+				// file you have to go and open.
+				if p, err := plan.Read(sess.TaskID); err == nil {
+					row.Plan = p
+				}
 			}
 			if git.CurrentBranch(sess.Path) == "" {
 				// Branch deleted under the worktree: label the sha so the row
@@ -1874,6 +1920,17 @@ func max0(n int) int {
 	return n
 }
 
+// closeLog leaves the conversation view and disarms its input.
+//
+// Both together, always: the input is armed while the view is open, and an exit
+// that cleared only the view left every keystroke on the rail going into a
+// reply nobody could see, so `enter` sent a message instead of cd'ing.
+func (d *Dashboard) closeLog() {
+	d.showLog = false
+	d.logEvents, d.logErr = nil, nil
+	d.reply.active, d.reply.text = false, ""
+}
+
 // reconcileRun answers what a strand is actually doing, from tmux rather than
 // from what norn last wrote. A store value is a memory; the session is the fact.
 func reconcileRun(sess state.Session, row *dashRow) string {
@@ -1924,4 +1981,35 @@ func strandAhead(store *state.Store, sess state.Session) int {
 		return 0
 	}
 	return n
+}
+
+// oneLine flattens a plan's brief for a single detail row: the full text lives
+// in the file, and the pane is answering "what is this strand for".
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// taskProgress summarises a task in a few characters: how many strands have
+// landed, and how many still hold work the trunk does not have.
+func taskProgress(rows []dashRow, taskID string) string {
+	var strands, landed, waiting int
+	for _, r := range rows {
+		if r.TaskID != taskID || r.Role == "" || r.Branch == r.TaskTrunk {
+			continue // the trunk is what they land on, not one of them
+		}
+		strands++
+		switch {
+		case r.Ahead > 0:
+			waiting++
+		case r.Run == state.RunMerged || r.Run == state.RunDone:
+			landed++
+		}
+	}
+	if strands == 0 {
+		return ""
+	}
+	if waiting > 0 {
+		return fmt.Sprintf(" · %d to land", waiting)
+	}
+	return fmt.Sprintf(" · %d/%d landed", landed, strands)
 }

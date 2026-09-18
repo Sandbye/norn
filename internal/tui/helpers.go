@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -113,7 +114,11 @@ func centerScreen(content string, width, height int) string {
 // ceiling so a big terminal gets a roomy command center without stretching to
 // absurd widths. Capped (not full-width) so the panel doesn't jitter as the
 // focused row's help line changes length.
-const frameWidth = 118
+//
+// Raised from 118 once strands arrived: norn is now where you stay rather than
+// a launcher you pass through, and the detail pane holds a plan, a question and
+// a task title at once. A wide terminal was spending half its columns on margin.
+const frameWidth = 170
 
 // frameHeight caps the panel's inner rows so it reads as a centered pane, not a
 // full-screen fill. A tab with more content than this grows to fit (no clip).
@@ -274,14 +279,15 @@ func agentCmd(cfg config.Config, agent config.AgentConfig, wtPath string, resume
 		// predicted sentence into the agent instead.
 		args = append(args, "--prompt-suggestions", "false")
 	}
-	prompt := ""
-	if data, err := os.ReadFile(wtPath + "/.worktree.md"); err == nil {
-		prompt = string(data)
+	brief := filepath.Join(wtPath, ".worktree.md")
+	if _, err := os.Stat(brief); err == nil {
+		// By path, not by value: a strand is launched through tmux, and a long
+		// brief passed as an argument exceeds what tmux will accept ("command
+		// too long"), which killed the spawn of whichever role had the longest
+		// one.
+		args = append(args, "--append-system-prompt-file", brief)
 	}
-	args = append(args,
-		"--append-system-prompt", prompt,
-		"Start worktree session. Follow the startup procedure in .worktree.md.",
-	)
+	args = append(args, "Start worktree session. Follow the startup procedure in .worktree.md.")
 	return wireStdio(exec.Command("claude", args...), wtPath)
 }
 

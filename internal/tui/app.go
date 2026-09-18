@@ -168,6 +168,7 @@ func newCreateFor(cfg config.Config, repoRoot string) createModel {
 	c.taskProvider = providerFor(cfg)
 	c.repoRoot = repoRoot
 	c.roles = cfg.RoleNames()
+	c.shapes = cfg.ShapeNames()
 	c.form = c.buildForm()
 	return c
 }
@@ -375,11 +376,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case taskSpawnedMsg:
-		// Back to the rail, not into an agent. The strands are all running;
-		// which one you look at first is your call, and a create that drops you
+		// Back to the rail, not into an agent. The strands are running; which
+		// one you look at first is your call, and a create that drops you
 		// inside one is the hand-off this design removed.
 		a.current = ViewThreads
 		a.dashboard.notice = "strands running · → enters one"
+		if len(msg.failed) > 0 {
+			// Named, and left for `R`: a strand that did not start is the one
+			// thing about this screen you have to know.
+			a.dashboard.notice = "did not start: " + strings.Join(msg.failed, " · ") + " · R retries"
+		}
 		return a, a.dashboard.loadCmd()
 
 	case worktreeCreatedMsg:
@@ -621,7 +627,10 @@ func helpFor(v View) []keyHint {
 			{"d", "delete selected"}, {"/", "filter"}, {"j/k", "move"},
 		}
 	case ViewSettings:
-		return []keyHint{{"⏎", "edit"}, {"space", "toggle"}, {"←/→", "layer"}, {"e", "$EDITOR"}, {"j/k", "move"}}
+		return []keyHint{
+			{"⏎", "edit"}, {"space", "toggle"}, {"←/→", "scope"},
+			{"m", "only what this scope sets"}, {"r", "unset here, fall back"},
+			{"e", "$EDITOR"}, {"j/k", "move"}}
 	case ViewCd:
 		return []keyHint{{"⏎", "cd into worktree"}, {"j/k", "move"}}
 	}
@@ -720,7 +729,8 @@ func checkLocal(repoRoot string, wts []git.Worktree) tea.Cmd {
 		// would otherwise read as dirty forever. info/exclude is repo-shared, so
 		// one call covers them all.
 		git.ExcludeLocalMeta(repoRoot)
-		return localCheckedMsg{git.CheckDirty(append([]git.Worktree(nil), wts...))}
+		checked := git.CheckDirty(append([]git.Worktree(nil), wts...))
+		return localCheckedMsg{markLandedStrands(repoRoot, checked)}
 	}
 }
 
@@ -783,13 +793,19 @@ func createWorktree(cfg config.Config, repoRoot string, c createModel, cols, row
 		if cfg.AINaming && cfg.HeadlessClaude() && claude.Available() && git.BranchLacksSlug(branch) {
 			branch = claude.EnrichBranchName(context.Background(), repoRoot, c.hint, branch, cfg.BranchFormat)
 		}
+		// A picked shape is a role list somebody already agreed on, so it wins
+		// over whatever is checked below it.
+		roles := c.pickedRoles
+		if shaped, ok := cfg.Shape(c.pickedShape); ok {
+			roles = shaped
+		}
 		res, err := worktree.Create(cfg, repoRoot, worktree.Request{
 			Kind:     c.kind,
 			Hint:     c.hint,
 			Branch:   branch,
 			Base:     c.baseBranch,
 			Template: c.template,
-			Roles:    c.pickedRoles,
+			Roles:    roles,
 			Task:     taskRefOf(c.selectedTask),
 		})
 		if err != nil {
@@ -805,16 +821,58 @@ func createWorktree(cfg config.Config, repoRoot string, c createModel, cols, row
 		// remove. A single worktree keeps the old hand-off: there is no rail to
 		// come back to, and one agent in one terminal is what it always was.
 		if res.Split() && strand.Available() {
+			// Spawn everything that can start, then report what could not.
+			// Stopping at the first failure left a task with some strands live
+			// and no record of the rest beyond a message that scrolled away.
+			var failed []string
 			for _, t := range res.Threads {
+				if cfg.StartsAfter(t.Role) != "" {
+					continue // starts when the role it waits for lands
+				}
 				agent := cfg.AgentFor(t.Role)
 				argv := strandCmd(cfg, agent, t.Path, agent.Model).Args
 				if err := strand.Spawn(res.TaskID, t.Role, t.Path, argv, cols, rows); err != nil {
-					return errMsg{err}
+					failed = append(failed, fmt.Sprintf("%s (%v)", t.Role, err))
+					continue
 				}
 				setStrandRunning(t.Path)
 			}
-			return taskSpawnedMsg{taskID: res.TaskID, trunkRole: res.Trunk().Role, trunkBranch: res.Trunk().Branch}
+			return taskSpawnedMsg{
+				taskID: res.TaskID, trunkRole: res.Trunk().Role,
+				trunkBranch: res.Trunk().Branch, failed: failed,
+			}
 		}
 		return worktreeCreatedMsg{path: res.Trunk().Path, model: c.model, tail: tail}
 	}
+}
+
+// markLandedStrands marks a strand whose branch is already contained in its
+// task's trunk as merged.
+//
+// Clean judges "merged" against the repo's base branches, and a strand never
+// reaches one: it merges into the trunk, and the trunk carries the work to the
+// base. Without this every role branch a task ever had stays behind forever,
+// which is how a repo ends up with dozens of them.
+func markLandedStrands(repoRoot string, wts []git.Worktree) []git.Worktree {
+	store, err := state.Load()
+	if err != nil {
+		return wts
+	}
+	for i := range wts {
+		if wts[i].Merged || wts[i].Detached {
+			continue
+		}
+		sess := store.FindByPath(wts[i].Path)
+		if sess == nil || sess.TaskID == "" || sess.Role == "" {
+			continue
+		}
+		task := store.FindTask(sess.TaskID)
+		if task == nil || task.Trunk == wts[i].Branch {
+			continue // the trunk itself is judged against the base, as before
+		}
+		if git.IsAncestor(repoRoot, wts[i].Branch, task.Trunk) {
+			wts[i].Merged = true
+		}
+	}
+	return wts
 }

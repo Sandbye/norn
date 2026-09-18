@@ -418,17 +418,27 @@ func ExcludeLocalMeta(wtPath string) {
 	if err := os.MkdirAll(filepath.Dir(excl), 0o755); err != nil {
 		return
 	}
-	f, err := os.OpenFile(excl, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		f.WriteString("\n")
+	// Rewritten rather than appended, deduplicated as it goes: two strands
+	// created in the same moment both read this file, both found the entry
+	// missing and both appended it, so the file grew a duplicate per parallel
+	// create. Rewriting converges no matter who wrote last.
+	var out []string
+	seen := map[string]bool{}
+	for _, ln := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(ln)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		out = append(out, trimmed)
 	}
 	for _, p := range add {
-		fmt.Fprintln(f, p)
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
 	}
+	_ = os.WriteFile(excl, []byte(strings.Join(out, "\n")+"\n"), 0o644)
 }
 
 // CreateOutcome reports what a create did, so a caller assembling several
@@ -449,7 +459,7 @@ type CreateOutcome struct {
 // CreateWorktreeFrom with a remote start ref, which is what a trunk (or a plain
 // single-worktree task) forks from.
 func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) {
-	out, err := CreateWorktreeFrom(repoRoot, worktreeDir, branch, base, true)
+	out, err := CreateWorktreeFrom(repoRoot, worktreeDir, branch, base, true, true)
 	return out.Path, err
 }
 
@@ -457,7 +467,7 @@ func CreateWorktree(repoRoot, worktreeDir, branch, base string) (string, error) 
 // <worktreeDir>/<branch>. remoteStart says startRef names a branch on origin
 // that has to be fetched first; a role branch forks from a trunk cut seconds
 // ago, which exists locally and nowhere else, so it passes false.
-func CreateWorktreeFrom(repoRoot, worktreeDir, branch, startRef string, remoteStart bool) (CreateOutcome, error) {
+func CreateWorktreeFrom(repoRoot, worktreeDir, branch, startRef string, remoteStart, push bool) (CreateOutcome, error) {
 	wtPath := filepath.Join(worktreeDir, branch)
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
 		return CreateOutcome{}, err
@@ -491,12 +501,19 @@ func CreateWorktreeFrom(repoRoot, worktreeDir, branch, startRef string, remoteSt
 	}
 
 	// Push the empty branch immediately so origin tracks it from day one.
-	// Without this, the dashboard's PR lookup and `norn diff` against origin/<branch>
-	// produce false negatives until the user pushes manually. Best-effort:
-	// failures don't block worktree creation (offline / auth issues happen).
-	// Silent on failure (offline / auth): printing here would leak under the
-	// TUI, and the branch works locally until the next push.
-	pushed := cmdRun(wtPath, "git", "push", "-u", "origin", branch, "--quiet") == nil
+	// Without this, the dashboard's PR lookup and `norn diff` against
+	// origin/<branch> produce false negatives until the user pushes manually.
+	// Best-effort and silent: failures (offline, auth) don't block the create,
+	// and printing here would leak under the TUI.
+	//
+	// A strand is the exception. Its branch is an internal detail of one task,
+	// it merges into the trunk rather than into a base, and nobody reviews it
+	// on the remote, so pushing one puts a branch on origin per role per task
+	// that nothing will ever clean up.
+	pushed := false
+	if push {
+		pushed = cmdRun(wtPath, "git", "push", "-u", "origin", branch, "--quiet") == nil
+	}
 
 	ExcludeLocalMeta(wtPath)
 	return CreateOutcome{Path: wtPath, NewBranch: true, NewWorktree: true, Pushed: pushed}, nil
@@ -1203,4 +1220,11 @@ func captureRun(dir string, name string, args ...string) (string, error) {
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	return string(out), timeoutErr(ctx, name, args, err)
+}
+
+// IsAncestor reports whether every commit of branch is already contained in
+// other. It is how norn knows a strand has landed on its trunk, which is the
+// only "merged" that applies to a branch that never reaches a base branch.
+func IsAncestor(repoRoot, branch, other string) bool {
+	return cmdRun(repoRoot, "git", "merge-base", "--is-ancestor", branch, other) == nil
 }

@@ -215,6 +215,7 @@ type taskSpawnedMsg struct {
 	taskID      string
 	trunkRole   string
 	trunkBranch string
+	failed      []string // strands that could not start, named with their error
 }
 
 // paneSize is the terminal the agent is told it has. The pane is the window

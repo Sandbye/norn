@@ -149,11 +149,11 @@ roles:
 Optional. A role with no `after:` spawns at create, as every strand does today.
 
 This exists because TDD is a sequence, not a division of labour: tests, a human
-reading the failing tests, implementation to green, then refactoring. The
-Dashboard encodes the machine-checkable half in `tools/ci/red-first.mts`, which
-walks a PR's commits in order and requires the first `src/` change under a money
-path to come after a `test/` change. Parallel strands make that ordering a
-coin flip, because each commits on its own branch whenever it gets there.
+reading the failing tests, implementation to green, then refactoring. Some repos
+enforce the machine-checkable half in CI, walking a pull request's commits in
+order and requiring the first change under `src/` to come after one under
+`test/`. Parallel strands make that ordering a coin flip, because each commits
+on its own branch whenever it gets there.
 
 With `after:`, the order is real rather than reconstructed. The dependent strand
 is spawned when its dependency lands, and landing is already a keypress, so the

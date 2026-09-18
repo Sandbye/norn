@@ -9,12 +9,15 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sandbye/norn/internal/claude"
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/paths"
+	"github.com/sandbye/norn/internal/plan"
 	"github.com/sandbye/norn/internal/runlog"
 	"github.com/sandbye/norn/internal/state"
 	"github.com/sandbye/norn/internal/strand"
+	"github.com/sandbye/norn/internal/worktree"
 )
 
 // runStartedMsg reports whether the detached supervisor got off the ground.
@@ -54,9 +57,23 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 				continue
 			}
 			if strand.Alive(taskID, sess.Role) {
-				continue // already running, and re-spawning would lose its work
+				st, err := strand.Read(taskID, sess.Role)
+				if err != nil || st.Running {
+					continue // working: re-spawning would lose what it is doing
+				}
+				// The pane is dead, which is what `/exit` leaves behind. Put the
+				// agent back in it, resuming its own session rather than
+				// starting one that has never seen this task.
+				agent := cfg.AgentFor(sess.Role)
+				argv := resumeArgs(cfg, agent, sess.Path)
+				if err := strand.Respawn(taskID, sess.Role, sess.Path, argv); err != nil {
+					return runStartedMsg{taskID: taskID, err: err}
+				}
+				setStrandRunning(sess.Path)
+				started++
+				continue
 			}
-			if rc, ok := cfg.Role(sess.Role); ok && rc.After != "" {
+			if cfg.StartsAfter(sess.Role) != "" {
 				// Waiting on another strand: it starts when that one lands, so
 				// its branch forks from a trunk that already holds the work it
 				// is supposed to build on.
@@ -131,6 +148,7 @@ type landedMsg struct {
 	taskID  string
 	role    string
 	commits int
+	created []string // strands a landed plan asked for
 	blocked bool
 	err     error
 }
@@ -158,6 +176,19 @@ func landStrandCmd(cfg config.Config, row dashRow) tea.Cmd {
 			return landedMsg{role: row.Role, err: errors.New("the trunk is what strands land on")}
 		}
 
+		// A planning strand lands its decision, not its code. Nothing is merged:
+		// norn reads the plan from that worktree, and requiring a commit made
+		// the planner commit `.norn/strands.yaml`, which then rode the trunk
+		// into the PR as orchestration metadata in somebody else's repo.
+		if rc, ok := cfg.Role(row.Role); ok && rc.Plans {
+			created, err := carryOutPlan(cfg, row, *task)
+			if err != nil {
+				return landedMsg{taskID: row.TaskID, role: row.Role, err: err}
+			}
+			_, _ = state.Mutate(func(s *state.Store) bool { return s.SetRun(row.Path, state.RunMerged, 0) })
+			return landedMsg{taskID: row.TaskID, role: row.Role, created: created}
+		}
+
 		n, err := git.CommitsAhead(trunk.Path, task.Trunk, row.Branch)
 		if err != nil {
 			return landedMsg{role: row.Role, err: err}
@@ -176,6 +207,7 @@ func landStrandCmd(cfg config.Config, row dashRow) tea.Cmd {
 			return landedMsg{role: row.Role, blocked: true, err: err}
 		}
 		_, _ = state.Mutate(func(s *state.Store) bool { return s.SetRun(row.Path, state.RunMerged, 0) })
+
 		return landedMsg{taskID: row.TaskID, role: row.Role, commits: n}
 	}
 }
@@ -240,8 +272,7 @@ func spawnWaitingCmd(cfg config.Config, taskID, landed string, cols, rows int) t
 		}
 		started := 0
 		for _, sess := range store.SessionsForTask(taskID) {
-			rc, ok := cfg.Role(sess.Role)
-			if !ok || rc.After != landed || strand.Alive(taskID, sess.Role) {
+			if cfg.StartsAfter(sess.Role) != landed || strand.Alive(taskID, sess.Role) {
 				continue
 			}
 			agent := cfg.AgentFor(sess.Role)
@@ -257,4 +288,144 @@ func spawnWaitingCmd(cfg config.Config, taskID, landed string, cols, rows int) t
 		}
 		return runStartedMsg{taskID: taskID}
 	}
+}
+
+// carryOutPlan creates the strands a planning strand asked for, and starts the
+// ones that are not waiting on another.
+//
+// Validation happens before anything is created: half a fan-out is worse than
+// none, because the strands that exist start working while the missing ones are
+// silently absent from the task.
+func carryOutPlan(cfg config.Config, row dashRow, task state.Task) ([]string, error) {
+	rc, ok := cfg.Role(row.Role)
+	if !ok || !rc.Plans {
+		return nil, nil
+	}
+	p, err := plan.Read(row.TaskID)
+	if err != nil {
+		return nil, err
+	}
+
+	repoRoot := git.MainCheckout(row.Path)
+	if repoRoot == "" {
+		repoRoot = row.Path
+	}
+	waiting := p.Waiting()
+	var created []string
+	for _, s := range p.Strands {
+		t, err := worktree.AddStrand(cfg, repoRoot, task, s.Role, s.Brief)
+		if err != nil {
+			return created, fmt.Errorf("creating %s: %w", s.Role, err)
+		}
+		created = append(created, s.Role)
+		if waiting[s.Role] != "" {
+			continue // starts when the strand it waits for lands
+		}
+		agent := cfg.AgentFor(s.Role)
+		if s.Agent != "" {
+			agent.Command = s.Agent
+		}
+		if s.Model != "" {
+			agent.Model = s.Model
+		}
+		if err := strand.Spawn(task.ID, s.Role, t.Path, strandCmd(cfg, agent, t.Path, agent.Model).Args, 120, 30); err != nil {
+			return created, fmt.Errorf("starting %s: %w", s.Role, err)
+		}
+		setStrandRunning(t.Path)
+	}
+	if len(created) > 0 {
+		// The planner's job ends here: its decision has been carried out, and
+		// an agent left alive with nothing to do still holds a session, a rail
+		// row and a model that will answer if something types at it.
+		_ = strand.Kill(task.ID, row.Role)
+	}
+	return created, nil
+}
+
+// tellIntegrator says that a strand has landed on the trunk, and whether any
+// are still outstanding.
+//
+// The integrating agent lives in the trunk worktree and cannot see norn press
+// the key: without this it keeps its picture from the last time it looked and
+// asks to perform a merge that has already happened.
+func tellIntegrator(cfg config.Config, store *state.Store, task state.Task, landed string, commits int) {
+	role, ok := cfg.IntegratingRoleName()
+	if !ok || role == landed {
+		return
+	}
+	var pending []string
+	for _, sess := range store.SessionsForTask(task.ID) {
+		if sess.Role == "" || sess.Role == role || sess.Role == landed || sess.Run == state.RunMerged {
+			continue
+		}
+		if rc, known := cfg.Role(sess.Role); known && rc.Plans {
+			continue // the planner never lands code
+		}
+		pending = append(pending, sess.Role)
+	}
+
+	msg := fmt.Sprintf("norn merged %s into %s with --no-ff (%d commit(s)). ", landed, task.Trunk, commits)
+	if len(pending) > 0 {
+		msg += "Still to land: " + strings.Join(pending, ", ") + ". Wait for them."
+	} else {
+		msg += "Every strand has landed. Verify the combined tree and open the PR."
+	}
+	_ = strand.Send(task.ID, role, msg)
+}
+
+// spawnReviewer starts the reviewing role once every code strand has landed.
+//
+// Not `after: <role>`, because what it waits for is not one strand but all of
+// them: the first moment the whole change exists in one place is the first
+// moment a review means anything.
+func spawnReviewer(cfg config.Config, store *state.Store, task state.Task, landed string) {
+	role, ok := cfg.ReviewingRole()
+	if !ok || strand.Alive(task.ID, role) {
+		return
+	}
+	var reviewer *state.Session
+	for _, sess := range store.SessionsForTask(task.ID) {
+		switch {
+		case sess.Role == role:
+			s := sess
+			reviewer = &s
+		case sess.Role == "" || sess.Branch == task.Trunk || sess.Role == landed:
+			// The trunk is what they land on, and the strand that just landed
+			// is accounted for by the caller.
+		case sess.Run == state.RunMerged:
+		default:
+			if rc, known := cfg.Role(sess.Role); known && (rc.Plans || rc.Integrates) {
+				continue // neither lands code
+			}
+			return // a code strand is still outstanding
+		}
+	}
+	if reviewer == nil {
+		return
+	}
+	agent := cfg.AgentFor(role)
+	if err := strand.Spawn(task.ID, role, reviewer.Path, strandCmd(cfg, agent, reviewer.Path, agent.Model).Args, 120, 30); err != nil {
+		return
+	}
+	setStrandRunning(reviewer.Path)
+	_ = strand.Send(task.ID, role, fmt.Sprintf(
+		"Every strand has landed on %s. Review the combined change and report; send anything a strand should fix to that strand with `norn tell`.", task.Trunk))
+}
+
+// resumeArgs is the command that puts an agent back in a strand, continuing the
+// conversation it already had when one exists.
+//
+// A restart that forgets is nearly useless here: the strand has a branch, a
+// brief and an hour of context, and starting fresh means re-deriving all of it.
+func resumeArgs(cfg config.Config, agent config.AgentConfig, dir string) []string {
+	if agent.Command == "" || agent.Command == "claude" {
+		if id := claude.SessionIDFor(dir); id != "" {
+			args := []string{"claude", "--resume", id}
+			if effort := cfg.EffortFor(agent.Model); effort != "" {
+				args = append(args, "--effort", effort)
+			}
+			return append(args, "--permission-mode", "auto", "--prompt-suggestions", "false")
+		}
+	}
+	return strandCmd(cfg, agent, dir, agent.Model).Args
 }
