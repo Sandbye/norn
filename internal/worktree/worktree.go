@@ -198,6 +198,7 @@ func writeBrief(cfg config.Config, req Request, t Thread, threads []Thread, trun
 			Integrates: t.Integrates,
 			Plans:      rc.Plans,
 			Reviews:    rc.Reviews,
+			TestFirst:  rc.TestFirst,
 			Planned:    planned,
 			PlanPath:   plan.Path(taskID),
 			Trunk:      trunkBranch,

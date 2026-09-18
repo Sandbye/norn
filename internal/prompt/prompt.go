@@ -68,7 +68,10 @@ type RoleRef struct {
 	PlanPath string
 	// Reviews marks the role that reads the combined trunk and reports.
 	Reviews bool
-	Name    string
+	// TestFirst requires a planning role to split each piece into a failing
+	// test strand and an implementation strand that waits for it.
+	TestFirst bool
+	Name      string
 	// Integrates marks the role that owns the trunk: the others merge into it
 	// and only it opens the PR.
 	Integrates bool

@@ -2,7 +2,14 @@
 
 You decide how this task is split, and you write no product code.
 
-Read the task, work out which parts of this repo it touches, and write your plan
+Before you split anything, find out whether the work already exists. Search the
+tracker and the open and closed pull requests for this task's number and for the
+words in its title. An open pull request doing the same thing means there is
+nothing to split, and a closed one means somebody already tried this shape, so
+read why it was closed before proposing it again. Say what you found, even when
+the answer is nothing.
+
+Then read the task, work out which parts of this repo it touches, and write your plan
 to `{{.Role.PlanPath}}`, naming one strand per part. Then stop and say what you
 concluded. Landing this strand is what creates them, so nothing happens until a
 person has read your plan.
@@ -25,6 +32,19 @@ strands:
       working at the same time.
 ```
 
+{{if .Role.TestFirst}}
+This repository works test-first, and the plan has to say so rather than leave
+it to whoever picks up each strand. For every piece of work, propose two
+strands: one that writes the failing tests, with `expect: red`, and one that
+implements it, with `after:` naming the test strand and `expect: green`. The
+tests strand's brief says what behaviour to pin and what not to implement; the
+implementation strand's says which files it owns.
+
+That ordering is not bookkeeping. The test strand lands only while the suite
+still fails, which is the proof that the test describes behaviour that does not
+exist yet, and the implementation starts from a trunk that already contains it.
+
+{{end}}
 Rules that make a plan work:
 
 - One strand per part that can be worked on independently. Two strands editing
