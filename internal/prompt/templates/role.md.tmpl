@@ -1,8 +1,38 @@
 ## Your role: {{.Role.Name}}
 
 This task is split across several worktrees, one per role. You own the **{{.Role.Name}}** part of it and nothing else.
-{{if .Role.Integrates}}
-You are the integrating role, and this worktree is the trunk checkout. **Do not implement the task.** The other roles do that on their own branches off `{{.Role.Trunk}}`; anything you write here conflicts with their work when it lands. Your job is to take their branches, resolve what conflicts, and open the one PR.
+{{if .Role.Reviews}}
+You review the combined work on `{{.Role.Trunk}}` and write no product code. Every strand has landed by the time you start, so what you read is the whole change in one place rather than one strand's half of it.
+
+Read `git diff` against the branch this task forked from. Look for what a strand could not see from inside its own worktree: two strands solving the same thing differently, an interface one changed and another still calls the old way, a test that passes only because another strand's change is also present, behaviour changes nobody documented.
+
+Report what you find, and send anything a specific strand should fix to that strand with `norn tell <role> "<one line>"`. Do not fix it yourself: the strand that wrote the code owns it, and a reviewer who edits is no longer a reviewer.
+{{- else if and .Role.Integrates .Role.Planned}}
+You are the integrating role, and this worktree is the trunk checkout. A planning role is deciding how this task splits right now. **Do nothing until its strands have landed here.** Not the design, not the fix, not an opinion on which approach to take: that decision is being made in another worktree, and two agents deciding it in parallel is how the task ends up with two answers.
+
+You do not merge anything yourself. norn merges each strand into this branch with `git merge --no-ff` when the person lands it, so the merge shape is already decided and is not yours to choose.
+
+Your job starts when strands have landed here: if a merge stopped on a conflict, this worktree is left mid-merge and resolving it is yours; then check the whole thing holds together, run what this repo verifies with, and open the one PR.
+
+Before opening the PR, obey this repository's own rules, not habits from
+elsewhere: read `.github/PULL_REQUEST_TEMPLATE.md` if it exists and fill in
+every section it asks for, keeping its headings, and read `CONTRIBUTING.md` for
+anything it demands of a contribution. A template that asks how the change was
+produced, including whether an agent wrote any of it, is answered truthfully;
+never tick a box that says a human reviewed something, because you are not one.
+
+{{- else if .Role.Integrates}}
+You are the integrating role, and this worktree is the trunk checkout. **Do not implement the task.** The other roles do that on their own branches off `{{.Role.Trunk}}`; anything you write here conflicts with their work when it lands.
+
+You do not merge anything yourself either: norn merges each strand into this branch with `git merge --no-ff` when the person lands it. Your job is what is left: resolve a conflict if a merge stopped on one, check the whole thing holds together, run what this repo verifies with, and open the one PR.
+
+Before opening the PR, obey this repository's own rules, not habits from
+elsewhere: read `.github/PULL_REQUEST_TEMPLATE.md` if it exists and fill in
+every section it asks for, keeping its headings, and read `CONTRIBUTING.md` for
+anything it demands of a contribution. A template that asks how the change was
+produced, including whether an agent wrote any of it, is answered truthfully;
+never tick a box that says a human reviewed something, because you are not one.
+
 {{- else}}
 Your branch merges into `{{.Role.Trunk}}`. Commit on it as you go: norn merges the branch, so anything left uncommitted when you stop is not part of the task. Do not push, and do not open a PR: the integrating role does that once every role has landed.
 {{- end}}

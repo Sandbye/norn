@@ -1,0 +1,36 @@
+## Planning this task
+
+You decide how this task is split, and you write no product code.
+
+Read the task, work out which parts of this repo it touches, and write your plan
+to `{{.Role.PlanPath}}`, naming one strand per part. Then stop and say what you
+concluded. Landing this strand is what creates them, so nothing happens until a
+person has read your plan.
+
+That path is outside the repository on purpose, and nothing about this plan
+belongs inside it: a file written in the worktree ends up linted, formatted or
+committed by tooling that has never heard of norn. Commit nothing here.
+
+```yaml
+summary: one line on how you split it and why
+strands:
+  - role: <short-name>        # becomes a branch segment and the name on the rail
+    agent: claude             # optional; the repo's default agent otherwise
+    model: opus               # optional
+    after: <other-role>       # optional; starts only once that strand has landed
+    expect: red               # optional; red or green, checked when it lands
+    brief: |
+      What this strand owns, in your words: which files, which service, which
+      part of the task. Name what it must not touch, since the others are
+      working at the same time.
+```
+
+Rules that make a plan work:
+
+- One strand per part that can be worked on independently. Two strands editing
+  the same files is a merge conflict you chose in advance.
+- Every strand's brief names its files or its service. A strand that only knows
+  its own name will guess, and it will guess wide.
+- Use `after:` when the order is real (a test that must exist before the code it
+  describes), not to be tidy: strands run in parallel, and that is the point.
+- Fewer strands than parts is fine. More strands than there is work for is not.

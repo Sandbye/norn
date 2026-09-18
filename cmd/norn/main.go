@@ -402,7 +402,21 @@ func runCreate(cfg config.Config, repoRoot string, createArgs []string) {
 		runApp(cfg, repoRoot, tui.ViewCreate)
 		return
 	}
-	directCreate(cfg, repoRoot, "task", hint, flags.base, flags.template, flags.roles)
+	roles := flags.roles
+	if len(roles) == 0 && flags.shape != "" {
+		shaped, ok := cfg.Shape(flags.shape)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "error: this repo declares no shape %q\n", flags.shape)
+			if names := cfg.ShapeNames(); len(names) > 0 {
+				fmt.Fprintf(os.Stderr, "declared shapes: %s\n", strings.Join(names, ", "))
+			} else {
+				fmt.Fprintln(os.Stderr, "declare them under `shapes:` in .norn.yaml first")
+			}
+			os.Exit(1)
+		}
+		roles = shaped
+	}
+	directCreate(cfg, repoRoot, "task", hint, flags.base, flags.template, roles)
 }
 
 // checkoutBranch puts an existing branch into a worktree and launches the agent
@@ -911,6 +925,11 @@ type createFlags struct {
 	// roles are the role names this create splits across (`--roles a,b`). Empty
 	// means one worktree, which is what create did before roles existed.
 	roles []string
+	// shape names a declared set of roles (`--shape feature`), so a kind of
+	// work you do often is one word rather than a list retyped each time.
+	// --roles wins when both are given: the explicit list is the more specific
+	// instruction.
+	shape string
 	// Whether --branch was given at all, so `--branch=` (present but empty) is
 	// rejected rather than read as absent and quietly opening the New tab.
 	branchSet bool
@@ -949,6 +968,11 @@ func extractCreateFlags(args []string) createFlags {
 			f.roles = splitRoles(strings.TrimPrefix(a, "--roles="))
 		case strings.HasPrefix(a, "--role="):
 			f.roles = splitRoles(strings.TrimPrefix(a, "--role="))
+		case (a == "--shape" || a == "-s") && i+1 < len(args):
+			f.shape = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--shape="):
+			f.shape = strings.TrimPrefix(a, "--shape=")
 		default:
 			f.rest = append(f.rest, a)
 		}
@@ -2653,6 +2677,9 @@ Usage:
   norn create "hint" --roles <a,b>
                           Split the task: a trunk worktree plus one per role
                           (roles come from the roles: block in .norn.yaml)
+  norn create "hint" --shape <name>, -s <name>
+                          Split by a named shape from the shapes: block, so a
+                          kind of work is one word instead of a role list
   norn create "hint" --template <name>, -t <name>
                           Use a specific prompt template for this worktree
   norn create --branch <b>

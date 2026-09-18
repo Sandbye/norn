@@ -23,6 +23,83 @@ import (
 //	    agent: claude
 //	    integrates: true
 
+// Shapes are named task shapes: an ordered list of declared role names, so a
+// kind of work you do repeatedly ("a feature", "a bug fix") is picked once at
+// create time rather than reassembled from roles every time.
+//
+//	shapes:
+//	  feature: [plan, tests, backend, frontend, integration]
+type Shapes map[string][]string
+
+// Shape returns the roles of a named shape.
+func (c Config) Shape(name string) ([]string, bool) {
+	roles, ok := c.Shapes[name]
+	return roles, ok
+}
+
+// ShapeNames lists the declared shapes, alphabetically, for a picker.
+func (c Config) ShapeNames() []string {
+	names := make([]string, 0, len(c.Shapes))
+	for name := range c.Shapes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// StartsAfter is the role a given role waits for, taking the planner into
+// account.
+//
+// A role's own `after:` wins. Otherwise the integrating role waits for the
+// planner when there is one: until the plan lands there is nothing to
+// integrate, and an integrator spawned early designs the fix itself, in
+// parallel with the planner doing the same thing.
+func (c Config) StartsAfter(role string) string {
+	rc, ok := c.Roles[role]
+	if !ok {
+		return ""
+	}
+	if rc.After != "" {
+		return rc.After
+	}
+	if planner, has := c.PlanningRole(); has && rc.Integrates && planner != role {
+		return planner
+	}
+	if rc.Reviews {
+		// Waits for every code strand, which no single name can express; the
+		// landing path starts it when the last one lands.
+		return "*"
+	}
+	return ""
+}
+
+// ReviewingRole returns the role that reviews the combined work, if declared.
+func (c Config) ReviewingRole() (string, bool) {
+	for _, name := range c.RoleNames() {
+		if c.Roles[name].Reviews {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// IntegratingRoleName is the name of the role that owns the trunk.
+func (c Config) IntegratingRoleName() (string, bool) {
+	name, _, ok := c.IntegratingRole()
+	return name, ok
+}
+
+// PlanningRole returns the role that decides the task's shape, if one is
+// declared. At most one: two planners would each write the same file.
+func (c Config) PlanningRole() (string, bool) {
+	for _, name := range c.RoleNames() {
+		if c.Roles[name].Plans {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 // Roles is the declared role map. It merges per field rather than per role, so
 // a personal config can mark one role integrating without restating which agent
 // serves it, the way every other config key layers.
@@ -42,13 +119,24 @@ type RoleConfig struct {
 	// already contains the other's work. Empty means it starts with the rest.
 	After string `yaml:"after,omitempty" json:"after,omitempty"`
 
+	// Plans marks a role that decides the shape of the rest of the task instead
+	// of writing code. It reads the task and writes `.norn/strands.yaml` naming
+	// the strands it wants; landing it is what creates them, so the fan-out is
+	// the agent's judgement and yours, never the agent's alone.
+	Plans bool `yaml:"plans,omitempty" json:"plans,omitempty"`
+
+	// Reviews marks a role that reads the combined trunk and reports, instead
+	// of writing product code. It starts once every code strand has landed,
+	// which is the first moment the whole change exists in one place.
+	Reviews bool `yaml:"reviews,omitempty" json:"reviews,omitempty"`
+
 	// Expect is what the repo's verify must report for this role's work to be
 	// allowed onto the trunk: "red" for a strand whose job is a failing test,
 	// "green" for one that has to leave the tree working. Empty gates nothing.
 	Expect string `yaml:"expect,omitempty" json:"expect,omitempty"`
 }
 
-// Expect values. Red is the half of red-first a machine can check: a test that
+// Expect values. Red is the half of test-first a machine can check: a test that
 // passes before the implementation exists proves nothing.
 const (
 	ExpectRed   = "red"
@@ -96,7 +184,9 @@ func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 		Integrates bool     `yaml:"integrates"`
 		After      string   `yaml:"after"`
 		Expect     string   `yaml:"expect"`
-	}{Args: r.Args, Model: r.Model, Integrates: r.Integrates, After: r.After, Expect: r.Expect}
+		Plans      bool     `yaml:"plans"`
+		Reviews    bool     `yaml:"reviews"`
+	}{Args: r.Args, Model: r.Model, Integrates: r.Integrates, After: r.After, Expect: r.Expect, Plans: r.Plans, Reviews: r.Reviews}
 	if err := node.Decode(&v); err != nil {
 		return err
 	}
@@ -115,6 +205,8 @@ func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 		Integrates:  v.Integrates,
 		After:       v.After,
 		Expect:      v.Expect,
+		Plans:       v.Plans,
+		Reviews:     v.Reviews,
 	}
 	return nil
 }
@@ -209,6 +301,12 @@ func (c Config) Validate() error {
 				return fmt.Errorf("role %q waits for itself", name)
 			}
 		}
+		if role.Reviews && (role.Integrates || role.Plans) {
+			return fmt.Errorf("role %q reviews as well as planning or integrating, and a reviewer has to be someone other than the author", name)
+		}
+		if role.Plans && role.Integrates {
+			return fmt.Errorf("role %q both plans and integrates, and those are opposite jobs: one decides the shape, the other closes it", name)
+		}
 		switch role.Expect {
 		case "", ExpectRed, ExpectGreen:
 		default:
@@ -222,6 +320,26 @@ func (c Config) Validate() error {
 	for _, name := range c.RoleNames() {
 		if c.Roles[name].Integrates {
 			integrating = append(integrating, name)
+		}
+	}
+	var planners []string
+	for _, name := range c.RoleNames() {
+		if c.Roles[name].Plans {
+			planners = append(planners, name)
+		}
+	}
+	if len(planners) > 1 {
+		sort.Strings(planners)
+		return fmt.Errorf("roles %s each set `plans: true`, and they would write the same file over each other", strings.Join(planners, ", "))
+	}
+	for shape, roles := range c.Shapes {
+		if len(roles) == 0 {
+			return fmt.Errorf("shape %q lists no roles", shape)
+		}
+		for _, r := range roles {
+			if _, ok := c.Roles[r]; !ok {
+				return fmt.Errorf("shape %q names role %q, which this repo does not declare", shape, r)
+			}
 		}
 	}
 	switch len(integrating) {

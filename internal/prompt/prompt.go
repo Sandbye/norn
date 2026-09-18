@@ -57,7 +57,18 @@ type TaskRef struct {
 // them. Only set when the repo declares roles and the create picked more than
 // one, so a lone worktree renders exactly the brief it always did.
 type RoleRef struct {
-	Name string
+	// Plans marks the role that decides the task's shape; its brief gains the
+	// plan file's format.
+	Plans bool
+	// Planned says the task has a planning role, so the integrating brief tells
+	// that role to wait rather than to start designing.
+	Planned bool
+	// PlanPath is where a planning role writes its plan: outside the repo, so
+	// the project's own tooling never sees it.
+	PlanPath string
+	// Reviews marks the role that reads the combined trunk and reports.
+	Reviews bool
+	Name    string
 	// Integrates marks the role that owns the trunk: the others merge into it
 	// and only it opens the PR.
 	Integrates bool
@@ -166,7 +177,17 @@ func withRole(body string, data Data) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(body, "\n") + "\n\n" + strings.TrimSpace(block) + "\n", nil
+	out := strings.TrimRight(body, "\n") + "\n\n" + strings.TrimSpace(block) + "\n"
+	if data.Role.Plans {
+		// A planning role needs the file format, not just its boundaries: what
+		// it produces is the fan-out norn carries out.
+		planner, err := renderNamed("planner.md.tmpl", data)
+		if err != nil {
+			return "", err
+		}
+		out += "\n" + strings.TrimSpace(planner) + "\n"
+	}
+	return out, nil
 }
 
 // RenderReview renders the review brief for a PR-checkout worktree (norn review

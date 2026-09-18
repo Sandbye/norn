@@ -97,6 +97,9 @@ type Config struct {
 	//	  default: high
 	Effort map[string]string `yaml:"effort,omitempty" json:"effort,omitempty"`
 
+	// Shapes are named task shapes, each an ordered list of declared roles.
+	Shapes Shapes `yaml:"shapes,omitempty" json:"shapes,omitempty"`
+
 	// PaneLeader is the prefix that makes the next key norn's inside a strand's
 	// pane ("ctrl+a" by default). `ctrl+b` is not a candidate: a pane is a real
 	// tmux client, so that one is already tmux's.

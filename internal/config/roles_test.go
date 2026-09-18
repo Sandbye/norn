@@ -288,3 +288,95 @@ func TestOrderedRolesValidate(t *testing.T) {
 		t.Fatalf("an unknown expect = %v, want it named", err)
 	}
 }
+
+// A shape is an ordered subset of the declared roles, so the roles stay the one
+// declaration and a shape is only a name for a combination of them.
+func TestShapes(t *testing.T) {
+	cfg := Config{
+		Roles: Roles{
+			"plan":        {AgentConfig: AgentConfig{Command: "claude"}, Plans: true},
+			"tests":       {AgentConfig: AgentConfig{Command: "claude"}, After: "plan", Expect: ExpectRed},
+			"integration": {AgentConfig: AgentConfig{Command: "claude"}, Integrates: true},
+		},
+		Shapes: Shapes{"feature": {"plan", "tests", "integration"}, "fix": {"integration"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a valid shape was rejected: %v", err)
+	}
+	if got, ok := cfg.Shape("feature"); !ok || len(got) != 3 {
+		t.Fatalf("Shape(feature) = %v, %v", got, ok)
+	}
+	if got := cfg.ShapeNames(); len(got) != 2 || got[0] != "feature" {
+		t.Fatalf("ShapeNames = %v, want them sorted", got)
+	}
+	if role, ok := cfg.PlanningRole(); !ok || role != "plan" {
+		t.Fatalf("PlanningRole = %q, %v", role, ok)
+	}
+
+	// A shape naming a role nobody declared is a create that would half-happen.
+	cfg.Shapes["broken"] = []string{"plan", "design"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "design") {
+		t.Fatalf("Validate = %v, want it to name the missing role", err)
+	}
+}
+
+// With a planner in the shape, the integrator has nothing to integrate until
+// the plan lands. Spawned alongside it, it designs the fix itself while the
+// planner is designing the same fix, and then asks which approach to take.
+func TestIntegratorWaitsForThePlanner(t *testing.T) {
+	cfg := Config{Roles: Roles{
+		"plan":        {AgentConfig: AgentConfig{Command: "claude"}, Plans: true},
+		"integration": {AgentConfig: AgentConfig{Command: "claude"}, Integrates: true},
+		"logic":       {AgentConfig: AgentConfig{Command: "claude"}},
+	}}
+	if got := cfg.StartsAfter("integration"); got != "plan" {
+		t.Fatalf("StartsAfter(integration) = %q, want plan", got)
+	}
+	if got := cfg.StartsAfter("logic"); got != "" {
+		t.Fatalf("an ordinary role waits for %q", got)
+	}
+	if got := cfg.StartsAfter("plan"); got != "" {
+		t.Fatal("the planner waits for something")
+	}
+
+	// A role's own after: wins over the implied one.
+	cfg.Roles["integration"] = RoleConfig{AgentConfig: AgentConfig{Command: "claude"}, Integrates: true, After: "logic"}
+	if got := cfg.StartsAfter("integration"); got != "logic" {
+		t.Fatalf("an explicit after: was overridden: %q", got)
+	}
+
+	// With no planner, nothing implies a wait.
+	delete(cfg.Roles, "plan")
+	cfg.Roles["integration"] = RoleConfig{AgentConfig: AgentConfig{Command: "claude"}, Integrates: true}
+	if got := cfg.StartsAfter("integration"); got != "" {
+		t.Fatalf("without a planner the integrator waits for %q", got)
+	}
+}
+
+// A reviewer is someone other than the author, so it cannot also be the role
+// that wrote the plan or the one that owns the trunk. It also never starts with
+// the rest: it waits for every code strand, which no single `after:` can say.
+func TestReviewingRole(t *testing.T) {
+	cfg := Config{Roles: Roles{
+		"logic":       {AgentConfig: AgentConfig{Command: "claude"}},
+		"review":      {AgentConfig: AgentConfig{Command: "claude"}, Reviews: true},
+		"integration": {AgentConfig: AgentConfig{Command: "claude"}, Integrates: true},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a valid reviewer was rejected: %v", err)
+	}
+	if role, ok := cfg.ReviewingRole(); !ok || role != "review" {
+		t.Fatalf("ReviewingRole = %q, %v", role, ok)
+	}
+	if got := cfg.StartsAfter("review"); got == "" {
+		t.Fatal("the reviewer would be spawned with the rest, before there is anything to review")
+	}
+	if got := cfg.StartsAfter("logic"); got != "" {
+		t.Fatalf("a code strand waits for %q", got)
+	}
+
+	cfg.Roles["review"] = RoleConfig{AgentConfig: AgentConfig{Command: "claude"}, Reviews: true, Integrates: true}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("a role that reviews its own integration was accepted")
+	}
+}
