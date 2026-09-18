@@ -211,22 +211,22 @@ Every arrow in that sequence is a keypress of yours. norn never merges a strand,
 A `plans: true` role does not write code. It reads the task, checks whether the work already exists (open and closed pull requests included), and writes a plan to norn's state directory, one entry per strand it wants:
 
 ```yaml
-summary: split by service, one test strand per API surface
+summary: one strand per package, tests before the code that satisfies them
 strands:
-  - role: contract
+  - role: types
     expect: green
     brief: |
       Owns the shared types. Declarations only, no behaviour.
-  - role: enqueue-tests
-    after: contract
+  - role: parser-tests
+    after: types
     expect: red
     brief: |
-      Pins the queue write with failing tests. Do not implement.
-  - role: enqueue
-    after: enqueue-tests
+      Pins the parser with failing tests. Do not implement it.
+  - role: parser
+    after: parser-tests
     expect: green
     brief: |
-      Makes the enqueue-tests strand green.
+      Makes the parser-tests strand green.
 ```
 
 Press `S` to read it, `L` to accept. Accepting creates the worktrees and starts the ones that are not waiting for another. The plan lives in `~/.local/state/norn/plans/<task-id>/strands.yaml`, never in your repo, so no linter or commit ever sees it.
