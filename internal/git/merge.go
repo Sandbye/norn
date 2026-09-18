@@ -56,6 +56,29 @@ func MergeNoFF(trunkPath, branch, message string) error {
 	return fmt.Errorf("merge %s into %s: %w", branch, trunkPath, err)
 }
 
+// FastForward moves a strand's branch up to trunk, refusing anything that is
+// not a fast-forward.
+//
+// A waiting strand's worktree is created when the plan is accepted, which is
+// before the strand it waits for has landed, so its branch forks from a trunk
+// that does not yet hold that work. Without this, "starts from a trunk that
+// already contains its predecessor" is only true of the strands that happened
+// to be created late.
+//
+// It is a no-op when the branch is already current, and an error when the
+// strand has commits of its own or the worktree is dirty: in both cases moving
+// the branch would discard or rewrite somebody's work.
+func FastForward(wtPath, trunk string) error {
+	if IsDirty(wtPath) {
+		return fmt.Errorf("%s has uncommitted changes", wtPath)
+	}
+	out, err := captureRun(wtPath, "git", "merge", "--ff-only", trunk)
+	if err != nil {
+		return fmt.Errorf("fast-forward %s to %s: %w: %s", wtPath, trunk, err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
 // InMerge reports whether the worktree is sitting in an unfinished merge. It is
 // how a later norn run tells "nobody has resolved this yet" from "the conflict
 // is gone", without keeping a handle on the process that hit it.

@@ -107,3 +107,25 @@ func TestMergeNoFFRefusesDirtyTrunk(t *testing.T) {
 		t.Fatal("refused merge still started one")
 	}
 }
+
+// A strand that waited is created before the work it waits for exists, so its
+// branch has to come up to the trunk before the agent reads anything.
+func TestFastForwardBringsAStrandUpToTrunk(t *testing.T) {
+	trunk, trunkBranch, role, _ := splitTask(t)
+
+	writeCommit(t, trunk, "trunk.txt", "from the strand that landed", "landed work")
+	if err := FastForward(role, trunkBranch); err != nil {
+		t.Fatalf("FastForward: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(role, "trunk.txt")); err != nil {
+		t.Fatalf("the strand does not have the trunk's work: %v", err)
+	}
+
+	// Its own commits are not rewritten: that is somebody's work, and a merge
+	// is the caller's decision, not this function's.
+	writeCommit(t, role, "mine.txt", "own work", "own work")
+	writeCommit(t, trunk, "later.txt", "more trunk", "more trunk")
+	if err := FastForward(role, trunkBranch); err == nil {
+		t.Fatal("FastForward rewrote a strand that had commits of its own")
+	}
+}

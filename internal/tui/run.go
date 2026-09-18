@@ -143,11 +143,21 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 				started++
 				continue
 			}
-			if after := waitFor(cfg, taskID, sess.Role, present); after != "" && !hasLanded(store, taskID, after) {
+			after := waitFor(cfg, taskID, sess.Role, present)
+			if after != "" && !hasLanded(store, taskID, after) {
 				// Waiting on another strand: it starts when that one lands, so
 				// its branch forks from a trunk that already holds the work it
 				// is supposed to build on.
 				continue
+			}
+			// Catch-up: this strand waited for one that has since landed, so its
+			// branch has to come up to the trunk before the agent sees it.
+			if after != "" {
+				if task := store.FindTask(taskID); task != nil {
+					if err := git.FastForward(sess.Path, task.Trunk); err != nil {
+						return runStartedMsg{taskID: taskID, err: fmt.Errorf("%s: %w", sess.Role, err)}
+					}
+				}
 			}
 			agent := agentFor(cfg, taskID, sess.Role)
 			argv := strandCmd(cfg, agent, sess.Path, agent.Model).Args
@@ -357,6 +367,14 @@ func spawnWaitingCmd(cfg config.Config, taskID, landed string, cols, rows int) t
 		for _, sess := range store.SessionsForTask(taskID) {
 			if waitFor(cfg, taskID, sess.Role, present) != landed || strand.Alive(taskID, sess.Role) {
 				continue
+			}
+			// The worktree was created when the plan was accepted, so its branch
+			// forked from a trunk without the work it waited for. Move it up
+			// before the agent reads a single file.
+			if task := store.FindTask(taskID); task != nil {
+				if err := git.FastForward(sess.Path, task.Trunk); err != nil {
+					return runStartedMsg{taskID: taskID, err: fmt.Errorf("%s: %w", sess.Role, err)}
+				}
 			}
 			agent := agentFor(cfg, taskID, sess.Role)
 			argv := strandCmd(cfg, agent, sess.Path, agent.Model).Args
