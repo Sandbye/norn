@@ -84,6 +84,12 @@ type DiffView struct {
 	// workTree means the diff is the working tree vs HEAD (uncommitted changes),
 	// so per-file loading uses `git diff HEAD -- path` (two-dot) not target...HEAD.
 	workTree bool
+	// baseRef diffs the working tree against a ref instead of a commit range,
+	// so a strand's uncommitted work is reviewable before it commits.
+	baseRef string
+	// untracked are files git does not know yet; they have no ref to diff
+	// against, so they are read whole.
+	untracked map[string]bool
 
 	// Review state. PR mode submits to GitHub; local mode writes .norn/review.md.
 	pending        []PendingComment
@@ -246,6 +252,18 @@ func (d DiffView) WithSplit(v bool) DiffView {
 func (d DiffView) WithWorkingTree() DiffView {
 	d.workTree = true
 	d.mode = modeFile
+	return d
+}
+
+// WithBaseRef reviews everything a strand has done since ref, committed or
+// not. A review that only sees commits cannot answer "is this going the right
+// way", which is the question worth asking before the work is finished.
+func (d DiffView) WithBaseRef(ref string, untracked []string) DiffView {
+	d.baseRef = ref
+	d.untracked = map[string]bool{}
+	for _, p := range untracked {
+		d.untracked[p] = true
+	}
 	return d
 }
 
@@ -1040,6 +1058,9 @@ func writeReviewCmd(root, base, summary string, comments []PendingComment) tea.C
 
 // baseLabel describes what the diff is against, for the review header.
 func (d DiffView) baseLabel() string {
+	if d.baseRef != "" && d.target != "" {
+		return d.target + " (working tree)"
+	}
 	if d.workTree {
 		return "HEAD (uncommitted)"
 	}
@@ -1109,6 +1130,9 @@ func (d DiffView) loadCurrentFileCmd() tea.Cmd {
 	if d.prMeta != nil {
 		content := d.prFileDiffs[path]
 		return func() tea.Msg { return fileLoadedMsg{idx: idx, content: content} }
+	}
+	if d.baseRef != "" {
+		return loadBaseFileCmd(d.repoRoot, d.baseRef, idx, path, d.untracked[path])
 	}
 	if d.workTree {
 		return loadWorkingFileCmd(d.repoRoot, idx, path)
@@ -2332,6 +2356,24 @@ func loadFileDiffCmd(repoRoot, target string, idx int, path string) tea.Cmd {
 		cmd := exec.Command("git", "-C", repoRoot, "diff", target+"...HEAD", "--", path)
 		out, err := cmd.Output()
 		if err != nil {
+			return fileLoadedMsg{idx: idx, content: fmt.Sprintf("error: %v\n", err)}
+		}
+		return fileLoadedMsg{idx: idx, content: string(out)}
+	}
+}
+
+// loadBaseFileCmd diffs the working tree against ref: what this strand has
+// written since it branched, committed or not. An untracked file has no
+// counterpart in ref, so git is asked to compare it with /dev/null, which it
+// answers with exit status 1 and a real diff.
+func loadBaseFileCmd(repoRoot, ref string, idx int, path string, untracked bool) tea.Cmd {
+	return func() tea.Msg {
+		args := []string{"-C", repoRoot, "diff", ref, "--", path}
+		if untracked {
+			args = []string{"-C", repoRoot, "diff", "--no-index", "--", "/dev/null", path}
+		}
+		out, err := exec.Command("git", args...).Output()
+		if err != nil && len(out) == 0 {
 			return fileLoadedMsg{idx: idx, content: fmt.Sprintf("error: %v\n", err)}
 		}
 		return fileLoadedMsg{idx: idx, content: string(out)}

@@ -118,11 +118,15 @@ func centerScreen(content string, width, height int) string {
 // Raised from 118 once strands arrived: norn is now where you stay rather than
 // a launcher you pass through, and the detail pane holds a plan, a question and
 // a task title at once. A wide terminal was spending half its columns on margin.
-const frameWidth = 170
+// Raised again to 220: a task with eight strands has role names, waits and a
+// next line per row, and 170 was truncating all three.
+const frameWidth = 220
 
 // frameHeight caps the panel's inner rows so it reads as a centered pane, not a
 // full-screen fill. A tab with more content than this grows to fit (no clip).
-const frameHeight = 32
+// A split task puts every strand on the rail, so this is now most of a tall
+// terminal rather than a third of it.
+const frameHeight = 52
 
 // frameInnerHeight is the panel's fixed inner content height for a terminal of
 // the given height: capped at frameHeight, shrinking only on small terminals.

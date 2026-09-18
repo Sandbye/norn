@@ -248,7 +248,7 @@ func (a App) capturing() bool {
 	case ViewThreads:
 		return a.dashboard.filter.active || a.dashboard.showSummary || a.dashboard.showLog ||
 			a.dashboard.reply.active || a.dashboard.pane.open() ||
-			a.dashboard.switcher.active || a.dashboard.showBoard
+			a.dashboard.switcher.active || a.dashboard.showBoard || a.dashboard.showPlan
 	case ViewTasks:
 		return a.tasks.filter.active || a.tasks.confirming
 	case ViewCreate:
@@ -610,7 +610,8 @@ func helpFor(v View) []keyHint {
 			{"p", "open PR"}, {"t", "open task"}, {"d", "clean worktree"},
 			{"R", "spawn this task's strands"}, {"→", "enter a strand (ctrl+a ← leaves)"},
 			{"L", "land a finished strand on the trunk"},
-			{"P", "approve the PR (the integrator waits for this)"}, {"f", "go to strand (ctrl+a f in a pane)"},
+			{"P", "approve the PR (the integrator waits for this)"},
+			{"S", "read a plan"}, {"f", "go to strand (ctrl+a f in a pane)"},
 			{"b", "task board: what is done, what is outstanding"},
 			{"d (in board)", "review a strand's work, hand it back to that strand"},
 			{"/", "filter"}, {"a", "all repos"}, {"r", "refresh"}, {"j/k g/G", "move"},
@@ -670,7 +671,7 @@ func (a App) View() string {
 	// them: a box sized to the terminal does not fit inside a frame that is
 	// narrower than it.
 	if a.current == ViewThreads &&
-		(a.dashboard.pane.open() || a.dashboard.switcher.active || a.dashboard.showBoard) {
+		(a.dashboard.pane.open() || a.dashboard.switcher.active || a.dashboard.showBoard || a.dashboard.showPlan) {
 		return a.dashboard.View()
 	}
 
@@ -826,8 +827,14 @@ func createWorktree(cfg config.Config, repoRoot string, c createModel, cols, row
 			// Stopping at the first failure left a task with some strands live
 			// and no record of the rest beyond a message that scrolled away.
 			var failed []string
+			present := map[string]bool{}
 			for _, t := range res.Threads {
-				if cfg.StartsAfter(t.Role) != "" {
+				if t.Role != "" {
+					present[t.Role] = true
+				}
+			}
+			for _, t := range res.Threads {
+				if cfg.StartsAfterIn(t.Role, present) != "" {
 					continue // starts when the role it waits for lands
 				}
 				agent := cfg.AgentFor(t.Role)

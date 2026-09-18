@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1515,20 +1516,34 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 func reviewStrand(cfg config.Config, result tui.Result) {
 	target := strandReviewBase(cfg, result)
 	commitCount, _ := gitOutput(result.Path, "git", "rev-list", "--count", target+"..HEAD")
-	numstat, err := gitOutput(result.Path, "git", "diff", "--numstat", target+"...HEAD")
+
+	// The review is of the strand's work, not of its commits. An agent commits
+	// when it reaches a point it likes, which is after the moment you want to
+	// say "not that way", so the diff is the working tree against where the
+	// strand branched: committed, staged, unstaged and untracked together.
+	base := strings.TrimSpace(gitOutputOr(result.Path, "git", "merge-base", target, "HEAD"))
+	if base == "" {
+		base = target
+	}
+	numstat, err := gitOutput(result.Path, "git", "diff", "--numstat", base)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: diff %s: %v\n", target, err)
 		os.Exit(1)
 	}
 	files := parseNumstat(numstat)
+
+	untracked := untrackedFiles(result.Path)
+	for _, path := range untracked {
+		files = append(files, tui.DiffFile{Path: path, Added: countLines(filepath.Join(result.Path, path))})
+	}
+
 	if len(files) == 0 {
 		fmt.Printf("%s has written nothing to review.\n", result.Role)
 		return
 	}
-	ref := target
 
 	n, _ := strconv.Atoi(strings.TrimSpace(commitCount))
-	dv := tui.NewDiffView(result.Path, ref, n, files, "")
+	dv := tui.NewDiffView(result.Path, target, n, files, "").WithBaseRef(base, untracked)
 	p := tea.NewProgram(dv, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	final, err := p.Run()
 	if err != nil {
@@ -1536,6 +1551,39 @@ func reviewStrand(cfg config.Config, result tui.Result) {
 		os.Exit(1)
 	}
 	handOffStrandReview(result, final)
+}
+
+// gitOutputOr is gitOutput without the error: callers that have a fallback.
+func gitOutputOr(dir string, name string, args ...string) string {
+	out, _ := gitOutput(dir, name, args...)
+	return out
+}
+
+// untrackedFiles are the files a strand has written but not added. They are
+// most of what a young strand has done, so a review that skips them reviews
+// nothing.
+func untrackedFiles(dir string) []string {
+	out, err := gitOutput(dir, "git", "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths
+}
+
+// countLines is the added-line count for an untracked file, since git reports
+// no numstat for something it does not track.
+func countLines(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return bytes.Count(data, []byte("\n"))
 }
 
 // strandReviewBase picks what a strand's work is diffed against.

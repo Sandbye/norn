@@ -37,17 +37,22 @@ func (d Dashboard) renderBoard(vis []dashRow) string {
 	}
 
 	b.WriteString("\n" + dimStyle.Render(boardSummary(rows)))
-	b.WriteString("\n" + dimStyle.Render("↑/↓ pick · → enter · d review · L land · esc close"))
+	b.WriteString("\n" + dimStyle.Render("↑/↓ pick · → enter · d review · S plan · L land · esc close"))
 	return popover(b.String(), width, d.width, d.height)
 }
 
 // boardRows are the strands of the task under the cursor, trunk first, since
 // the trunk is what the others land on and what opens the PR.
 func (d Dashboard) boardRows(vis []dashRow) []dashRow {
-	if d.cursor >= len(vis) {
-		return nil
+	// The pinned task wins over the rail's cursor: the board survives a reload
+	// that reorders the rail, and it is how norn returns here after a review.
+	id := d.boardTask
+	if id == "" {
+		if d.cursor >= len(vis) {
+			return nil
+		}
+		id = vis[d.cursor].TaskID
 	}
-	id := vis[d.cursor].TaskID
 	if id == "" {
 		return nil
 	}

@@ -59,6 +59,12 @@ type Dashboard struct {
 	// the strand selected in it.
 	showBoard   bool
 	boardCursor int
+	// showPlan is the full plan of planRow, read before accepting it.
+	showPlan bool
+	planRow  dashRow
+	// planCursor is the strand the plan view is on; planExpand shows its brief.
+	planCursor int
+	planExpand bool
 	// boardTask pins the board to a task even when the rail's cursor is
 	// elsewhere, which is how norn reopens it after the diff viewer.
 	boardTask string
@@ -93,7 +99,10 @@ type Dashboard struct {
 
 	// Headless "summarize session" overlay (press `s`). Additive — does not
 	// affect any existing navigation/launch flow.
-	summarizing   bool
+	summarizing bool
+	// summaryCancel stops the headless run behind the spinner, since `s` sits
+	// next to `d` and `S` and a mistyped key must not cost a claude run.
+	summaryCancel context.CancelFunc
 	summary       string
 	summaryBranch string
 	summaryPath   string // worktree path, kept for `r` refresh
@@ -234,22 +243,26 @@ type prFetchedMsg struct {
 
 // summaryMsg carries the result of a headless "summarize session" run.
 type summaryMsg struct {
-	branch string
-	text   string
-	err    error
+	branch    string
+	text      string
+	err       error
+	cancelled bool
 }
 
 // summarizeCmd runs `claude -p` in the worktree to summarize recent work.
 // Read-only: only Read + git-read tools are allowed, so no prompts, no mutation.
-func summarizeCmd(dir, branch string) tea.Cmd {
+func summarizeCmd(ctx context.Context, dir, branch string) tea.Cmd {
 	return func() tea.Msg {
 		const prompt = "Summarize the work done on this branch in 3-6 terse bullet points: " +
 			"what changed and why. Base it on `git log` against the default branch and the diff. " +
 			"No preamble, just the bullets."
-		res, err := claude.Run(context.Background(), dir, prompt, claude.Options{
+		res, err := claude.Run(ctx, dir, prompt, claude.Options{
 			AllowedTools: []string{"Read", "Bash(git log *)", "Bash(git diff *)", "Bash(git status *)"},
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				return summaryMsg{branch: branch, cancelled: true}
+			}
 			return summaryMsg{branch: branch, err: err}
 		}
 		if res.IsError {
@@ -316,12 +329,46 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.summary = ""
 				d.summaryCached = false
 				d.summarizing = true
-				return d, tea.Batch(summarizeCmd(d.summaryPath, d.summaryBranch), d.spinner.Tick)
+				ctx, cancel := context.WithCancel(context.Background())
+				d.summaryCancel = cancel
+				return d, tea.Batch(summarizeCmd(ctx, d.summaryPath, d.summaryBranch), d.spinner.Tick)
 			}
 			d.showSummary = false
 			d.summary = ""
 			d.summaryErr = nil
 			d.summaryCached = false
+			return d, nil
+		}
+
+		// The plan reader owns the keyboard: it is a thing to read, and L from
+		// here is the same accept as on the rail.
+		if d.showPlan {
+			strands := 0
+			if d.planRow.Plan != nil {
+				strands = len(d.planRow.Plan.Strands)
+			}
+			switch s {
+			case "esc", "q", "S":
+				d.showPlan, d.planExpand = false, false
+			case "j", "down":
+				if d.planCursor < strands-1 {
+					d.planCursor++
+				}
+			case "k", "up":
+				if d.planCursor > 0 {
+					d.planCursor--
+				}
+			case "enter", "right":
+				d.planExpand = !d.planExpand
+			case "e":
+				// $EDITOR already scrolls, searches and edits better than a
+				// popover can, and an edit there is what L then creates.
+				return d, editPlanCmd(d.planRow.TaskID)
+			case "L":
+				d.showPlan, d.planExpand = false, false
+				d.notice = "accepting " + d.planRow.Role + "…"
+				return d, landStrandCmd(d.cfg, d.planRow)
+			}
 			return d, nil
 		}
 
@@ -357,6 +404,12 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Base: row.TaskTrunk, TaskID: row.TaskID, Role: row.Role,
 					}
 					return d, tea.Quit
+				}
+			case s == "S":
+				// The board is where a split task is judged, so the plan that
+				// made the split is readable from here too.
+				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Plan != nil {
+					d.showPlan, d.planRow, d.planCursor, d.planExpand = true, row, 0, false
 				}
 			case s == "L":
 				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Ahead > 0 {
@@ -499,6 +552,18 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 
+		// A summary runs in the background, so esc is what stops one started by
+		// a mistyped key rather than waiting for a run nobody wants.
+		if s == "esc" && d.summarizing && !d.filter.active {
+			if d.summaryCancel != nil {
+				d.summaryCancel()
+				d.summaryCancel = nil
+			}
+			d.summarizing = false
+			d.notice = "summary cancelled"
+			return d, nil
+		}
+
 		// Filter input: printable/backspace/esc edit the query. While filtering,
 		// letters type into the query, so navigation uses arrows/ctrl+n+p and
 		// the action letters (r/a/p/t/d) are paused until esc.
@@ -549,7 +614,7 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The task board. One screen for the whole task, because a split
 			// task's truth is otherwise spread across three transcripts.
 			if d.cursor < len(vis) && vis[d.cursor].TaskID != "" {
-				d.showBoard, d.boardCursor = true, 0
+				d.showBoard, d.boardCursor, d.boardTask = true, 0, vis[d.cursor].TaskID
 			} else {
 				d.notice = "no task here: this thread is not part of one"
 			}
@@ -578,6 +643,17 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.reply.path, d.reply.branch, d.reply.target = row.Path, row.Branch, row
 				d.reply.grant = d.cfg.ReplyGrant()
 				return d, loadRunLogCmd(row.TaskID, row.Role)
+			}
+		case "S":
+			// Read the whole plan, not the trimmed version in the detail pane.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.Plan == nil {
+					d.notice = planAbsence(row)
+					return d, nil
+				}
+				d.showPlan, d.planRow, d.planCursor, d.planExpand = true, row, 0, false
+				return d, nil
 			}
 		case "P":
 			// Approve the pull request. The last gate in the pipeline is a
@@ -709,7 +785,9 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						d.readyBranch = ""
 					}
 					d.summarizing = true
-					return d, tea.Batch(summarizeCmd(row.Path, row.Branch), d.spinner.Tick)
+					ctx, cancel := context.WithCancel(context.Background())
+					d.summaryCancel = cancel
+					return d, tea.Batch(summarizeCmd(ctx, row.Path, row.Branch), d.spinner.Tick)
 				}
 			}
 		case "d":
@@ -870,6 +948,23 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dead pane, and its last screen is usually the thing you want to read.
 		return d, paneTick()
 
+	case planEditedMsg:
+		// The file is the plan's truth, so re-read it rather than keeping what
+		// was on screen before $EDITOR ran.
+		switch {
+		case msg.err != nil:
+			d.notice = "plan: " + msg.err.Error()
+		default:
+			d.planRow.Plan = msg.plan
+			d.planCursor = min(d.planCursor, max(len(msg.plan.Strands)-1, 0))
+			for i := range d.rows {
+				if d.rows[i].TaskID == msg.taskID && d.rows[i].Plan != nil {
+					d.rows[i].Plan = msg.plan
+				}
+			}
+		}
+		return d, nil
+
 	case landedMsg:
 		switch {
 		case msg.blocked:
@@ -900,6 +995,10 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.notice = ""
 
 	case summaryMsg:
+		if msg.cancelled {
+			d.summarizing = false
+			return d, nil
+		}
 		// Non-modal: finishing does NOT pop the overlay. Cache it and flag the
 		// row as ready; the user opens it with `s` when they want it.
 		d.summarizing = false
@@ -996,6 +1095,10 @@ func (d Dashboard) View() string {
 		return d.renderSwitcher()
 	}
 
+	if d.showPlan {
+		return d.renderPlanView()
+	}
+
 	if d.showBoard {
 		return d.renderBoard(d.visibleRows())
 	}
@@ -1031,7 +1134,7 @@ func (d Dashboard) View() string {
 			avail = inner - 6
 		}
 	}
-	sidebarW := max(min(avail/3, 40), 24) // ~a third, balanced, but bounded
+	sidebarW := max(min(avail/3, 56), 24) // ~a third, balanced, but bounded
 	if avail < 72 {                       // narrow panel: split in half, keep detail usable
 		sidebarW = max(avail/2, 16)
 	}
@@ -1111,7 +1214,7 @@ func (d Dashboard) renderHeader() string {
 	ident := dimStyle.Render(fmt.Sprintf("%s · scope: %s · %d live", ThreadWord(), scope, len(d.rows)))
 	switch {
 	case d.summarizing:
-		ident += "\n" + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"…")
+		ident += "\n" + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"… esc stops it")
 	case d.summaryErr != nil && d.readyBranch != "":
 		ident += "\n" + errorStyle.Render("✗ summary failed: "+d.readyBranch+" (s retries)")
 	case d.readyBranch != "":
@@ -1468,7 +1571,7 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 		const shown = 4 // the pane has no scrollback; the file holds the rest
 		for i, st := range r.Plan.Strands {
 			if i == shown {
-				b.WriteString(dimStyle.Render(fmt.Sprintf("  +%d more in .norn/strands.yaml", len(r.Plan.Strands)-shown)) + "\n")
+				b.WriteString(dimStyle.Render(fmt.Sprintf("  +%d more", len(r.Plan.Strands)-shown)) + "\n")
 				break
 			}
 			line := "  " + branchStyle.Render(st.Role)
@@ -1480,7 +1583,7 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 			}
 			b.WriteString(line + dimStyle.Render("  "+truncate(oneLine(st.Brief), max(w-len(st.Role)-8, 20))) + "\n")
 		}
-		b.WriteString(activeStyle.Render("  L creates these") + "\n\n")
+		b.WriteString(activeStyle.Render("  S reads it · L creates these") + "\n\n")
 	}
 
 	row("state", glyphStyle(r.AgentState).Render(stateLabel(r.AgentState)))
@@ -1673,6 +1776,59 @@ func worktreeState(wtPath string) stateFile {
 
 // loadCmd reloads the store and reconciles with live worktree list.
 // Fast path only — PR data is fetched async via fetchPRCmd after this returns.
+// planProposal is the plan this strand is still proposing: nil unless the
+// strand is its repo's planning role, and nil once every strand it names
+// exists. The planner is named by the strand's own repo, not by the repo norn
+// was started in, or a plan would only ever show in one project.
+func planProposal(store *state.Store, planner string, sess state.Session) *plan.Plan {
+	if planner == "" || sess.Role != planner {
+		return nil
+	}
+	p, err := plan.Read(sess.TaskID)
+	if err != nil {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, other := range store.Sessions {
+		if other.TaskID == sess.TaskID {
+			have[other.Role] = true
+		}
+	}
+	for _, st := range p.Strands {
+		if !have[st.Role] {
+			return p
+		}
+	}
+	return nil
+}
+
+// planAbsence says why there is nothing to read: a plan that was carried out
+// is a different answer from a strand that never writes one.
+func planAbsence(row dashRow) string {
+	if _, err := plan.Read(row.TaskID); err == nil {
+		return "this task's plan is already carried out: its strands exist"
+	}
+	return "no plan here: only a planning strand writes one"
+}
+
+// plannerCache resolves each worktree's planning role once per load: the role
+// is declared in that repo's own config, and the dashboard spans repos.
+type plannerCache map[string]string
+
+func (c plannerCache) of(path string) string {
+	if name, ok := c[path]; ok {
+		return name
+	}
+	name := ""
+	if cfg, err := config.Load(path); err == nil {
+		if planner, ok := cfg.PlanningRole(); ok {
+			name = planner
+		}
+	}
+	c[path] = name
+	return name
+}
+
 func (d Dashboard) loadCmd() tea.Cmd {
 	scope := d.scopeRepo
 	cfg := d.cfg
@@ -1736,6 +1892,7 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			}
 		}
 
+		planners := plannerCache{}
 		rows := make([]dashRow, 0, len(store.Sessions))
 		for _, sess := range store.Sessions {
 			if scope != "" && sess.Repo != scope {
@@ -1752,12 +1909,10 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				// still reads as running, and nothing offers to land it.
 				row.Run = reconcileRun(sess, &row)
 				row.Ahead = strandAhead(store, sess)
-				// A plan is the one thing a planning strand produces, and it is
-				// what you decide on, so it belongs on screen rather than in a
-				// file you have to go and open.
-				if p, err := plan.Read(sess.TaskID); err == nil {
-					row.Plan = p
-				}
+				// A plan belongs to the strand that wrote it, and only until it
+				// is carried out. Hanging it on every strand of the task asked
+				// each of them to create strands that already exist.
+				row.Plan = planProposal(store, planners.of(sess.Path), sess)
 			}
 			if git.CurrentBranch(sess.Path) == "" {
 				// Branch deleted under the worktree: label the sha so the row
