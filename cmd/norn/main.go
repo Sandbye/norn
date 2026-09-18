@@ -1997,6 +1997,7 @@ func cmdDoctor(cfg config.Config, repoRoot string) {
 		checkDocsPaths(home),
 		checkStateFile(home),
 		checkActiveRepo(cfg, repoRoot),
+		checkLocalMetaIgnored(repoRoot),
 		checkNamespace(),
 	}
 	render := func(c doctorCheck) {
@@ -2207,6 +2208,39 @@ func checkActiveRepo(cfg config.Config, repoRoot string) doctorCheck {
 		}
 	}
 	return doctorCheck{name: "current repo: " + repoName + " (has project config)"}
+}
+
+// checkLocalMetaIgnored reports tools that will see norn's per-worktree notes.
+//
+// `.git/info/exclude` hides `.worktree.md` and `.state.md` from git and from
+// nothing else. A formatter or linter that walks the working tree still finds
+// them, and when that tool is the repo's `verify`, every landing gate measures
+// norn's own files: `expect: green` can never be satisfied and `expect: red`
+// passes for a reason that has nothing to do with the tests.
+func checkLocalMetaIgnored(repoRoot string) doctorCheck {
+	if repoRoot == "" {
+		return doctorCheck{name: "local notes: not in a git repo (skipping)"}
+	}
+	var blind []string
+	for _, name := range []string{".prettierignore", ".eslintignore", ".stylelintignore", ".dockerignore"} {
+		path := filepath.Join(repoRoot, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if !strings.Contains(string(data), ".worktree.md") || !strings.Contains(string(data), ".state.md") {
+			blind = append(blind, name)
+		}
+	}
+	if len(blind) == 0 {
+		return doctorCheck{name: "local notes: hidden from git and from this repo's tools"}
+	}
+	return doctorCheck{
+		name:   "local notes: " + strings.Join(blind, ", ") + " does not skip norn's files",
+		detail: "norn writes .worktree.md and .state.md into every worktree; a tool that checks the whole tree will flag them",
+		fix:    "add `.worktree.md`, `.state.md` and `.norn/` to " + strings.Join(blind, " and "),
+		warn:   true,
+	}
 }
 
 // cmdRefreshDocs scans every project config under ~/.config/norn/projects/,
