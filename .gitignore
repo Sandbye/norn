@@ -20,3 +20,6 @@
 
 # LTeX (LanguageTool LSP) editor sidecars
 *_ltex.json
+
+# graphify report artifacts (local analysis output, not source)
+graphify-out/
