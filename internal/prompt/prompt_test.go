@@ -245,3 +245,48 @@ func TestRenderNoHint(t *testing.T) {
 		t.Error("missing no-hint fallback")
 	}
 }
+
+// The role contract has to survive the template choice. It went missing for a
+// real split because the configured template was `detailed`, and the role block
+// lived inside `task`: three strands were told they were ordinary worktrees
+// working the same issue, and all three started implementing it.
+func TestRoleBlockSurvivesAnyTemplate(t *testing.T) {
+	cfg := config.Config{}
+	role := &RoleRef{Name: "logic", Trunk: "feature/x/trunk", Siblings: []string{"tests"}}
+
+	for _, tmpl := range []string{"task", "checkout"} {
+		out, err := Render(cfg, "task", "a hint", "main", tmpl, nil, role)
+		if err != nil {
+			t.Fatalf("%s: %v", tmpl, err)
+		}
+		for _, want := range []string{"Your role: logic", "feature/x/trunk", "norn tell", "tests"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s template dropped %q from the brief", tmpl, want)
+			}
+		}
+	}
+}
+
+// The integrating role is told not to implement, which is the difference
+// between one PR and three strands fighting over the same files.
+func TestIntegratingRoleIsToldNotToImplement(t *testing.T) {
+	out, err := Render(config.Config{}, "task", "a hint", "main", "task", nil,
+		&RoleRef{Name: "integration", Integrates: true, Trunk: "feature/x/trunk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Do not implement") {
+		t.Fatalf("the integrating brief does not say to stay out of the code:\n%s", out)
+	}
+}
+
+// A worktree that is not part of a split gets no role section at all.
+func TestNoRoleNoBlock(t *testing.T) {
+	out, err := Render(config.Config{}, "task", "a hint", "main", "task", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "Your role") {
+		t.Fatalf("a standalone worktree got a role block:\n%s", out)
+	}
+}

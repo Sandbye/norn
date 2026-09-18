@@ -18,6 +18,7 @@ This file documents the *codebase* (architecture, design decisions, roadmap), no
 ```
 cmd/norn/main.go           Entry point, CLI arg routing, doctor, shell-init
 cmd/norn/brief.go          `norn brief` — headless JSON (branch, brief, config), creates nothing
+cmd/norn/run.go            `norn run` — drive a split task's roles headless, merge them into trunk
 internal/
   paths/paths.go            Config/cache/state dir resolution + the "work" legacy fallback
   config/config.go          YAML config loading (global + shared repo + personal per-project)
@@ -25,6 +26,8 @@ internal/
   git/git.go                Git operations (worktree CRUD, remote checks, branch utils), all timeout-bounded
   state/state.go            sessions.json store; state/lock.go adds flock'd Mutate
   claude/claude.go          Headless `claude -p` runs; claude/session.go probes live agent state
+  headless/headless.go      Unattended role runs: `claude -p` / `codex exec --json`, exit is the done signal
+  taskrun/taskrun.go        `norn run` supervisor: starts the roles, merges each into trunk on exit
   task/task.go              Tracker task lookup (github | clickup)
   tui/
     app.go                  Bubble Tea app, tabbed view routing, commands

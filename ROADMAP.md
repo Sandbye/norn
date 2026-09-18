@@ -87,7 +87,7 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error)
 
 - **Cost** — `.total_cost_usd` per call; surface it. Verify against plan: research suggests headless/SDK calls may bill from a separate credit pool (mid-2026) — confirm before heavy automation.
 - **Permissions** — keep `--allowedTools` minimal (read + git-read) so no prompts; never `--dangerously-skip-permissions`.
-- **`claude` presence** — add a `work doctor` check.
+- **`claude` presence** — add a `norn doctor` check.
 - **Verify**: unit test JSON-envelope parsing on a captured sample; manual run of summarize on a real worktree.
 
 ---
@@ -96,9 +96,9 @@ func Run(ctx context.Context, dir, prompt string, opts Options) (Result, error)
 
 **Problem.** GitHub drops a reviewer's comment from the Files-changed diff once the author edits that line ("outdated") — you can't see your comment and the new code in one view, even viewing all commits. Confirmed GitHub limitation (community #23138).
 
-**Insight.** `work diff <pr#>` already has the viewer, commit-scope picker, ref-diffing, syntax/wrap/jump/mouse. The fix is NOT side-by-side (expensive 2-column rewrite, and not the win). If BASE = your review-stamp commit and you diff `reviewSHA..HEAD` in the existing unified viewer, the old-side lines are the code as you reviewed it and the added lines below show how it was addressed — comment + new code in one scroll once comments are overlaid.
+**Insight.** `norn diff <pr#>` already has the viewer, commit-scope picker, ref-diffing, syntax/wrap/jump/mouse. The fix is NOT side-by-side (expensive 2-column rewrite, and not the win). If BASE = your review-stamp commit and you diff `reviewSHA..HEAD` in the existing unified viewer, the old-side lines are the code as you reviewed it and the added lines below show how it was addressed — comment + new code in one scroll once comments are overlaid.
 
-**MVP.** `work diff <pr#> --since-review` (and/or a key in the PR view):
+**MVP.** `norn diff <pr#> --since-review` (and/or a key in the PR view):
 
 1. **Resolve review-stamp SHA** — `gh api repos/{o}/{r}/pulls/{n}/reviews`, filter `user.login == me` (resolve me via `gh api user` → `.login`), latest by `submitted_at`, take `.commit_id` = BASE. HEAD = current branch tip.
 2. **Diff `reviewSHA..HEAD`** — reuse the existing diff plumbing with BASE override (same path as `--base`). Two-dot == three-dot here since HEAD descends from reviewSHA.

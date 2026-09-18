@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -113,11 +114,19 @@ func centerScreen(content string, width, height int) string {
 // ceiling so a big terminal gets a roomy command center without stretching to
 // absurd widths. Capped (not full-width) so the panel doesn't jitter as the
 // focused row's help line changes length.
-const frameWidth = 118
+//
+// Raised from 118 once strands arrived: norn is now where you stay rather than
+// a launcher you pass through, and the detail pane holds a plan, a question and
+// a task title at once. A wide terminal was spending half its columns on margin.
+// Raised again to 220: a task with eight strands has role names, waits and a
+// next line per row, and 170 was truncating all three.
+const frameWidth = 220
 
 // frameHeight caps the panel's inner rows so it reads as a centered pane, not a
 // full-screen fill. A tab with more content than this grows to fit (no clip).
-const frameHeight = 32
+// A split task puts every strand on the rail, so this is now most of a tall
+// terminal rather than a third of it.
+const frameHeight = 52
 
 // frameInnerHeight is the panel's fixed inner content height for a terminal of
 // the given height: capped at frameHeight, shrinking only on small terminals.
@@ -223,7 +232,17 @@ func wireStdio(cmd *exec.Cmd, wtPath string) *exec.Cmd {
 // makeAgentCmd builds the launch command. model overrides agent.Model for this
 // session (empty → fall back to the config default). It only applies to claude
 // (as --model) and to fresh sessions; resume (-c) continues the prior model.
-func makeAgentCmd(agent config.AgentConfig, wtPath string, resume bool, model string) *exec.Cmd {
+func makeAgentCmd(cfg config.Config, agent config.AgentConfig, wtPath string, resume bool, model string) *exec.Cmd {
+	return agentCmd(cfg, agent, wtPath, resume, model, false)
+}
+
+// strandCmd is makeAgentCmd for an agent that runs as a strand, where nobody
+// may be watching this particular pane.
+func strandCmd(cfg config.Config, agent config.AgentConfig, wtPath, model string) *exec.Cmd {
+	return agentCmd(cfg, agent, wtPath, false, model, true)
+}
+
+func agentCmd(cfg config.Config, agent config.AgentConfig, wtPath string, resume bool, model string, strandRun bool) *exec.Cmd {
 	command := agent.Command
 	if command == "" {
 		command = "claude"
@@ -250,14 +269,29 @@ func makeAgentCmd(agent config.AgentConfig, wtPath string, resume bool, model st
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	prompt := ""
-	if data, err := os.ReadFile(wtPath + "/.worktree.md"); err == nil {
-		prompt = string(data)
+	if effort := cfg.EffortFor(model); effort != "" {
+		args = append(args, "--effort", effort)
 	}
-	args = append(args,
-		"--append-system-prompt", prompt,
-		"Start worktree session. Follow the startup procedure in .worktree.md.",
-	)
+	if strandRun {
+		// A strand is one of several agents working in parallel, and you are
+		// in at most one pane at a time. Manual mode would have the other
+		// strands stop at the first prompt and wait for someone who is looking
+		// elsewhere. auto has a classifier review each action instead.
+		args = append(args, "--permission-mode", "auto")
+		// Prompt suggestions are accepted with Tab, and Tab switches tabs
+		// everywhere else in norn, so muscle memory inside a pane types a
+		// predicted sentence into the agent instead.
+		args = append(args, "--prompt-suggestions", "false")
+	}
+	brief := filepath.Join(wtPath, ".worktree.md")
+	if _, err := os.Stat(brief); err == nil {
+		// By path, not by value: a strand is launched through tmux, and a long
+		// brief passed as an argument exceeds what tmux will accept ("command
+		// too long"), which killed the spawn of whichever role had the longest
+		// one.
+		args = append(args, "--append-system-prompt-file", brief)
+	}
+	args = append(args, "Start worktree session. Follow the startup procedure in .worktree.md.")
 	return wireStdio(exec.Command("claude", args...), wtPath)
 }
 
@@ -325,8 +359,8 @@ func AgentAvailable(agent config.AgentConfig) bool {
 // overrides the config default for this launch (empty → default); ignored on
 // resume and non-claude. The error is returned rather than swallowed: a failure
 // to start is invisible otherwise, because the screen was just cleared for it.
-func LaunchAgent(agent config.AgentConfig, wtPath string, resume bool, model string) error {
-	return makeAgentCmd(agent, wtPath, resume, model).Run()
+func LaunchAgent(cfg config.Config, agent config.AgentConfig, wtPath string, resume bool, model string) error {
+	return makeAgentCmd(cfg, agent, wtPath, resume, model).Run()
 }
 
 // LaunchAgentPrompt runs the agent in wtPath with prompt as its next message,
@@ -353,4 +387,28 @@ func LaunchAgentPrompt(agent config.AgentConfig, wtPath, model, prompt string) b
 	}
 	wireStdio(exec.Command("claude", append(args, prompt)...), wtPath).Run()
 	return true
+}
+
+// popover renders a small box over the current view: bordered, padded, sized to
+// its content, centered across the terminal and sitting near the top.
+//
+// Not frame(): that one fills the terminal's height, which for a box of six
+// lines means a tall empty rectangle with the content pushed to the bottom.
+func popover(content string, boxWidth, termWidth, termHeight int) string {
+	// Width() is the content box, so the border and padding sit outside it:
+	// asking for more than the terminal can hold is what clips every line.
+	inner := max(min(boxWidth, termWidth-4)-6, 20)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorLavender).
+		Padding(1, 2).
+		Width(inner).
+		Render(content)
+	// Centered both ways: a box pinned to the top of a tall terminal reads as
+	// something that failed to lay out rather than as a deliberate overlay.
+	centered := centerBlock(box, termWidth)
+	if top := (termHeight - lipgloss.Height(centered)) / 2; top > 0 {
+		centered = strings.Repeat("\n", top) + centered
+	}
+	return centered
 }

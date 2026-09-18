@@ -136,3 +136,54 @@ func TestPruneTasks(t *testing.T) {
 		t.Fatalf("orphaned task survived: %+v", s.Tasks)
 	}
 }
+
+// TestRunStateSurvivesBareUpsert: the supervisor writes a role's run state, and
+// an activity tick that knows nothing about runs then upserts the same row. The
+// tick must not reset the thread to "never ran", which is what would make a
+// restarted `norn run` re-run a role that already finished.
+func TestRunStateSurvivesBareUpsert(t *testing.T) {
+	s := &Store{}
+	s.UpsertByPath(Session{ID: "norn:b/logic", Repo: "norn", Branch: "b/logic", Path: "/w/logic", TaskID: "abc", Role: "logic"})
+	if !s.SetRun("/w/logic", RunRunning, 4242) {
+		t.Fatal("SetRun reported no change on a fresh row")
+	}
+	if got := s.Sessions[0].RunPID; got != 4242 {
+		t.Fatalf("running row lost its pid: %d", got)
+	}
+	if !s.SetRun("/w/logic", RunDone, 4242) {
+		t.Fatal("SetRun reported no change moving running to done")
+	}
+	if got := s.Sessions[0].RunPID; got != 0 {
+		t.Fatalf("pid outlived the running state: %d", got)
+	}
+	s.UpsertByPath(Session{ID: "norn:b/logic", Repo: "norn", Branch: "b/logic", Path: "/w/logic"})
+	if got := s.Sessions[0].Run; got != RunDone {
+		t.Fatalf("bare upsert dropped run state: %q", got)
+	}
+	if s.SetRun("/w/logic", RunDone, 0) {
+		t.Fatal("SetRun reported a change for the state already stored")
+	}
+	if s.SetRun("/w/missing", RunFailed, 0) {
+		t.Fatal("SetRun reported a change for a path with no row")
+	}
+}
+
+// TestSetTaskBlocked: a conflicted merge blocks the task, an UpsertTask that
+// omits the reason leaves it blocked, and only SetTaskBlocked clears it.
+func TestSetTaskBlocked(t *testing.T) {
+	s := &Store{}
+	task := s.UpsertTask(Task{Repo: "norn", Goal: "split", Trunk: "feature/x/trunk"})
+	if !s.SetTaskBlocked(task.ID, "merge conflict in logic") {
+		t.Fatal("SetTaskBlocked reported no change")
+	}
+	s.UpsertTask(Task{ID: task.ID, Goal: "split again"})
+	if got := s.FindTask(task.ID).Blocked; got != "merge conflict in logic" {
+		t.Fatalf("UpsertTask cleared the blocked reason: %q", got)
+	}
+	if !s.SetTaskBlocked(task.ID, "") {
+		t.Fatal("SetTaskBlocked reported no change when clearing")
+	}
+	if got := s.FindTask(task.ID).Blocked; got != "" {
+		t.Fatalf("blocked reason not cleared: %q", got)
+	}
+}

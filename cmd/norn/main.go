@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"github.com/sandbye/norn/internal/paths"
 	"github.com/sandbye/norn/internal/prompt"
 	"github.com/sandbye/norn/internal/state"
+	"github.com/sandbye/norn/internal/strand"
 	"github.com/sandbye/norn/internal/task"
 	"github.com/sandbye/norn/internal/tui"
 	"github.com/sandbye/norn/internal/worktree"
@@ -176,6 +178,12 @@ func main() {
 		case "create", "new", "c":
 			runCreate(cfg, repoRoot, args[1:])
 			return
+		case "tell":
+			tellStrand(args[1:])
+			return
+		case "run":
+			runTask(cfg, args[1:])
+			return
 		case "review":
 			runReview(cfg, repoRoot, args[1:])
 			return
@@ -229,14 +237,23 @@ func applyTemplateDir(cfg config.Config) {
 // runApp runs the unified tabbed TUI at the given view and performs whatever the
 // user chose on exit (launch, resume, or cd).
 func runApp(cfg config.Config, repoRoot string, initialView tui.View) {
+	runAppOn(cfg, repoRoot, initialView, "")
+}
+
+// runAppOn is runApp, optionally reopening a task's board. Detours that leave
+// the TUI (the diff viewer) come back through here, so reviewing a strand
+// returns you to the board you left rather than to a fresh dashboard.
+func runAppOn(cfg config.Config, repoRoot string, initialView tui.View, boardTask string) {
 	reapStale(repoRoot)
 
 	scope := ""
 	if repoRoot != "" {
 		scope = originRepoName(repoRoot)
 	}
-	app := tui.NewApp(cfg, repoRoot, scope, initialView)
-	p := tea.NewProgram(app, tea.WithAltScreen())
+	app := tui.NewApp(cfg, repoRoot, scope, initialView).OpenBoardFor(boardTask)
+	// Mouse reporting is on so the wheel reaches a strand's agent; the rail
+	// itself ignores mouse events.
+	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	m, err := p.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -249,6 +266,9 @@ func runApp(cfg config.Config, repoRoot string, initialView tui.View) {
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
 		writeCdTarget(result.Path)
 		handOff(cfg, result.Path, false, result.Model, nil, result.RoleTail)
+	case tui.ResultReview:
+		reviewStrand(cfg, result)
+		runAppOn(cfg, repoRoot, tui.ViewThreads, result.TaskID)
 	case tui.ResultResume:
 		upsertSessionFromPath(repoRoot, cfg.WorktreeDir, result.Path)
 		writeCdTarget(result.Path)
@@ -385,7 +405,21 @@ func runCreate(cfg config.Config, repoRoot string, createArgs []string) {
 		runApp(cfg, repoRoot, tui.ViewCreate)
 		return
 	}
-	directCreate(cfg, repoRoot, "task", hint, flags.base, flags.template, flags.roles)
+	roles := flags.roles
+	if len(roles) == 0 && flags.shape != "" {
+		shaped, ok := cfg.Shape(flags.shape)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "error: this repo declares no shape %q\n", flags.shape)
+			if names := cfg.ShapeNames(); len(names) > 0 {
+				fmt.Fprintf(os.Stderr, "declared shapes: %s\n", strings.Join(names, ", "))
+			} else {
+				fmt.Fprintln(os.Stderr, "declare them under `shapes:` in .norn.yaml first")
+			}
+			os.Exit(1)
+		}
+		roles = shaped
+	}
+	directCreate(cfg, repoRoot, "task", hint, flags.base, flags.template, roles)
 }
 
 // checkoutBranch puts an existing branch into a worktree and launches the agent
@@ -477,7 +511,7 @@ func handOff(cfg config.Config, wtPath string, resume bool, model string, warnin
 		return
 	}
 	clearScreen()
-	if err := tui.LaunchAgent(cfg.Agent, wtPath, resume, model); err != nil {
+	if err := tui.LaunchAgent(cfg, cfg.Agent, wtPath, resume, model); err != nil {
 		fmt.Fprintf(os.Stderr, "error: agent %q: %v\n", cfg.AgentCommand(), err)
 	}
 	fmt.Printf("Worktree: %s\n", wtPath)
@@ -668,8 +702,21 @@ func cmdList(repoRoot string) {
 		fmt.Fprintln(os.Stderr, "error: not inside a git repository")
 		os.Exit(1)
 	}
-	cmd := git.CmdOutputPublic(repoRoot, "git", "worktree", "list")
-	fmt.Println(cmd)
+	// `git worktree list` knows nothing about tasks, so annotate its lines with
+	// the role each path plays: a split task is otherwise three paths whose
+	// branches differ in one segment.
+	store, _ := state.Load()
+	for _, line := range strings.Split(strings.TrimRight(git.CmdOutputPublic(repoRoot, "git", "worktree", "list"), "\n"), "\n") {
+		path, _, _ := strings.Cut(line, " ")
+		if s := strandOf(store, path); s != nil {
+			role := s.role
+			if s.integrate {
+				role += " (trunk)"
+			}
+			line += "  ◈ " + role
+		}
+		fmt.Println(line)
+	}
 }
 
 func cmdStatus(cfg config.Config, repoRoot string) {
@@ -685,13 +732,99 @@ func cmdStatus(cfg config.Config, repoRoot string) {
 		return
 	}
 
-	for _, wt := range wts {
-		fmt.Printf("\033[1;34m%s\033[0m\n", wt.Branch)
+	store, _ := state.Load()
+	lastTask := ""
+	for _, wt := range sortStrandsTogether(store, wts) {
+		strand := strandOf(store, wt.Path)
+		if strand == nil {
+			lastTask = ""
+			fmt.Printf("\033[1;34m%s\033[0m\n", wt.Branch)
+		} else {
+			if strand.taskID != lastTask {
+				fmt.Printf("\033[1;35m◈ %s\033[0m\n", strand.label())
+			}
+			lastTask = strand.taskID
+			name := "  " + strand.role
+			if strand.integrate {
+				name += " (trunk)"
+			}
+			fmt.Printf("\033[1;34m%s\033[0m\n", name)
+		}
 		if wt.CommitMsg != "" {
 			fmt.Printf("  Last:  %s (%s)\n", wt.CommitMsg, git.Age(wt.LastCommit))
 		}
+		if strand != nil && strand.status != "" {
+			fmt.Printf("  Run:   %s\n", strand.status)
+		}
 		fmt.Printf("  Path:  %s\n\n", wt.Path)
 	}
+}
+
+// strandInfo is what the CLI needs to show a worktree as part of a task rather
+// than as a branch on its own.
+type strandInfo struct {
+	taskID    string
+	role      string
+	goal      string
+	trunk     string
+	integrate bool
+	status    string
+}
+
+func (s strandInfo) label() string {
+	if s.goal != "" {
+		return s.goal
+	}
+	return s.trunk
+}
+
+// strandOf reports the task a worktree belongs to, or nil for a standalone one.
+func strandOf(store *state.Store, path string) *strandInfo {
+	if store == nil {
+		return nil
+	}
+	sess := store.FindByPath(path)
+	if sess == nil || sess.TaskID == "" || sess.Role == "" {
+		return nil
+	}
+	task := store.FindTask(sess.TaskID)
+	if task == nil {
+		return nil
+	}
+	return &strandInfo{
+		taskID: sess.TaskID, role: sess.Role, goal: task.Goal, trunk: task.Trunk,
+		integrate: sess.Branch == task.Trunk, status: sess.Run,
+	}
+}
+
+// sortStrandsTogether keeps a task's strands adjacent, trunk first, so a split
+// task reads as one piece of work rather than as three branches that happen to
+// share a prefix.
+func sortStrandsTogether(store *state.Store, wts []git.Worktree) []git.Worktree {
+	out := make([]git.Worktree, len(wts))
+	copy(out, wts)
+	if store == nil {
+		return out
+	}
+	order := map[string]int{}
+	for i, wt := range out {
+		if s := strandOf(store, wt.Path); s != nil {
+			if _, seen := order[s.taskID]; !seen {
+				order[s.taskID] = i
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		si, sj := strandOf(store, out[i].Path), strandOf(store, out[j].Path)
+		if si == nil || sj == nil {
+			return false
+		}
+		if si.taskID != sj.taskID {
+			return order[si.taskID] < order[sj.taskID]
+		}
+		return si.integrate && !sj.integrate
+	})
+	return out
 }
 
 // cmdContext prints a compact digest of the OTHER active worktrees in the
@@ -795,6 +928,11 @@ type createFlags struct {
 	// roles are the role names this create splits across (`--roles a,b`). Empty
 	// means one worktree, which is what create did before roles existed.
 	roles []string
+	// shape names a declared set of roles (`--shape feature`), so a kind of
+	// work you do often is one word rather than a list retyped each time.
+	// --roles wins when both are given: the explicit list is the more specific
+	// instruction.
+	shape string
 	// Whether --branch was given at all, so `--branch=` (present but empty) is
 	// rejected rather than read as absent and quietly opening the New tab.
 	branchSet bool
@@ -833,6 +971,11 @@ func extractCreateFlags(args []string) createFlags {
 			f.roles = splitRoles(strings.TrimPrefix(a, "--roles="))
 		case strings.HasPrefix(a, "--role="):
 			f.roles = splitRoles(strings.TrimPrefix(a, "--role="))
+		case (a == "--shape" || a == "-s") && i+1 < len(args):
+			f.shape = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--shape="):
+			f.shape = strings.TrimPrefix(a, "--shape=")
 		default:
 			f.rest = append(f.rest, a)
 		}
@@ -1222,6 +1365,30 @@ func splitDiffByFile(diff string) ([]tui.DiffFile, map[string]string) {
 	return files, perFile
 }
 
+// strandDiffBase is the baseline for `norn diff` run inside a strand: its
+// trunk while it is ahead of it, and its fork point once it has landed. Empty
+// for a worktree that is not a strand, so the usual base applies.
+//
+// Without this, `norn diff` in a strand compares against the repo's base branch
+// and shows the other strands' work as well as its own.
+func strandDiffBase(repoRoot string) string {
+	store, err := state.Load()
+	if err != nil {
+		return ""
+	}
+	info := strandOf(store, repoRoot)
+	if info == nil || info.integrate {
+		return ""
+	}
+	if n, _ := gitOutput(repoRoot, "git", "rev-list", "--count", info.trunk+"..HEAD"); strings.TrimSpace(n) != "0" {
+		return info.trunk
+	}
+	if mb, err := gitOutput(repoRoot, "git", "merge-base", "HEAD", info.trunk); err == nil && strings.TrimSpace(mb) != "" {
+		return strings.TrimSpace(mb)
+	}
+	return ""
+}
+
 // cmdDiff shows what's about to be shipped: current branch vs pr_base.
 // TUI by default; plain text mode behind --plain for piping / scripts.
 func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string, working bool) {
@@ -1265,6 +1432,11 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 	// the whole branch: everything from where it forked to HEAD, committed,
 	// pushed or not.
 	var ref, target string
+	// A strand diffs against its own trunk, not the repo's base: otherwise it
+	// shows its siblings' work alongside its own.
+	if baseOverride == "" {
+		baseOverride = strandDiffBase(repoRoot)
+	}
 	if baseOverride != "" {
 		ref = baseOverride
 		// An unresolvable base has to fail here. Left to the git calls below it
@@ -1335,6 +1507,133 @@ func cmdDiff(cfg config.Config, repoRoot string, plain bool, baseOverride string
 		os.Exit(1)
 	}
 	handOffReview(cfg, repoRoot, final)
+}
+
+// reviewStrand opens the diff of one strand against its trunk, and hands the
+// review back to that strand's own session.
+//
+// Local on purpose: this is the read that happens before anything reaches a
+// remote. The strand fixes what the review says, its branch lands on the trunk
+// when you are satisfied, and only then does the integrating strand open a PR.
+func reviewStrand(cfg config.Config, result tui.Result) {
+	target := strandReviewBase(cfg, result)
+	commitCount, _ := gitOutput(result.Path, "git", "rev-list", "--count", target+"..HEAD")
+
+	// The review is of the strand's work, not of its commits. An agent commits
+	// when it reaches a point it likes, which is after the moment you want to
+	// say "not that way", so the diff is the working tree against where the
+	// strand branched: committed, staged, unstaged and untracked together.
+	base := strings.TrimSpace(gitOutputOr(result.Path, "git", "merge-base", target, "HEAD"))
+	if base == "" {
+		base = target
+	}
+	numstat, err := gitOutput(result.Path, "git", "diff", "--numstat", base)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: diff %s: %v\n", target, err)
+		os.Exit(1)
+	}
+	files := parseNumstat(numstat)
+
+	untracked := untrackedFiles(result.Path)
+	for _, path := range untracked {
+		files = append(files, tui.DiffFile{Path: path, Added: countLines(filepath.Join(result.Path, path))})
+	}
+
+	if len(files) == 0 {
+		fmt.Printf("%s has written nothing to review.\n", result.Role)
+		return
+	}
+
+	n, _ := strconv.Atoi(strings.TrimSpace(commitCount))
+	dv := tui.NewDiffView(result.Path, target, n, files, "").WithBaseRef(base, untracked)
+	p := tea.NewProgram(dv, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	final, err := p.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "diff TUI error: %v\n", err)
+		os.Exit(1)
+	}
+	handOffStrandReview(result, final)
+}
+
+// gitOutputOr is gitOutput without the error: callers that have a fallback.
+func gitOutputOr(dir string, name string, args ...string) string {
+	out, _ := gitOutput(dir, name, args...)
+	return out
+}
+
+// untrackedFiles are the files a strand has written but not added. They are
+// most of what a young strand has done, so a review that skips them reviews
+// nothing.
+func untrackedFiles(dir string) []string {
+	out, err := gitOutput(dir, "git", "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths
+}
+
+// countLines is the added-line count for an untracked file, since git reports
+// no numstat for something it does not track.
+func countLines(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return bytes.Count(data, []byte("\n"))
+}
+
+// strandReviewBase picks what a strand's work is diffed against.
+//
+// The trunk, while the strand is still ahead of it. Once its branch has landed
+// the trunk contains it, so `trunk...HEAD` is empty and the review would show
+// nothing at exactly the moment you want to read it. Then the fork point from
+// the repo's base branch is the honest baseline: everything this strand wrote.
+func strandReviewBase(cfg config.Config, result tui.Result) string {
+	if n, _ := gitOutput(result.Path, "git", "rev-list", "--count", result.Base+"..HEAD"); strings.TrimSpace(n) != "0" {
+		return result.Base
+	}
+	for _, base := range append([]string{}, cfg.BaseBranches...) {
+		for _, ref := range []string{"origin/" + base, base} {
+			if mb, err := gitOutput(result.Path, "git", "merge-base", "HEAD", ref); err == nil && strings.TrimSpace(mb) != "" {
+				return strings.TrimSpace(mb)
+			}
+		}
+	}
+	return result.Base
+}
+
+// handOffStrandReview delivers a written review into the strand's live session,
+// rather than resuming a headless one: the strand is already running, and a
+// second agent in the same worktree is two agents editing the same files.
+func handOffStrandReview(result tui.Result, final tea.Model) {
+	dv, ok := final.(tui.DiffView)
+	if !ok || dv.ReviewPath() == "" {
+		return
+	}
+	rel, err := filepath.Rel(result.Path, dv.ReviewPath())
+	if err != nil {
+		rel = dv.ReviewPath()
+	}
+	if !dv.Handoff() {
+		fmt.Printf("Review written to %s\n", rel)
+		return
+	}
+	msg := fmt.Sprintf(
+		"I reviewed your work locally. Read %s: it holds my review comments in "+
+			"conventional-comment form, each anchored to a file:line. Address every "+
+			"blocking comment, then the rest, and commit on this branch. Ask before "+
+			"acting on anything ambiguous, and tell me what you skipped and why.", rel)
+	if err := strand.Send(result.TaskID, result.Role, msg); err != nil {
+		fmt.Printf("Review written to %s, but %s has no live session: %v\n", rel, result.Role, err)
+		return
+	}
+	fmt.Printf("Review handed to %s.\n", result.Role)
 }
 
 // handOffReview picks up a local review written in the diff TUI. When the user
@@ -1558,7 +1857,7 @@ func cmdInit(repoRoot string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("✓ Project config created:\n  %s\n\nDetected stack: %s\nBase branch:    %s\n\nNext: edit it (forbid/format/review/docs), then `work --doctor` to validate.\n", short(target, home), stack, baseBranch)
+	fmt.Printf("✓ Project config created:\n  %s\n\nDetected stack: %s\nBase branch:    %s\n\nNext: edit it (forbid/format/review/docs), then `norn --doctor` to validate.\n", short(target, home), stack, baseBranch)
 }
 
 // detectStack returns a short tag for the repo's primary language ecosystem.
@@ -1685,7 +1984,7 @@ func short(p, home string) string {
 	return p
 }
 
-// cmdDoctor checks the full work + hook + skill installation. Reports per-check
+// cmdDoctor checks the full norn + hook + skill installation. Reports per-check
 // status with a fix hint. Exit code = number of failures.
 func cmdDoctor(cfg config.Config, repoRoot string) {
 	home, _ := os.UserHomeDir()
@@ -1848,7 +2147,7 @@ func checkDocsPaths(home string) doctorCheck {
 		return doctorCheck{
 			name:   fmt.Sprintf("docs paths resolve (%d)", total),
 			detail: "missing: " + strings.Join(missing, ", "),
-			fix:    "clone the doc repos or run `work --refresh-docs`",
+			fix:    "clone the doc repos or run `norn --refresh-docs`",
 			warn:   true,
 		}
 	}
@@ -2428,11 +2727,17 @@ Usage:
   norn create "hint" --roles <a,b>
                           Split the task: a trunk worktree plus one per role
                           (roles come from the roles: block in .norn.yaml)
+  norn create "hint" --shape <name>, -s <name>
+                          Split by a named shape from the shapes: block, so a
+                          kind of work is one word instead of a role list
   norn create "hint" --template <name>, -t <name>
                           Use a specific prompt template for this worktree
   norn create --branch <b>
                           Check an existing branch out into a worktree: that exact
                           ref, no task lookup, no new branch. Accepts origin/<b>
+  norn run [<task-id>]    Run a split task's roles headless and merge each into the
+                          trunk when it exits (no id → the task this worktree is in)
+  norn tell <role> <msg>  Say one line to another strand of this task (one way, interrupts)
   norn review <pr#>       Check out a PR into a worktree + launch the agent to review it
   norn --clean            Open on the Clean tab
   norn settings           Open on the Settings tab

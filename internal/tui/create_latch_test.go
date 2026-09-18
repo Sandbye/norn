@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"github.com/sandbye/norn/internal/task"
 	"strings"
 	"testing"
 
@@ -96,4 +97,66 @@ func TestCreateErrorSurvivesNextKey(t *testing.T) {
 	if next.(App).err == nil {
 		t.Error("banner cleared by the next keystroke while the create was in flight")
 	}
+}
+
+// A task-seeded create must still offer the split. The roles picker is the only
+// field left when the repo has one base branch, so a create started from the
+// Tasks tab would otherwise confirm immediately and no task from the tracker
+// could ever be split across roles.
+func TestTaskSeededCreateOffersRoles(t *testing.T) {
+	m := newCreateModel([]string{"main"})
+	m.roles = []string{"integration", "logic"}
+	m.form = m.buildForm()
+
+	seeded := m.withTask(task.Task{ID: "71", Title: "headless roles"})
+	if seeded.confirmed {
+		t.Fatal("task-seeded create confirmed itself, so the roles picker never showed")
+	}
+	if seeded.baseBranch != "main" {
+		t.Fatalf("base = %q, want the only base branch", seeded.baseBranch)
+	}
+
+	// Without roles there is nothing left to ask, so the old shortcut stands.
+	plain := newCreateModel([]string{"main"})
+	plain.form = plain.buildForm()
+	if got := plain.withTask(task.Task{ID: "1", Title: "x"}); !got.confirmed {
+		t.Fatal("a create with no choices left should confirm immediately")
+	}
+}
+
+// A task is named by its number in conversation, so the picker has to find it
+// that way: the filter searched title and group only, and typing "1067" or
+// "#1067" matched nothing at all.
+func TestFilterTasksByID(t *testing.T) {
+	tasks := []task.Task{
+		{ID: "1067", Title: "workspace include globs match directories"},
+		{ID: "1075", Title: "unbundle cjs with css and same name files"},
+		{ID: "959", Title: "external CSS assets not inlined"},
+	}
+
+	for _, q := range []string{"1067", "#1067", " 1067 "} {
+		got := filterTasks(tasks, q)
+		if len(got) == 0 || got[0].ID != "1067" {
+			t.Fatalf("query %q gave %v, want 1067 first", q, ids(got))
+		}
+	}
+
+	// A prefix still ranks the right one first rather than whatever the fuzzy
+	// scorer liked in the titles.
+	if got := filterTasks(tasks, "107"); len(got) == 0 || got[0].ID != "1075" {
+		t.Fatalf("prefix query gave %v, want 1075 first", ids(got))
+	}
+
+	// Searching by words still works.
+	if got := filterTasks(tasks, "css"); len(got) == 0 {
+		t.Fatal("a word query stopped matching")
+	}
+}
+
+func ids(ts []task.Task) []string {
+	out := make([]string, len(ts))
+	for i, t := range ts {
+		out[i] = t.ID
+	}
+	return out
 }

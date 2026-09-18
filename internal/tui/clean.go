@@ -7,10 +7,15 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/state"
 )
 
 type cleanModel struct {
-	worktrees     []git.Worktree
+	worktrees []git.Worktree
+	// strands maps a worktree path to the task it belongs to, so Clean shows a
+	// split task as one thing with roles rather than as three unrelated rows
+	// with near-identical branch names.
+	strands       map[string]strandLabel
 	remoteChecked bool
 	cursor        int
 	selected      map[string]bool // keyed by worktree Path so filtering is safe
@@ -37,6 +42,41 @@ func newCleanModel() cleanModel {
 		selected: make(map[string]bool),
 		forced:   make(map[string]bool),
 	}
+}
+
+// strandLabel is what Clean needs to know about a strand: whose task it is,
+// what it plays in it, and whether it is the trunk the others land on.
+type strandLabel struct {
+	taskID    string
+	role      string
+	goal      string
+	integrate bool
+}
+
+// labelStrands reads the session store once, so every row can say whether it is
+// part of a task without a lookup per render.
+func labelStrands() map[string]strandLabel {
+	out := map[string]strandLabel{}
+	store, err := state.Load()
+	if err != nil {
+		return out
+	}
+	for _, sess := range store.Sessions {
+		if sess.TaskID == "" || sess.Role == "" {
+			continue
+		}
+		task := store.FindTask(sess.TaskID)
+		if task == nil {
+			continue
+		}
+		out[sess.Path] = strandLabel{
+			taskID:    sess.TaskID,
+			role:      sess.Role,
+			goal:      task.Goal,
+			integrate: sess.Branch == task.Trunk,
+		}
+	}
+	return out
 }
 
 // autoSelectDone pre-selects rows whose work is done — either remote-gone
@@ -75,11 +115,52 @@ func (m *cleanModel) focusOn(path string) bool {
 	return false
 }
 
+// sorted is oldest first, except that a task's strands stay together under
+// their trunk: removing half a split task by accident is the mistake this
+// ordering exists to prevent.
 func (m cleanModel) sorted() []git.Worktree {
 	wts := make([]git.Worktree, len(m.worktrees))
 	copy(wts, m.worktrees)
-	sort.Slice(wts, func(i, j int) bool {
+	sort.SliceStable(wts, func(i, j int) bool {
 		return wts[i].LastCommit.Before(wts[j].LastCommit)
+	})
+	if len(m.strands) == 0 {
+		return wts
+	}
+	// Each task takes the position of its earliest member, and inside it the
+	// trunk comes first.
+	order := map[string]int{}
+	for i, wt := range wts {
+		if st, ok := m.strands[wt.Path]; ok {
+			if _, seen := order[st.taskID]; !seen {
+				order[st.taskID] = i
+			}
+		}
+	}
+	key := func(wt git.Worktree) (int, int) {
+		st, ok := m.strands[wt.Path]
+		if !ok {
+			return -1, 0
+		}
+		rank := 1
+		if st.integrate {
+			rank = 0
+		}
+		return order[st.taskID], rank
+	}
+	sort.SliceStable(wts, func(i, j int) bool {
+		gi, ri := key(wts[i])
+		gj, rj := key(wts[j])
+		switch {
+		case gi < 0 && gj < 0:
+			return false // both standalone: keep the age order
+		case gi < 0 || gj < 0:
+			return false // standalone rows keep their place
+		case gi != gj:
+			return gi < gj
+		default:
+			return ri < rj
+		}
 	})
 	return wts
 }
@@ -298,6 +379,7 @@ func (m cleanModel) View() string {
 	// bar + help), so a long list never stretches the panel.
 	listRows := max(frameBodyRows(0)-7, 3)
 	lo, hi := scrollWindow(m.cursor, len(sorted), listRows)
+	lastTask := ""
 	for i := lo; i < hi; i++ {
 		wt := sorted[i]
 		cursor := "  "
@@ -328,9 +410,30 @@ func (m cleanModel) View() string {
 			remoteText = "active"
 		}
 
+		// A strand reads as its role under one task header: three rows whose
+		// branches differ only in the last segment are unreadable, and the role
+		// is the part you are choosing between.
+		name := wt.Branch
+		if st, ok := m.strands[wt.Path]; ok {
+			if st.taskID != lastTask {
+				label := st.goal
+				if label == "" {
+					label = st.taskID
+				}
+				b.WriteString(taskHeaderStyle.Render("◈ "+truncate(label, branchW+commitW)) + "\n")
+			}
+			lastTask = st.taskID
+			name = "  " + st.role
+			if st.integrate {
+				name += " (trunk)"
+			}
+		} else {
+			lastTask = ""
+		}
+
 		// Fit plain text to each column, THEN style, so alignment holds.
 		line := cursor + check + kind + " " +
-			branchStyle.Render(fitCell(wt.Branch, branchW)) + " " +
+			branchStyle.Render(fitCell(name, branchW)) + " " +
 			ageStyle.Render(fitCell(git.Age(wt.LastCommit), ageW)) + " " +
 			remoteStyle.Render(fitCell(remoteText, remoteW)) + " " +
 			commitMsgStyle.Render(fitCell(wt.CommitMsg, commitW))

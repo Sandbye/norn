@@ -23,6 +23,112 @@ import (
 //	    agent: claude
 //	    integrates: true
 
+// Shapes are named task shapes: an ordered list of declared role names, so a
+// kind of work you do repeatedly ("a feature", "a bug fix") is picked once at
+// create time rather than reassembled from roles every time.
+//
+//	shapes:
+//	  feature: [plan, tests, backend, frontend, integration]
+type Shapes map[string][]string
+
+// Shape returns the roles of a named shape.
+func (c Config) Shape(name string) ([]string, bool) {
+	roles, ok := c.Shapes[name]
+	return roles, ok
+}
+
+// ShapeNames lists the declared shapes, alphabetically, for a picker.
+func (c Config) ShapeNames() []string {
+	names := make([]string, 0, len(c.Shapes))
+	for name := range c.Shapes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// StartsAfter is the role a given role waits for, taking the planner into
+// account.
+//
+// A role's own `after:` wins. Otherwise the integrating role waits for the
+// planner when there is one: until the plan lands there is nothing to
+// integrate, and an integrator spawned early designs the fix itself, in
+// parallel with the planner doing the same thing.
+// StartsAfterIn is StartsAfter for a task that holds only `present` roles.
+//
+// A wait is only real when the role waited for is in the task. A shape can
+// legitimately omit one: `small: [logic, integration]` takes `logic` out of the
+// test-first chain it declares `after: tests` for. Reading the wait from the
+// config alone left every strand of that task waiting for a strand that was
+// never created, so nothing ever started.
+func (c Config) StartsAfterIn(role string, present map[string]bool) string {
+	after := c.StartsAfter(role)
+	switch {
+	case after == "":
+		return ""
+	case after == "*":
+		// The reviewer waits for the code strands, so with none in the task
+		// there is nothing to wait for.
+		for name := range present {
+			rc := c.Roles[name]
+			if name != role && !rc.Reviews && !rc.Integrates {
+				return "*"
+			}
+		}
+		return ""
+	case present[after]:
+		return after
+	default:
+		return ""
+	}
+}
+
+func (c Config) StartsAfter(role string) string {
+	rc, ok := c.Roles[role]
+	if !ok {
+		return ""
+	}
+	if rc.After != "" {
+		return rc.After
+	}
+	if planner, has := c.PlanningRole(); has && rc.Integrates && planner != role {
+		return planner
+	}
+	if rc.Reviews {
+		// Waits for every code strand, which no single name can express; the
+		// landing path starts it when the last one lands.
+		return "*"
+	}
+	return ""
+}
+
+// ReviewingRole returns the role that reviews the combined work, if declared.
+func (c Config) ReviewingRole() (string, bool) {
+	for _, name := range c.RoleNames() {
+		if c.Roles[name].Reviews {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// IntegratingRoleName is the name of the role that owns the trunk.
+func (c Config) IntegratingRoleName() (string, bool) {
+	name, _, ok := c.IntegratingRole()
+	return name, ok
+}
+
+// PlanningRole returns the role that decides the task's shape, if one is
+// declared. At most one: two planners would each write the same file.
+func (c Config) PlanningRole() (string, bool) {
+	for _, name := range c.RoleNames() {
+		if c.Roles[name].Plans {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 // Roles is the declared role map. It merges per field rather than per role, so
 // a personal config can mark one role integrating without restating which agent
 // serves it, the way every other config key layers.
@@ -36,7 +142,41 @@ type RoleConfig struct {
 	// Integrates marks the single role that merges the other roles' output.
 	// Exactly one role in the map carries it; Validate rejects zero or several.
 	Integrates bool `yaml:"integrates,omitempty" json:"integrates,omitempty"`
+
+	// After names a role this one waits for. It is not spawned at create; it
+	// starts when that role lands, so its branch forks from a trunk that
+	// already contains the other's work. Empty means it starts with the rest.
+	After string `yaml:"after,omitempty" json:"after,omitempty"`
+
+	// Plans marks a role that decides the shape of the rest of the task instead
+	// of writing code. It reads the task and writes `.norn/strands.yaml` naming
+	// the strands it wants; landing it is what creates them, so the fan-out is
+	// the agent's judgement and yours, never the agent's alone.
+	Plans bool `yaml:"plans,omitempty" json:"plans,omitempty"`
+
+	// TestFirst makes a planning role split every piece of work into a failing
+	// test strand and an implementation strand that waits for it. Without it
+	// the planner decides, and a planner that decides usually does not: on the
+	// first real task it wrote "no test strand, each owns its tests".
+	TestFirst bool `yaml:"test_first,omitempty" json:"test_first,omitempty"`
+
+	// Reviews marks a role that reads the combined trunk and reports, instead
+	// of writing product code. It starts once every code strand has landed,
+	// which is the first moment the whole change exists in one place.
+	Reviews bool `yaml:"reviews,omitempty" json:"reviews,omitempty"`
+
+	// Expect is what the repo's verify must report for this role's work to be
+	// allowed onto the trunk: "red" for a strand whose job is a failing test,
+	// "green" for one that has to leave the tree working. Empty gates nothing.
+	Expect string `yaml:"expect,omitempty" json:"expect,omitempty"`
 }
+
+// Expect values. Red is the half of test-first a machine can check: a test that
+// passes before the implementation exists proves nothing.
+const (
+	ExpectRed   = "red"
+	ExpectGreen = "green"
+)
 
 // UnmarshalYAML merges each block into the role already loaded from a broader
 // config file, keeping keys the narrower file left out.
@@ -77,7 +217,12 @@ func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 		Args       []string `yaml:"args"`
 		Model      string   `yaml:"model"`
 		Integrates bool     `yaml:"integrates"`
-	}{Args: r.Args, Model: r.Model, Integrates: r.Integrates}
+		After      string   `yaml:"after"`
+		Expect     string   `yaml:"expect"`
+		Plans      bool     `yaml:"plans"`
+		Reviews    bool     `yaml:"reviews"`
+		TestFirst  bool     `yaml:"test_first"`
+	}{Args: r.Args, Model: r.Model, Integrates: r.Integrates, After: r.After, Expect: r.Expect, Plans: r.Plans, Reviews: r.Reviews, TestFirst: r.TestFirst}
 	if err := node.Decode(&v); err != nil {
 		return err
 	}
@@ -94,6 +239,11 @@ func (r *RoleConfig) UnmarshalYAML(node *yaml.Node) error {
 	*r = RoleConfig{
 		AgentConfig: AgentConfig{Command: command, Args: v.Args, Model: v.Model},
 		Integrates:  v.Integrates,
+		After:       v.After,
+		Expect:      v.Expect,
+		Plans:       v.Plans,
+		Reviews:     v.Reviews,
+		TestFirst:   v.TestFirst,
 	}
 	return nil
 }
@@ -153,9 +303,24 @@ func (c Config) AgentFor(role string) AgentConfig {
 // worktree-add failure halfway through a create rather than as bad config.
 var roleNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
+// ReservedArgs are the flags norn sets itself when it runs a role unattended.
+// A role's `args:` may not repeat one: `--sandbox danger-full-access` would
+// silently widen a grant norn does not make configurable, and a second `--json`
+// or `--output-format` can make the event stream unparseable, which surfaces as
+// a role that failed for no visible reason.
+//
+// Listed here rather than in internal/headless because config cannot import it
+// (headless imports config). A test in that package asserts the list still
+// covers every flag it sets, so the two cannot drift apart silently.
+var ReservedArgs = []string{
+	"-p", "--output-format", "--verbose", "--permission-mode", "--append-system-prompt",
+	"--json", "--sandbox", "--approve-for-me", "-m", "--model",
+}
+
 // Validate reports config that parses but cannot be acted on: the split needs
-// one agent to merge the work and norn will not pick that agent for you, and a
-// role name has to survive being put in a branch.
+// one agent to merge the work and norn will not pick that agent for you, a role
+// name has to survive being put in a branch, and a role's args have to leave
+// norn's own flags alone.
 func (c Config) Validate() error {
 	if len(c.Roles) == 0 {
 		return nil
@@ -164,11 +329,57 @@ func (c Config) Validate() error {
 		if !roleNamePattern.MatchString(name) {
 			return fmt.Errorf("role %q: a role name becomes a branch segment, so use letters, digits, dot, dash or underscore", name)
 		}
+		role := c.Roles[name]
+		if role.After != "" {
+			if _, ok := c.Roles[role.After]; !ok {
+				return fmt.Errorf("role %q waits for %q, which this repo does not declare", name, role.After)
+			}
+			if role.After == name {
+				return fmt.Errorf("role %q waits for itself", name)
+			}
+		}
+		if role.TestFirst && !role.Plans {
+			return fmt.Errorf("role %q sets test_first without plans, and only a planning role decides how work splits", name)
+		}
+		if role.Reviews && (role.Integrates || role.Plans) {
+			return fmt.Errorf("role %q reviews as well as planning or integrating, and a reviewer has to be someone other than the author", name)
+		}
+		if role.Plans && role.Integrates {
+			return fmt.Errorf("role %q both plans and integrates, and those are opposite jobs: one decides the shape, the other closes it", name)
+		}
+		switch role.Expect {
+		case "", ExpectRed, ExpectGreen:
+		default:
+			return fmt.Errorf("role %q: expect is %q, and the only values are %q and %q", name, role.Expect, ExpectRed, ExpectGreen)
+		}
+		if flag := reservedArg(c.Roles[name].Args); flag != "" {
+			return fmt.Errorf("role %q: `args:` sets %s, which norn sets itself when it runs the role (use args for what norn does not model, like `-c` keys)", name, flag)
+		}
 	}
 	var integrating []string
 	for _, name := range c.RoleNames() {
 		if c.Roles[name].Integrates {
 			integrating = append(integrating, name)
+		}
+	}
+	var planners []string
+	for _, name := range c.RoleNames() {
+		if c.Roles[name].Plans {
+			planners = append(planners, name)
+		}
+	}
+	if len(planners) > 1 {
+		sort.Strings(planners)
+		return fmt.Errorf("roles %s each set `plans: true`, and they would write the same file over each other", strings.Join(planners, ", "))
+	}
+	for shape, roles := range c.Shapes {
+		if len(roles) == 0 {
+			return fmt.Errorf("shape %q lists no roles", shape)
+		}
+		for _, r := range roles {
+			if _, ok := c.Roles[r]; !ok {
+				return fmt.Errorf("shape %q names role %q, which this repo does not declare", shape, r)
+			}
 		}
 	}
 	switch len(integrating) {
@@ -180,6 +391,23 @@ func (c Config) Validate() error {
 		sort.Strings(integrating)
 		return fmt.Errorf("roles %s: each sets `integrates: true`, and only one role may", strings.Join(integrating, ", "))
 	}
+}
+
+// reservedArg returns the first argument that collides with a flag norn owns,
+// in both the `--flag value` and `--flag=value` spellings, or "" when none do.
+func reservedArg(args []string) string {
+	for _, a := range args {
+		name := a
+		if i := strings.IndexByte(a, '='); i > 0 {
+			name = a[:i]
+		}
+		for _, r := range ReservedArgs {
+			if name == r {
+				return r
+			}
+		}
+	}
+	return ""
 }
 
 func sortedNames(roles Roles) []string {

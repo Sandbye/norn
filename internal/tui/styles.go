@@ -200,6 +200,7 @@ func ThreadWord() string { return active.ThreadWord }
 func TreeWord() string   { return active.TreeWord }
 
 func buildStyles() {
+	initPaneStyles()
 	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(colorLavender).PaddingLeft(1)
 	subtitleStyle = lipgloss.NewStyle().Foreground(colorSubtext).PaddingLeft(1)
 	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(colorMauve).PaddingLeft(1).PaddingBottom(1)
@@ -222,4 +223,25 @@ func buildStyles() {
 	commentTagStyle = lipgloss.NewStyle().Foreground(colorPeach).Bold(true)
 	commentBodyStyle = lipgloss.NewStyle().Foreground(colorYellow)
 	boxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorSurface).Padding(0, 1)
+}
+
+// The strand pane's chrome: a filled bar above and below someone else's UI, so
+// a glance says norn rather than "a terminal".
+var (
+	paneBarStyle       lipgloss.Style
+	paneMarkStyle      lipgloss.Style
+	paneTitleStyle     lipgloss.Style
+	paneChipHereStyle  lipgloss.Style
+	paneChipNeedsStyle lipgloss.Style
+	paneArmedStyle     lipgloss.Style
+)
+
+// initPaneStyles binds the pane chrome to the active palette.
+func initPaneStyles() {
+	paneBarStyle = lipgloss.NewStyle().Background(colorSurface).Foreground(colorSubtext)
+	paneMarkStyle = lipgloss.NewStyle().Background(colorLavender).Foreground(colorBase).Bold(true)
+	paneTitleStyle = lipgloss.NewStyle().Background(colorSurface).Foreground(colorText).Bold(true)
+	paneChipHereStyle = lipgloss.NewStyle().Background(colorSurface).Foreground(colorLavender).Bold(true)
+	paneChipNeedsStyle = lipgloss.NewStyle().Background(colorSurface).Foreground(colorRed).Bold(true)
+	paneArmedStyle = lipgloss.NewStyle().Background(colorLavender).Foreground(colorBase).Bold(true)
 }

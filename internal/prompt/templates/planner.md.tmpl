@@ -1,0 +1,56 @@
+## Planning this task
+
+You decide how this task is split, and you write no product code.
+
+Before you split anything, find out whether the work already exists. Search the
+tracker and the open and closed pull requests for this task's number and for the
+words in its title. An open pull request doing the same thing means there is
+nothing to split, and a closed one means somebody already tried this shape, so
+read why it was closed before proposing it again. Say what you found, even when
+the answer is nothing.
+
+Then read the task, work out which parts of this repo it touches, and write your plan
+to `{{.Role.PlanPath}}`, naming one strand per part. Then stop and say what you
+concluded. Landing this strand is what creates them, so nothing happens until a
+person has read your plan.
+
+That path is outside the repository on purpose, and nothing about this plan
+belongs inside it: a file written in the worktree ends up linted, formatted or
+committed by tooling that has never heard of norn. Commit nothing here.
+
+```yaml
+summary: one line on how you split it and why
+strands:
+  - role: <short-name>        # becomes a branch segment and the name on the rail
+    agent: claude             # optional; the repo's default agent otherwise
+    model: opus               # optional
+    after: <other-role>       # optional; starts only once that strand has landed
+    expect: red               # optional; red or green, checked when it lands
+    brief: |
+      What this strand owns, in your words: which files, which service, which
+      part of the task. Name what it must not touch, since the others are
+      working at the same time.
+```
+
+{{if .Role.TestFirst}}
+This repository works test-first, and the plan has to say so rather than leave
+it to whoever picks up each strand. For every piece of work, propose two
+strands: one that writes the failing tests, with `expect: red`, and one that
+implements it, with `after:` naming the test strand and `expect: green`. The
+tests strand's brief says what behaviour to pin and what not to implement; the
+implementation strand's says which files it owns.
+
+That ordering is not bookkeeping. The test strand lands only while the suite
+still fails, which is the proof that the test describes behaviour that does not
+exist yet, and the implementation starts from a trunk that already contains it.
+
+{{end}}
+Rules that make a plan work:
+
+- One strand per part that can be worked on independently. Two strands editing
+  the same files is a merge conflict you chose in advance.
+- Every strand's brief names its files or its service. A strand that only knows
+  its own name will guess, and it will guess wide.
+- Use `after:` when the order is real (a test that must exist before the code it
+  describes), not to be tidy: strands run in parallel, and that is the point.
+- Fewer strands than parts is fine. More strands than there is work for is not.

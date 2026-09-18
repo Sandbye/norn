@@ -57,7 +57,21 @@ type TaskRef struct {
 // them. Only set when the repo declares roles and the create picked more than
 // one, so a lone worktree renders exactly the brief it always did.
 type RoleRef struct {
-	Name string
+	// Plans marks the role that decides the task's shape; its brief gains the
+	// plan file's format.
+	Plans bool
+	// Planned says the task has a planning role, so the integrating brief tells
+	// that role to wait rather than to start designing.
+	Planned bool
+	// PlanPath is where a planning role writes its plan: outside the repo, so
+	// the project's own tooling never sees it.
+	PlanPath string
+	// Reviews marks the role that reads the combined trunk and reports.
+	Reviews bool
+	// TestFirst requires a planning role to split each piece into a failing
+	// test strand and an implementation strand that waits for it.
+	TestFirst bool
+	Name      string
 	// Integrates marks the role that owns the trunk: the others merge into it
 	// and only it opens the PR.
 	Integrates bool
@@ -145,7 +159,38 @@ func Render(cfg config.Config, kind, hint, base, tmpl string, taskRef *TaskRef, 
 		Generated:    time.Now().Format("2006-01-02 15:04"),
 	}
 
-	return renderNamed(tmplName, data)
+	out, err := renderNamed(tmplName, data)
+	if err != nil {
+		return "", err
+	}
+	return withRole(out, data)
+}
+
+// withRole appends the role contract to a rendered brief.
+//
+// Appended rather than left to the template, because a template that omits it
+// turns a split into three worktrees working the same task: the role block is
+// what makes a strand a strand, and any template may be replaced by a user's
+// own. Non-split creates render nothing extra.
+func withRole(body string, data Data) (string, error) {
+	if data.Role == nil {
+		return body, nil
+	}
+	block, err := renderNamed("role.md.tmpl", data)
+	if err != nil {
+		return "", err
+	}
+	out := strings.TrimRight(body, "\n") + "\n\n" + strings.TrimSpace(block) + "\n"
+	if data.Role.Plans {
+		// A planning role needs the file format, not just its boundaries: what
+		// it produces is the fan-out norn carries out.
+		planner, err := renderNamed("planner.md.tmpl", data)
+		if err != nil {
+			return "", err
+		}
+		out += "\n" + strings.TrimSpace(planner) + "\n"
+	}
+	return out, nil
 }
 
 // RenderReview renders the review brief for a PR-checkout worktree (norn review

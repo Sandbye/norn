@@ -19,8 +19,11 @@ import (
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
 	"github.com/sandbye/norn/internal/notify"
+	"github.com/sandbye/norn/internal/plan"
 	"github.com/sandbye/norn/internal/prompt"
+	"github.com/sandbye/norn/internal/runlog"
 	"github.com/sandbye/norn/internal/state"
+	"github.com/sandbye/norn/internal/strand"
 )
 
 // Dashboard is a live view of all known worktree sessions across repos.
@@ -29,19 +32,55 @@ import (
 // in the background to learn PR state. State file is the source of truth
 // for which sessions exist; git worktree list reconciles dead sessions.
 type Dashboard struct {
-	cfg      config.Config
-	store    *state.Store
-	rows     []dashRow
-	cursor   int
-	width    int
-	height   int
-	err      error
-	quit     bool
-	result   Result
-	lastLoad time.Time
+	cfg    config.Config
+	store  *state.Store
+	rows   []dashRow
+	cursor int
+	width  int
+	height int
+	err    error
+	// notice is a one-line answer to a key that did nothing, so a no-op key
+	// does not read as a hang. Cleared by the next keypress.
+	notice string
+
+	// Run-log viewer: a headless role has no session to open, so this is the
+	// only way to see what it is doing. Read-only, and refreshed on the tick
+	// while a role is still writing to the file.
+	// pane is the live strand norn is attached to, if any. It takes every key
+	// but one while it is open.
+	pane paneState
+
+	// switcher is the go-to-strand picker, reachable from the rail and from
+	// inside a pane.
+	switcher switcherState
+
+	// showBoard is the task board: one screen answering what is done and what
+	// is outstanding, without reading three agent transcripts. boardCursor is
+	// the strand selected in it.
+	showBoard   bool
+	boardCursor int
+	// showPlan is the full plan of planRow, read before accepting it.
+	showPlan bool
+	planRow  dashRow
+	// planCursor is the strand the plan view is on; planExpand shows its brief.
+	planCursor int
+	planExpand bool
+	// boardTask pins the board to a task even when the rail's cursor is
+	// elsewhere, which is how norn reopens it after the diff viewer.
+	boardTask string
+
+	showLog   bool
+	logTask   string
+	logRole   string
+	logRow    dashRow // the role as it was when the viewer opened, for `i`
+	logEvents []runlog.Event
+	logErr    error
+	quit      bool
+	result    Result
+	lastLoad  time.Time
 
 	// scopeRepo: when non-empty, only sessions for this repo basename are shown.
-	// Set automatically when `work -d` runs inside a git repo. Press `a` to
+	// Set automatically when `norn -d` runs inside a git repo. Press `a` to
 	// clear and see all repos.
 	scopeRepo string
 
@@ -60,7 +99,10 @@ type Dashboard struct {
 
 	// Headless "summarize session" overlay (press `s`). Additive — does not
 	// affect any existing navigation/launch flow.
-	summarizing   bool
+	summarizing bool
+	// summaryCancel stops the headless run behind the spinner, since `s` sits
+	// next to `d` and `S` and a mistyped key must not cost a claude run.
+	summaryCancel context.CancelFunc
 	summary       string
 	summaryBranch string
 	summaryPath   string // worktree path, kept for `r` refresh
@@ -174,6 +216,10 @@ type dashRow struct {
 	Question      string            // what the agent last said, only when waiting (ephemeral)
 	TaskGoal      string            // owning task's goal, "" when standalone (ephemeral)
 	TaskTrunk     string            // owning task's trunk branch (ephemeral)
+	TaskBlocked   string            // why the owning task needs a person, "" when it does not (ephemeral)
+	Bell          bool              // the strand rang the terminal bell and nobody has looked (ephemeral)
+	Ahead         int               // commits this strand has that the trunk does not (ephemeral)
+	Plan          *plan.Plan        // the fan-out this strand proposes, when it is a planner (ephemeral)
 }
 
 type dashTickMsg time.Time
@@ -197,22 +243,26 @@ type prFetchedMsg struct {
 
 // summaryMsg carries the result of a headless "summarize session" run.
 type summaryMsg struct {
-	branch string
-	text   string
-	err    error
+	branch    string
+	text      string
+	err       error
+	cancelled bool
 }
 
 // summarizeCmd runs `claude -p` in the worktree to summarize recent work.
 // Read-only: only Read + git-read tools are allowed, so no prompts, no mutation.
-func summarizeCmd(dir, branch string) tea.Cmd {
+func summarizeCmd(ctx context.Context, dir, branch string) tea.Cmd {
 	return func() tea.Msg {
 		const prompt = "Summarize the work done on this branch in 3-6 terse bullet points: " +
 			"what changed and why. Base it on `git log` against the default branch and the diff. " +
 			"No preamble, just the bullets."
-		res, err := claude.Run(context.Background(), dir, prompt, claude.Options{
+		res, err := claude.Run(ctx, dir, prompt, claude.Options{
 			AllowedTools: []string{"Read", "Bash(git log *)", "Bash(git diff *)", "Bash(git status *)"},
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				return summaryMsg{branch: branch, cancelled: true}
+			}
 			return summaryMsg{branch: branch, err: err}
 		}
 		if res.IsError {
@@ -260,8 +310,22 @@ func (d Dashboard) Init() tea.Cmd {
 func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		if d.pane.open() {
+			d.width, d.height = msg.Width, msg.Height
+			cols, rows := d.paneSize()
+			_ = d.pane.term.Resize(cols, rows)
+		}
 		d.width = msg.Width
 		d.height = msg.Height
+
+	case tea.MouseMsg:
+		// The wheel belongs to whatever is under it. In a pane that is the
+		// agent's own program, which scrolls its own history far better than a
+		// copy of its screen could.
+		if d.pane.open() && (msg.Type == tea.MouseWheelUp || msg.Type == tea.MouseWheelDown) {
+			d.pane.term.Wheel(msg.Type == tea.MouseWheelUp, msg.X, max(msg.Y-1, 0))
+		}
+		return d, nil
 
 	case tea.KeyMsg:
 		s := msg.String()
@@ -274,12 +338,192 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.summary = ""
 				d.summaryCached = false
 				d.summarizing = true
-				return d, tea.Batch(summarizeCmd(d.summaryPath, d.summaryBranch), d.spinner.Tick)
+				ctx, cancel := context.WithCancel(context.Background())
+				d.summaryCancel = cancel
+				return d, tea.Batch(summarizeCmd(ctx, d.summaryPath, d.summaryBranch), d.spinner.Tick)
 			}
 			d.showSummary = false
 			d.summary = ""
 			d.summaryErr = nil
 			d.summaryCached = false
+			return d, nil
+		}
+
+		// The plan reader owns the keyboard: it is a thing to read, and L from
+		// here is the same accept as on the rail.
+		if d.showPlan {
+			strands := 0
+			if d.planRow.Plan != nil {
+				strands = len(d.planRow.Plan.Strands)
+			}
+			switch s {
+			case "esc", "q", "S":
+				d.showPlan, d.planExpand = false, false
+			case "j", "down":
+				if d.planCursor < strands-1 {
+					d.planCursor++
+				}
+			case "k", "up":
+				if d.planCursor > 0 {
+					d.planCursor--
+				}
+			case "enter", "right":
+				d.planExpand = !d.planExpand
+			case "e":
+				// $EDITOR already scrolls, searches and edits better than a
+				// popover can, and an edit there is what L then creates.
+				return d, editPlanCmd(d.planRow.TaskID)
+			case "L":
+				d.showPlan, d.planExpand = false, false
+				d.notice = "accepting " + d.planRow.Role + "…"
+				return d, landStrandCmd(d.cfg, d.planRow)
+			}
+			return d, nil
+		}
+
+		// The board owns the keyboard while it is open: it is a place to read
+		// and to jump from, so a stray key must not act on the rail behind it.
+		if d.showBoard {
+			rows := d.boardRows(d.visibleRows())
+			switch {
+			case s == "esc" || s == "b" || s == "q":
+				d.showBoard, d.boardTask = false, ""
+			case s == "down" || s == "j":
+				if d.boardCursor < len(rows)-1 {
+					d.boardCursor++
+				}
+			case s == "up" || s == "k":
+				if d.boardCursor > 0 {
+					d.boardCursor--
+				}
+			case s == "right" || s == "enter":
+				if row, ok := boardSelected(rows, d.boardCursor); ok {
+					d.showBoard = false
+					cols, paneRows := d.paneSize()
+					return d, tea.Batch(openPaneCmd(row.TaskID, row.Role, row.Branch, cols, paneRows), paneTick())
+				}
+			case s == "d":
+				// Review this strand's work before it lands. The diff view and
+				// its review sink already exist; this only points them at a
+				// strand and hands the result back to that strand's session.
+				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Branch != row.TaskTrunk {
+					d.showBoard, d.quit = false, true
+					d.result = Result{
+						Action: ResultReview, Path: row.Path,
+						Base: row.TaskTrunk, TaskID: row.TaskID, Role: row.Role,
+					}
+					return d, tea.Quit
+				}
+			case s == "S":
+				// The board is where a split task is judged, so the plan that
+				// made the split is readable from here too.
+				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Plan != nil {
+					d.showPlan, d.planRow, d.planCursor, d.planExpand = true, row, 0, false
+				}
+			case s == "L":
+				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Ahead > 0 {
+					d.showBoard = false
+					d.notice = "landing " + row.Role + "…"
+					return d, landStrandCmd(d.cfg, row)
+				}
+			}
+			return d, nil
+		}
+
+		// The picker is above everything, including a pane: it is how you get
+		// out of one and into another.
+		if d.switcher.active {
+			switch s {
+			case "esc":
+				d.switcher = switcherState{}
+				return d, nil
+			case "enter":
+				return d.enterSelected()
+			}
+			if d.switcher.handleKey(s) {
+				d.switcher.matched = switcherMatches(d.rows, d.switcher.query)
+				return d, nil
+			}
+			return d, nil
+		}
+
+		// An open pane owns the keyboard. Exactly one key is norn's, and
+		// everything else is encoded and handed to the agent untouched.
+		if d.pane.open() {
+			// Never trap: a pane whose attachment has ended lets any key out,
+			// since a pane that eats every key with nothing on the other end
+			// can only be escaped by killing the terminal.
+			if d.pane.dead() {
+				d.pane.close()
+				return d, d.loadCmd()
+			}
+			leader := d.cfg.PaneLeaderKey()
+			if d.pane.armed {
+				d.pane.armed = false
+				switch {
+				case paneKeyIs(s, paneKeysLeave):
+					d.pane.close()
+					return d, d.loadCmd()
+				case paneKeyIs(s, paneKeysNext), paneKeyIs(s, paneKeysPrev):
+					return d.enterSibling(paneKeyIs(s, paneKeysNext))
+				case s == "f":
+					d.openSwitcher()
+					return d, nil
+				case s == "b":
+					// The board for the task you are inside, which is the one
+					// the pane belongs to rather than whatever the rail's
+					// cursor happens to sit on.
+					taskID := d.pane.taskID
+					d.pane.close()
+					d.showBoard, d.boardCursor, d.boardTask = true, 0, taskID
+					return d, d.loadCmd()
+				case s == leader:
+					// Leader twice sends a literal one, so a key the agent
+					// binds never becomes unreachable.
+				default:
+					// Not one of norn's, so the key goes to the agent below.
+				}
+			} else if s == leader {
+				d.pane.armed = true
+				return d, nil
+			}
+			if b := encodeKey(msg); len(b) > 0 {
+				if err := d.pane.term.Write(b); err != nil {
+					d.pane.err = err
+				}
+			}
+			return d, nil
+		}
+
+		// Run-log viewer swallows keys the same way: `r` refreshes, anything
+		// else closes it.
+		if d.showLog {
+			switch s {
+			case "esc":
+				d.closeLog()
+				return d, nil
+			case "tab":
+				d.reply.grant = d.reply.grant.Next()
+				return d, nil
+			case "enter":
+				text := strings.TrimSpace(d.reply.text)
+				if text == "" {
+					return d, nil
+				}
+				if why := replyRefusal(d.logRow); why != "" {
+					d.reply.text, d.reply.sent = "", why
+					return d, nil
+				}
+				d.reply.text, d.reply.sent, d.reply.pending = "", "", text
+				return d, tea.Batch(
+					replyCmd(d.logRow.Path, d.logRow.Branch, text, d.reply.grant, replyLogFor(d.logRow)),
+					d.spinner.Tick,
+				)
+			}
+			// Everything else types, the way every agent CLI behaves: a chat
+			// pane that swallows a keystroke into an action is a pane you
+			// cannot write "r" in.
+			d.reply.handleKey(s)
 			return d, nil
 		}
 
@@ -309,11 +553,23 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Keep the sent text on screen: it is the only record of your own
 				// half of the exchange, since the pane only ever shows the agent's.
 				d.reply.pending, d.reply.sent = text, ""
-				return d, tea.Batch(replyCmd(path, branch, text, d.reply.grant), d.spinner.Tick)
+				return d, tea.Batch(replyCmd(path, branch, text, d.reply.grant, replyLogFor(d.reply.target)), d.spinner.Tick)
 			}
 			if d.reply.handleKey(s) {
 				return d, nil
 			}
+			return d, nil
+		}
+
+		// A summary runs in the background, so esc is what stops one started by
+		// a mistyped key rather than waiting for a run nobody wants.
+		if s == "esc" && d.summarizing && !d.filter.active {
+			if d.summaryCancel != nil {
+				d.summaryCancel()
+				d.summaryCancel = nil
+			}
+			d.summarizing = false
+			d.notice = "summary cancelled"
 			return d, nil
 		}
 
@@ -336,6 +592,7 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		vis := d.visibleRows()
 		switch s {
 		case "j", "down", "ctrl+n":
+			d.notice = ""
 			if d.cursor < len(vis)-1 {
 				d.cursor++
 			}
@@ -349,6 +606,112 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.cursor = len(vis) - 1
 		case "r":
 			return d, d.loadCmd()
+		case "right":
+			// A live strand is the thing itself; a finished one has only its
+			// log. Same key for both, because from the rail they are one idea:
+			// show me this strand.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.TaskID != "" && row.Role != "" && strand.Alive(row.TaskID, row.Role) {
+					cols, rows := d.paneSize()
+					d.notice = "attaching to " + row.Role + "…"
+					return d, tea.Batch(openPaneCmd(row.TaskID, row.Role, row.Branch, cols, rows), paneTick())
+				}
+			}
+			fallthrough
+		case "b":
+			// The task board. One screen for the whole task, because a split
+			// task's truth is otherwise spread across three transcripts.
+			if d.cursor < len(vis) && vis[d.cursor].TaskID != "" {
+				d.showBoard, d.boardCursor, d.boardTask = true, 0, vis[d.cursor].TaskID
+			} else {
+				d.notice = "no task here: this thread is not part of one"
+			}
+			return d, nil
+		case "f":
+			d.openSwitcher()
+			return d, nil
+		case "l":
+			// What a headless role is doing, and where you talk to it. Right
+			// arrow because the rail is a list and the conversation is what
+			// sits to the right of it. Only roles have one: an interactive
+			// thread is opened with `o` instead.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.TaskID == "" || row.Role == "" {
+					d.notice = "no run log: this thread is not a role in a split task"
+					return d, nil
+				}
+				d.showLog, d.logTask, d.logRole, d.logRow = true, row.TaskID, row.Role, row
+				d.logEvents, d.logErr = nil, nil
+				// The input is live from the moment it opens: this is a
+				// conversation with the role, not a file you happen to be
+				// shown. reply.active keeps the keystrokes here rather than
+				// letting the dashboard's own keys act on the row behind it.
+				d.reply.active, d.reply.text, d.reply.sent = true, "", ""
+				d.reply.path, d.reply.branch, d.reply.target = row.Path, row.Branch, row
+				d.reply.grant = d.cfg.ReplyGrant()
+				return d, loadRunLogCmd(row.TaskID, row.Role)
+			}
+		case "S":
+			// Read the whole plan, not the trimmed version in the detail pane.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.Plan == nil {
+					d.notice = planAbsence(row)
+					return d, nil
+				}
+				d.showPlan, d.planRow, d.planCursor, d.planExpand = true, row, 0, false
+				return d, nil
+			}
+		case "P":
+			// Approve the pull request. The last gate in the pipeline is a
+			// person reading the combined change, and an integrator that could
+			// open a PR on its own would make every earlier gate decorative.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.TaskID == "" {
+					d.notice = "not part of a task"
+					return d, nil
+				}
+				d.notice = "told the integrator the PR is approved"
+				return d, approvePRCmd(d.cfg, row.TaskID)
+			}
+		case "L":
+			// Land this strand on the trunk. Explicit, because with a live pane
+			// an exit also means "I quit to look at something", and a merge
+			// commit is not undone casually.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				switch {
+				case row.TaskID == "" || row.Role == "":
+					d.notice = "only a strand lands: this thread is not part of a task"
+				// A running strand can land: `L` is your decision, and what
+				// merges is what it committed. Refusing while it ran made a
+				// planning strand unlandable, since it stays alive waiting for
+				// you and its run state never leaves "running".
+				case row.Run == state.RunMerged:
+					d.notice = row.Role + " is already landed"
+				default:
+					d.notice = "landing " + row.Role + "…"
+					return d, landStrandCmd(d.cfg, row)
+				}
+				return d, nil
+			}
+		case "R":
+			// Start this task's headless roles. Detached, so the rail keeps
+			// rendering: the supervisor writes every transition to the store
+			// and the rows pick it up on the normal tick.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if row.TaskID == "" {
+					d.notice = "not part of a split task: make one with a role in the New tab"
+					return d, nil
+				}
+				d.notice = "starting " + taskLabel(row) + "…"
+				cols, rows := d.paneSize()
+				return d, startRoleRunCmd(d.cfg, row.TaskID, cols, rows)
+			}
 		case "a":
 			if d.scopeRepo != "" {
 				d.scopeRepo = ""
@@ -431,7 +794,9 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						d.readyBranch = ""
 					}
 					d.summarizing = true
-					return d, tea.Batch(summarizeCmd(row.Path, row.Branch), d.spinner.Tick)
+					ctx, cancel := context.WithCancel(context.Background())
+					d.summaryCancel = cancel
+					return d, tea.Batch(summarizeCmd(ctx, row.Path, row.Branch), d.spinner.Tick)
 				}
 			}
 		case "d":
@@ -443,10 +808,16 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case dashTickMsg:
-		return d, tea.Batch(
+		cmds := []tea.Cmd{
 			d.loadCmd(),
 			tea.Tick(5*time.Second, func(t time.Time) tea.Msg { return dashTickMsg(t) }),
-		)
+		}
+		if d.showLog {
+			// The agent is appending to the file as it works, so the viewer
+			// follows it rather than showing the moment it was opened.
+			cmds = append(cmds, loadRunLogCmd(d.logTask, d.logRole))
+		}
+		return d, tea.Batch(cmds...)
 
 	case markTickMsg:
 		if !active.Spin {
@@ -464,7 +835,12 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			d.reply.sent = "answered " + msg.branch + ": " + quoteOneLine(sent)
 		}
-		// The thread has moved: it was waiting, now it is working again.
+		// The thread has moved: it was waiting, now it is working again. With
+		// the conversation open, reload it too rather than waiting for the
+		// tick: the answer is already in the log by the time this arrives.
+		if d.showLog {
+			return d, tea.Batch(d.loadCmd(), loadRunLogCmd(d.logTask, d.logRole))
+		}
 		return d, d.loadCmd()
 
 	case dashLoadedMsg:
@@ -559,7 +935,79 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, cmd
 		}
 
+	case logLoadedMsg:
+		if msg.role == d.logRole {
+			d.logEvents, d.logErr = msg.events, msg.err
+		}
+
+	case paneOpenedMsg:
+		d.notice = ""
+		if msg.err != nil {
+			d.err = msg.err
+			return d, nil
+		}
+		d.pane = paneState{term: msg.term, taskID: msg.taskID, role: msg.role, branch: msg.branch}
+		return d, paneTick()
+
+	case paneTickMsg:
+		if !d.pane.open() {
+			return d, nil // the pane closed; let the tick lapse
+		}
+		// The agent exiting is not norn's cue to close the pane: tmux holds the
+		// dead pane, and its last screen is usually the thing you want to read.
+		return d, paneTick()
+
+	case planEditedMsg:
+		// The file is the plan's truth, so re-read it rather than keeping what
+		// was on screen before $EDITOR ran.
+		switch {
+		case msg.err != nil:
+			d.notice = "plan: " + msg.err.Error()
+		default:
+			d.planRow.Plan = msg.plan
+			d.planCursor = min(d.planCursor, max(len(msg.plan.Strands)-1, 0))
+			for i := range d.rows {
+				if d.rows[i].TaskID == msg.taskID && d.rows[i].Plan != nil {
+					d.rows[i].Plan = msg.plan
+				}
+			}
+		}
+		return d, nil
+
+	case landedMsg:
+		switch {
+		case msg.blocked:
+			d.notice = ""
+			d.err = fmt.Errorf("%s: %w", msg.role, msg.err)
+		case msg.err != nil:
+			d.notice = msg.role + ": " + msg.err.Error()
+		default:
+			d.notice = fmt.Sprintf("landed %s, %d commit(s) on the trunk", msg.role, msg.commits)
+			if len(msg.created) > 0 {
+				d.notice += " · created " + strings.Join(msg.created, ", ")
+			}
+			// Whatever was waiting for this role starts now, from a trunk that
+			// contains it.
+			cols, rows := d.paneSize()
+			return d, tea.Batch(d.loadCmd(), spawnWaitingCmd(d.cfg, msg.taskID, msg.role, cols, rows))
+		}
+		return d, d.loadCmd()
+
+	case runStartedMsg:
+		// A failed start is the only thing worth interrupting for. What the
+		// roles do next arrives through the store, on the tick.
+		d.err = msg.err
+		if msg.err == nil {
+			d.notice = "strands running · → enters one"
+			return d, d.loadCmd()
+		}
+		d.notice = ""
+
 	case summaryMsg:
+		if msg.cancelled {
+			d.summarizing = false
+			return d, nil
+		}
 		// Non-modal: finishing does NOT pop the overlay. Cache it and flag the
 		// row as ready; the user opens it with `s` when they want it.
 		d.summarizing = false
@@ -574,6 +1022,62 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return d, nil
+}
+
+// renderRunLog shows a headless role's own account of itself: one line per
+// thing it said or did, newest at the bottom, the way you would watch a session
+// you were sitting in.
+func (d Dashboard) renderRunLog() string {
+	title := headerStyle.Render("Run log: " + d.logRole)
+	body := dimStyle.Render("nothing yet — the role has not written to its log")
+	switch {
+	case d.logErr != nil:
+		body = errorStyle.Render("read log: " + d.logErr.Error())
+	case len(d.logEvents) > 0:
+		rows := max(d.height-8, 6)
+		events := d.logEvents
+		if len(events) > rows {
+			events = events[len(events)-rows:]
+		}
+		w := max(d.width-8, 30)
+		lines := make([]string, 0, len(events))
+		for _, ev := range events {
+			lines = append(lines, runLogLine(ev, w))
+		}
+		body = strings.Join(lines, "\n")
+	}
+	// The exchange in progress, then the prompt. Same shape as the agent CLIs:
+	// what has happened scrolls above, you type at the bottom.
+	var foot string
+	switch {
+	case d.reply.pending != "":
+		foot = d.spinner.View() + dimStyle.Render(" ") + quoteOneLine(d.reply.pending)
+	case d.reply.sent != "":
+		foot = dimStyle.Render(truncate(d.reply.sent, max(d.width-8, 20)))
+	}
+	prompt := cursorStyle.Render("▸ ") + d.reply.text + cursorStyle.Render("▏") +
+		dimStyle.Render("   ["+d.reply.grant.Label()+"]")
+
+	out := title + "\n\n" + body
+	if foot != "" {
+		out += "\n\n" + foot
+	}
+	return out + "\n\n" + prompt + "\n" +
+		dimStyle.Render("⏎ send · tab grant · esc back · follows the run · full JSONL: "+roleLogPath(d.logTask, d.logRole))
+}
+
+// runLogLine styles one event by kind: what it said, what it ran, how it ended.
+func runLogLine(ev runlog.Event, w int) string {
+	switch ev.Kind {
+	case runlog.KindTool:
+		return dimStyle.Render("  ▸ ") + branchStyle.Render(truncate(ev.Text, w-4))
+	case runlog.KindResult:
+		return activeStyle.Render("  ● " + truncate(ev.Text, w-4))
+	case runlog.KindNote:
+		return dimStyle.Render("  · " + truncate(ev.Text, w-4))
+	default:
+		return "  " + truncate(ev.Text, w-2)
+	}
 }
 
 func (d Dashboard) View() string {
@@ -594,6 +1098,26 @@ func (d Dashboard) View() string {
 			body = renderMarkdown(d.summary, d.width)
 		}
 		return fmt.Sprintf("%s\n\n%s\n\n%s", title, body, dimStyle.Render("r refresh · any key to dismiss"))
+	}
+
+	if d.switcher.active {
+		return d.renderSwitcher()
+	}
+
+	if d.showPlan {
+		return d.renderPlanView()
+	}
+
+	if d.showBoard {
+		return d.renderBoard(d.visibleRows())
+	}
+
+	if d.pane.open() {
+		return d.renderPane()
+	}
+
+	if d.showLog {
+		return d.renderRunLog()
 	}
 
 	header := d.renderHeader()
@@ -619,7 +1143,7 @@ func (d Dashboard) View() string {
 			avail = inner - 6
 		}
 	}
-	sidebarW := max(min(avail/3, 40), 24) // ~a third, balanced, but bounded
+	sidebarW := max(min(avail/3, 56), 24) // ~a third, balanced, but bounded
 	if avail < 72 {                       // narrow panel: split in half, keep detail usable
 		sidebarW = max(avail/2, 16)
 	}
@@ -664,6 +1188,10 @@ func (d Dashboard) View() string {
 		body += "\n\n" + dimStyle.Render(truncate(d.reply.sent, max(avail-2, 20)))
 	}
 
+	if d.notice != "" {
+		body += "\n\n" + dimStyle.Render(truncate(d.notice, max(avail-2, 20)))
+	}
+
 	// Filter line above the help.
 	if d.filter.active || d.filter.query != "" {
 		fl := cursorStyle.Render("/") + d.filter.query
@@ -695,7 +1223,7 @@ func (d Dashboard) renderHeader() string {
 	ident := dimStyle.Render(fmt.Sprintf("%s · scope: %s · %d live", ThreadWord(), scope, len(d.rows)))
 	switch {
 	case d.summarizing:
-		ident += "\n" + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"…")
+		ident += "\n" + d.spinner.View() + dimStyle.Render(" summarizing "+d.summaryBranch+"… esc stops it")
 	case d.summaryErr != nil && d.readyBranch != "":
 		ident += "\n" + errorStyle.Render("✗ summary failed: "+d.readyBranch+" (s retries)")
 	case d.readyBranch != "":
@@ -731,11 +1259,20 @@ var groupLabels = map[int]string{
 // threadGroup buckets a row by its live agent state. idle and unknown share a
 // bucket: both mean "nothing is happening here", and splitting them would put a
 // header above a single row for no gain.
+//
+// A headless role is bucketed by its run state instead, because live agent
+// state is read from a claude transcript and a role served by another agent has
+// none: without this, a failed codex role would sit in QUIET.
 func threadGroup(r dashRow) int {
 	switch {
-	case needsUser(r.AgentState):
+	case r.TaskBlocked != "" || r.Run == state.RunFailed:
 		return groupNeedsYou
-	case r.AgentState == claude.StateWorking:
+	// Waiting beats running. A strand whose process is alive but whose agent is
+	// asking a question is the definition of needing you, and grouping it by
+	// the process left it reading as WORKING until it timed out.
+	case needsUser(r.AgentState) || r.Bell:
+		return groupNeedsYou
+	case r.Run == state.RunRunning, r.AgentState == claude.StateWorking:
 		return groupWorking
 	default:
 		return groupQuiet
@@ -861,7 +1398,10 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		indent := ""
 		if r.TaskID != "" {
 			if r.TaskID != lastTask {
-				label := taskLabel(r)
+				// The header carries the task's progress, because "how far is
+				// this" was otherwise only answerable from the board or from
+				// git, and it is the question you ask every time you look.
+				label := taskLabel(r) + taskProgress(d.rows, r.TaskID)
 				all = append(all, sidebarLine{taskHeaderStyle.Render(fitCell("◈ "+label, w)), -1})
 			}
 			indent = "  "
@@ -869,7 +1409,7 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		lastTask = r.TaskID
 		name := r.Branch
 		if r.Role != "" {
-			name = r.Role // under a task header the role is the distinguishing part
+			name = r.Role + runMark(r) // under a task header the role is the distinguishing part
 		}
 		nameW := max(branchW-len(indent), 4)
 		age := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt))
@@ -914,16 +1454,45 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 }
 
 // taskLabel names a task cluster in the rail: its goal, falling back to the
-// trunk branch when the task carries no goal yet.
+// trunk branch when the task carries no goal yet. A blocked task says so in the
+// header, since the conflict sits in the trunk worktree and not in the role row
+// whose merge hit it.
 func taskLabel(r dashRow) string {
+	label := "task"
 	switch {
 	case r.TaskGoal != "":
-		return r.TaskGoal
+		label = r.TaskGoal
 	case r.TaskTrunk != "":
-		return r.TaskTrunk
-	default:
-		return "task"
+		label = r.TaskTrunk
 	}
+	if r.TaskBlocked != "" {
+		label += " · blocked"
+	}
+	return label
+}
+
+// runMark suffixes a role row with what its headless run did, for the states
+// worth a glance from the rail: failed and merged. Running needs no mark, since
+// the group header already says WORKING.
+func runMark(r dashRow) string {
+	switch r.Run {
+	case state.RunFailed:
+		return " ✗"
+	case state.RunMerged:
+		return " ✓"
+	case state.RunDone:
+		return " ⤒" // finished and waiting to be landed
+	}
+	if r.Bell {
+		return " !"
+	}
+	if r.Ahead > 0 {
+		// Committed work the trunk does not have. A live strand that has
+		// finished says so only inside its own pane, and "still running" is
+		// true of the process while being wrong about the work.
+		return " ⤒"
+	}
+	return ""
 }
 
 // compactAge is shortAge trimmed for the sidebar's narrow age column ("now"
@@ -1000,6 +1569,32 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 			}
 		}
 	}
+	// The plan goes above the state rows, not below them: it is what you are
+	// deciding on, and the detail pane is a fixed box that clips whatever sits
+	// at the bottom.
+	if r.Plan != nil {
+		b.WriteString(subtitleStyle.Render("proposes") + "\n")
+		if r.Plan.Summary != "" {
+			b.WriteString(dimStyle.Render("  "+truncate(r.Plan.Summary, max(w-4, 20))) + "\n")
+		}
+		const shown = 4 // the pane has no scrollback; the file holds the rest
+		for i, st := range r.Plan.Strands {
+			if i == shown {
+				b.WriteString(dimStyle.Render(fmt.Sprintf("  +%d more", len(r.Plan.Strands)-shown)) + "\n")
+				break
+			}
+			line := "  " + branchStyle.Render(st.Role)
+			if st.After != "" {
+				line += dimStyle.Render(" after " + st.After)
+			}
+			if st.Expect != "" {
+				line += dimStyle.Render(" · " + st.Expect)
+			}
+			b.WriteString(line + dimStyle.Render("  "+truncate(oneLine(st.Brief), max(w-len(st.Role)-8, 20))) + "\n")
+		}
+		b.WriteString(activeStyle.Render("  S reads it · L creates these") + "\n\n")
+	}
+
 	row("state", glyphStyle(r.AgentState).Render(stateLabel(r.AgentState)))
 	wrapRow("blocked", r.Blocked, dirtyStyle)
 	row("pr", prDetail(r))
@@ -1007,6 +1602,8 @@ func (d Dashboard) renderDetail(r dashRow, w int) string {
 	if r.TaskID != "" {
 		row("task", taskLabel(r))
 		row("role", r.Role)
+		row("run", r.Run)
+		wrapRow("task blocked", r.TaskBlocked, dirtyStyle)
 	}
 	row("kind", r.Kind)
 	row("cu", r.ClickUpID)
@@ -1113,7 +1710,7 @@ func (d Dashboard) dashKeyHelp() string {
 		return dimStyle.Render("type your answer · ⏎ send · ⇥ permission · ctrl+u clear · esc cancel")
 	}
 	// Concise essentials; the full keymap lives in the global `?` help overlay.
-	return dimStyle.Render("⏎ cd · o open · i answer · m main · ? help")
+	return dimStyle.Render("⏎ cd · → enter · R spawn · L land · P pr · b board · ? help")
 }
 
 func openPRInBrowser(branch, repoDir string) {
@@ -1188,6 +1785,59 @@ func worktreeState(wtPath string) stateFile {
 
 // loadCmd reloads the store and reconciles with live worktree list.
 // Fast path only — PR data is fetched async via fetchPRCmd after this returns.
+// planProposal is the plan this strand is still proposing: nil unless the
+// strand is its repo's planning role, and nil once every strand it names
+// exists. The planner is named by the strand's own repo, not by the repo norn
+// was started in, or a plan would only ever show in one project.
+func planProposal(store *state.Store, planner string, sess state.Session) *plan.Plan {
+	if planner == "" || sess.Role != planner {
+		return nil
+	}
+	p, err := plan.Read(sess.TaskID)
+	if err != nil {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, other := range store.Sessions {
+		if other.TaskID == sess.TaskID {
+			have[other.Role] = true
+		}
+	}
+	for _, st := range p.Strands {
+		if !have[st.Role] {
+			return p
+		}
+	}
+	return nil
+}
+
+// planAbsence says why there is nothing to read: a plan that was carried out
+// is a different answer from a strand that never writes one.
+func planAbsence(row dashRow) string {
+	if _, err := plan.Read(row.TaskID); err == nil {
+		return "this task's plan is already carried out: its strands exist"
+	}
+	return "no plan here: only a planning strand writes one"
+}
+
+// plannerCache resolves each worktree's planning role once per load: the role
+// is declared in that repo's own config, and the dashboard spans repos.
+type plannerCache map[string]string
+
+func (c plannerCache) of(path string) string {
+	if name, ok := c[path]; ok {
+		return name
+	}
+	name := ""
+	if cfg, err := config.Load(path); err == nil {
+		if planner, ok := cfg.PlanningRole(); ok {
+			name = planner
+		}
+	}
+	c[path] = name
+	return name
+}
+
 func (d Dashboard) loadCmd() tea.Cmd {
 	scope := d.scopeRepo
 	cfg := d.cfg
@@ -1251,6 +1901,7 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			}
 		}
 
+		planners := plannerCache{}
 		rows := make([]dashRow, 0, len(store.Sessions))
 		for _, sess := range store.Sessions {
 			if scope != "" && sess.Repo != scope {
@@ -1258,7 +1909,19 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			}
 			row := dashRow{Session: sess, WorktreeAlive: true}
 			if task := store.FindTask(sess.TaskID); task != nil {
-				row.TaskGoal, row.TaskTrunk = task.Goal, task.Trunk
+				row.TaskGoal, row.TaskTrunk, row.TaskBlocked = task.Goal, task.Trunk, task.Blocked
+			}
+			if sess.Role != "" && sess.TaskID != "" {
+				row.Bell = strand.Rang(sess.TaskID, sess.Role)
+				// The store says what norn last wrote; tmux says what is true.
+				// Without this a strand that finished while you were elsewhere
+				// still reads as running, and nothing offers to land it.
+				row.Run = reconcileRun(sess, &row)
+				row.Ahead = strandAhead(store, sess)
+				// A plan belongs to the strand that wrote it, and only until it
+				// is carried out. Hanging it on every strand of the task asked
+				// each of them to create strands that already exist.
+				row.Plan = planProposal(store, planners.of(sess.Path), sess)
 			}
 			if git.CurrentBranch(sess.Path) == "" {
 				// Branch deleted under the worktree: label the sha so the row
@@ -1432,4 +2095,98 @@ func max0(n int) int {
 		return 0
 	}
 	return n
+}
+
+// closeLog leaves the conversation view and disarms its input.
+//
+// Both together, always: the input is armed while the view is open, and an exit
+// that cleared only the view left every keystroke on the rail going into a
+// reply nobody could see, so `enter` sent a message instead of cd'ing.
+func (d *Dashboard) closeLog() {
+	d.showLog = false
+	d.logEvents, d.logErr = nil, nil
+	d.reply.active, d.reply.text = false, ""
+}
+
+// reconcileRun answers what a strand is actually doing, from tmux rather than
+// from what norn last wrote. A store value is a memory; the session is the fact.
+func reconcileRun(sess state.Session, row *dashRow) string {
+	st, err := strand.Read(sess.TaskID, sess.Role)
+	switch {
+	case err != nil:
+		// No session: either it was never spawned, or it is finished and
+		// already landed. Neither is "running".
+		if sess.Run == state.RunRunning {
+			setStrandRun(sess.Path, "")
+			return ""
+		}
+		return sess.Run
+	case st.Running:
+		return state.RunRunning
+	case st.ExitCode == 0:
+		if sess.Run == state.RunMerged {
+			return state.RunMerged
+		}
+		setStrandRun(sess.Path, state.RunDone)
+		return state.RunDone
+	default:
+		setStrandRun(sess.Path, state.RunFailed)
+		return state.RunFailed
+	}
+}
+
+// setStrandRun persists a reconciled state, so the next reader agrees without
+// asking tmux again.
+func setStrandRun(path, run string) {
+	_, _ = state.Mutate(func(s *state.Store) bool { return s.SetRun(path, run, 0) })
+}
+
+// strandAhead is how many commits a strand has that the trunk does not.
+//
+// Asked of git rather than of the store, because the integrating strand merges
+// branches itself, and a board that only believed norn's own landing key would
+// keep reporting work as outstanding after it had already shipped. Zero means
+// nothing is waiting, whether it landed or was never written.
+func strandAhead(store *state.Store, sess state.Session) int {
+	task := store.FindTask(sess.TaskID)
+	trunk := store.FindTaskTrunk(sess.TaskID)
+	if task == nil || trunk == nil || sess.Branch == task.Trunk {
+		return 0
+	}
+	n, err := git.CommitsAhead(trunk.Path, task.Trunk, sess.Branch)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// oneLine flattens a plan's brief for a single detail row: the full text lives
+// in the file, and the pane is answering "what is this strand for".
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// taskProgress summarises a task in a few characters: how many strands have
+// landed, and how many still hold work the trunk does not have.
+func taskProgress(rows []dashRow, taskID string) string {
+	var strands, landed, waiting int
+	for _, r := range rows {
+		if r.TaskID != taskID || r.Role == "" || r.Branch == r.TaskTrunk {
+			continue // the trunk is what they land on, not one of them
+		}
+		strands++
+		switch {
+		case r.Ahead > 0:
+			waiting++
+		case r.Run == state.RunMerged || r.Run == state.RunDone:
+			landed++
+		}
+	}
+	if strands == 0 {
+		return ""
+	}
+	if waiting > 0 {
+		return fmt.Sprintf(" · %d to land", waiting)
+	}
+	return fmt.Sprintf(" · %d/%d landed", landed, strands)
 }

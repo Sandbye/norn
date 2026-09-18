@@ -86,6 +86,25 @@ type Config struct {
 	// Theme selects the TUI color palette: "nord" (default) or "frog".
 	Theme string `yaml:"theme,omitempty" json:"theme,omitempty"`
 
+	// Effort is the default reasoning effort per model, for agents that take
+	// one (claude's --effort: low, medium, high, xhigh, max). Keyed by the
+	// model as you write it elsewhere in this config ("opus", "sonnet", or a
+	// full id), with "default" as the fallback for a session that names no
+	// model.
+	//
+	//	effort:
+	//	  opus: xhigh
+	//	  default: high
+	Effort map[string]string `yaml:"effort,omitempty" json:"effort,omitempty"`
+
+	// Shapes are named task shapes, each an ordered list of declared roles.
+	Shapes Shapes `yaml:"shapes,omitempty" json:"shapes,omitempty"`
+
+	// PaneLeader is the prefix that makes the next key norn's inside a strand's
+	// pane ("ctrl+a" by default). `ctrl+b` is not a candidate: a pane is a real
+	// tmux client, so that one is already tmux's.
+	PaneLeader string `yaml:"pane_leader,omitempty" json:"pane_leader,omitempty"`
+
 	// Template names the default prompt template for new task worktrees, by
 	// basename (e.g. `task`, or a custom one dropped in the user templates dir).
 	// Empty means the built-in `task` template. Overridable per-create with
@@ -112,7 +131,7 @@ type Config struct {
 	BranchFormat string `yaml:"branch_format,omitempty" json:"branch_format,omitempty"`
 
 	// HotfixTarget is the PR target for branches whose name starts with
-	// HotfixPrefix (default "hotfix/"). When set, /open-pr and `work diff`
+	// HotfixPrefix (default "hotfix/"). When set, /open-pr and `norn diff`
 	// route hotfix branches to this branch instead of PRBase.
 	HotfixTarget string `yaml:"hotfix_target,omitempty" json:"hotfix_target,omitempty"`
 
@@ -137,7 +156,7 @@ type Config struct {
 	// Docs: named pointers at canonical team / personal documentation. Skills
 	// read these by key (e.g. `docs.pr_guidelines`) instead of baking rules in.
 	// Paths can be absolute, ~-prefixed, or repo-relative.
-	// `work --refresh-docs` pulls every git repo containing one of these paths.
+	// `norn --refresh-docs` pulls every git repo containing one of these paths.
 	Docs map[string]string `yaml:"docs,omitempty" json:"docs,omitempty"`
 
 	// DoneWhen: shell commands that constitute "actually done" beyond /precheck.
@@ -161,6 +180,26 @@ type AgentConfig struct {
 	// empty leaves the agent's own default. The New tab can override it per
 	// session. Non-claude agents pass model via Args instead.
 	Model string `yaml:"model,omitempty" json:"model,omitempty"`
+}
+
+// EffortFor is the effort level configured for a model, or "" when none is.
+// A model with no entry of its own falls back to the "default" key, so one line
+// covers every session and a specific model can still override it.
+func (c Config) EffortFor(model string) string {
+	if e, ok := c.Effort[model]; ok && model != "" {
+		return e
+	}
+	return c.Effort["default"]
+}
+
+// PaneLeaderKey is the prefix that makes the next key norn's while a strand's
+// pane has the keyboard. Configurable because it has to miss whatever the
+// agent inside uses, and that differs per agent and per person.
+func (c Config) PaneLeaderKey() string {
+	if c.PaneLeader != "" {
+		return c.PaneLeader
+	}
+	return "ctrl+a"
 }
 
 type User struct {

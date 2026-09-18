@@ -13,10 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sandbye/norn/internal/config"
 	"github.com/sandbye/norn/internal/git"
+	"github.com/sandbye/norn/internal/plan"
 	"github.com/sandbye/norn/internal/prompt"
 	"github.com/sandbye/norn/internal/state"
 )
@@ -132,6 +134,11 @@ func Create(cfg config.Config, repoRoot string, req Request) (Result, error) {
 	res := Result{Threads: make([]Thread, 0, len(threads))}
 	split := len(threads) > 1
 	trunkBranch := threads[0].Branch
+	// Minted before the worktrees exist, because a planning role's brief has to
+	// name the task's plan path and that path is keyed by this id.
+	if split {
+		res.TaskID = state.NewTaskID()
+	}
 
 	// Unwind only what this call created: CreateWorktreeFrom reports a reused
 	// branch or worktree as neither, and removing one of those would delete a
@@ -150,7 +157,9 @@ func Create(cfg config.Config, repoRoot string, req Request) (Result, error) {
 		if split && !t.Integrates {
 			startRef, remote = trunkBranch, false
 		}
-		out, err := git.CreateWorktreeFrom(repoRoot, cfg.WorktreeDir, t.Branch, startRef, remote)
+		// The trunk is pushed because it is what a PR and `norn diff` look at;
+		// a strand is not, because nothing off this machine needs it.
+		out, err := git.CreateWorktreeFrom(repoRoot, cfg.WorktreeDir, t.Branch, startRef, remote, !split || t.Integrates)
 		if err != nil {
 			unwind()
 			return Result{}, fmt.Errorf("%s: %w", t.Branch, err)
@@ -162,15 +171,12 @@ func Create(cfg config.Config, repoRoot string, req Request) (Result, error) {
 		if err := git.SymlinkEnvFiles(repoRoot, t.Path); err != nil {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%s: env symlinks incomplete: %v", t.Branch, err))
 		}
-		if err := writeBrief(cfg, req, t, threads, trunkBranch); err != nil {
+		if err := writeBrief(cfg, req, t, threads, trunkBranch, res.TaskID); err != nil {
 			unwind()
 			return Result{}, err
 		}
 	}
 
-	if split {
-		res.TaskID = state.NewTaskID()
-	}
 	if err := record(repoRoot, req, res); err != nil {
 		unwind()
 		return Result{}, err
@@ -182,12 +188,19 @@ func Create(cfg config.Config, repoRoot string, req Request) (Result, error) {
 // it is fatal to the create rather than a warning: the brief is what the agent
 // reads on arrival, so launching without one hides the failure behind a session
 // that then invents its own scope.
-func writeBrief(cfg config.Config, req Request, t Thread, threads []Thread, trunkBranch string) error {
+func writeBrief(cfg config.Config, req Request, t Thread, threads []Thread, trunkBranch, taskID string) error {
 	var role *prompt.RoleRef
 	if t.Role != "" {
+		rc, _ := cfg.Role(t.Role)
+		_, planned := cfg.PlanningRole()
 		role = &prompt.RoleRef{
 			Name:       t.Role,
 			Integrates: t.Integrates,
+			Plans:      rc.Plans,
+			Reviews:    rc.Reviews,
+			TestFirst:  rc.TestFirst,
+			Planned:    planned,
+			PlanPath:   plan.Path(taskID),
 			Trunk:      trunkBranch,
 			Siblings:   siblings(threads, t.Role),
 		}
@@ -262,4 +275,62 @@ func record(repoRoot string, req Request, res Result) error {
 		return true
 	})
 	return err
+}
+
+// AddStrand creates one more worktree in an existing task, off its trunk.
+//
+// Tasks are not fixed at create any more: a planning strand decides how many
+// services a task touches, and the strands it asks for are made here when you
+// land that plan. Brief is the planner's own words about what this strand owns,
+// appended to the generated brief, since "which files are mine" is the thing a
+// template cannot know.
+func AddStrand(cfg config.Config, repoRoot string, task state.Task, role, brief string) (Thread, error) {
+	if role == "" {
+		return Thread{}, fmt.Errorf("a strand needs a role")
+	}
+	branch := strings.TrimSuffix(task.Trunk, "/"+trunkLeaf) + "/" + role
+	out, err := git.CreateWorktreeFrom(repoRoot, cfg.WorktreeDir, branch, task.Trunk, false, false)
+	if err != nil {
+		return Thread{}, fmt.Errorf("%s: %w", branch, err)
+	}
+	t := Thread{Role: role, Branch: branch, Path: out.Path}
+
+	if err := git.SymlinkEnvFiles(repoRoot, t.Path); err != nil {
+		// Not fatal: the strand can work, it just lacks the env files, and
+		// unwinding a worktree over that would lose more than it saves.
+		_ = err
+	}
+	if err := writeStrandBrief(cfg, task, t, brief); err != nil {
+		git.DiscardNewWorktree(repoRoot, out, branch)
+		return Thread{}, err
+	}
+
+	repo := git.OriginRepoName(repoRoot)
+	now := time.Now()
+	if _, err := state.Mutate(func(store *state.Store) bool {
+		store.UpsertByPath(state.Session{
+			ID: state.MakeID(repo, branch), Repo: repo, Branch: branch, Kind: "task",
+			Path: t.Path, ClickUpID: git.ClickUpID(branch), Status: state.StatusActive,
+			StartedAt: now, LastActivityAt: now, TaskID: task.ID, Role: role,
+		})
+		return true
+	}); err != nil {
+		git.DiscardNewWorktree(repoRoot, out, branch)
+		return Thread{}, err
+	}
+	return t, nil
+}
+
+// writeStrandBrief renders the worktree brief for a planned strand and appends
+// what the planner said it owns.
+func writeStrandBrief(cfg config.Config, task state.Task, t Thread, brief string) error {
+	role := &prompt.RoleRef{Name: t.Role, Trunk: task.Trunk}
+	text, err := prompt.Render(cfg, "task", task.Goal, task.Trunk, prompt.Resolve(cfg, "task", ""), nil, role)
+	if err != nil {
+		return fmt.Errorf("render brief for %s: %w", t.Branch, err)
+	}
+	if s := strings.TrimSpace(brief); s != "" {
+		text = strings.TrimRight(text, "\n") + "\n\n## What this strand owns\n\n" + s + "\n"
+	}
+	return os.WriteFile(filepath.Join(t.Path, ".worktree.md"), []byte(text), 0o644)
 }
