@@ -92,6 +92,19 @@ func hasLanded(store *state.Store, taskID, role string) bool {
 	return false
 }
 
+// whyStuck turns a fast-forward failure into something worth reading on a
+// status line: what the strand is holding, not what git printed.
+func whyStuck(err error) string {
+	switch {
+	case errors.Is(err, git.ErrWorktreeDirty):
+		return "has uncommitted changes"
+	case errors.Is(err, git.ErrHasOwnCommits):
+		return "has commits the trunk does not, so it needs landing first"
+	default:
+		return "could not move: " + err.Error()
+	}
+}
+
 // rolesOf is the set of roles a task actually has, which is what a wait is
 // checked against.
 func rolesOf(sessions []state.Session) map[string]bool {
@@ -119,6 +132,7 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 
 		present := rolesOf(store.SessionsForTask(taskID))
 		started := 0
+		var stalled []string
 		for _, sess := range store.SessionsForTask(taskID) {
 			// The trunk is a strand like any other: it is where a conflict gets
 			// resolved and where the PR is opened, and both have to be possible
@@ -134,7 +148,16 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 				// The pane is dead, which is what `/exit` leaves behind. Put the
 				// agent back in it, resuming its own session rather than
 				// starting one that has never seen this task.
-				agent := cfg.AgentFor(sess.Role)
+				//
+				// Bring it up to the trunk first, the way a fresh spawn does:
+				// a strand that exited before its predecessor landed would
+				// otherwise resume on the checkout it left behind. Best effort,
+				// because a strand that has committed is not fast-forwardable
+				// and merging its work is a decision, not a side effect.
+				if task := store.FindTask(taskID); task != nil {
+					_ = git.FastForward(sess.Path, task.Trunk)
+				}
+				agent := agentFor(cfg, taskID, sess.Role)
 				argv := resumeArgs(cfg, agent, sess.Path)
 				if err := strand.Respawn(taskID, sess.Role, sess.Path, argv); err != nil {
 					return runStartedMsg{taskID: taskID, err: err}
@@ -155,7 +178,10 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 			if after != "" {
 				if task := store.FindTask(taskID); task != nil {
 					if err := git.FastForward(sess.Path, task.Trunk); err != nil {
-						return runStartedMsg{taskID: taskID, err: fmt.Errorf("%s: %w", sess.Role, err)}
+						// Report it, but keep going: one strand nobody can move
+						// is not a reason to leave the rest of the task unstarted.
+						stalled = append(stalled, sess.Role+" "+whyStuck(err))
+						continue
 					}
 				}
 			}
@@ -167,8 +193,13 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 			setStrandRunning(sess.Path)
 			started++
 		}
-		if started == 0 {
+		switch {
+		case started == 0 && len(stalled) > 0:
+			return runStartedMsg{taskID: taskID, err: fmt.Errorf("nothing started: %s", strings.Join(stalled, "; "))}
+		case started == 0:
 			return runStartedMsg{taskID: taskID, err: errors.New("nothing to start: every strand is already running or waits for one that is")}
+		case len(stalled) > 0:
+			return runStartedMsg{taskID: taskID, err: fmt.Errorf("started %d · waiting: %s", started, strings.Join(stalled, "; "))}
 		}
 		return runStartedMsg{taskID: taskID}
 	}

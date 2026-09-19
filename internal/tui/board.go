@@ -99,6 +99,10 @@ func boardState(r dashRow) string {
 	switch {
 	case r.Bell:
 		return dirtyStyle.Render("waiting for you")
+	case r.WaitsFor != "":
+		return dimStyle.Render("waits for " + r.WaitsFor)
+	case r.Run == "" && r.Branch != r.TaskTrunk:
+		return activeStyle.Render("ready to start · R")
 	case r.Run == state.RunFailed:
 		return dirtyStyle.Render("failed")
 	case r.Ahead > 0 && r.Run == state.RunRunning:
@@ -118,7 +122,7 @@ func boardState(r dashRow) string {
 
 // boardSummary is the line that answers "can I ship this yet".
 func boardSummary(rows []dashRow) string {
-	var waiting, outstanding, failed int
+	var waiting, outstanding, failed, ready int
 	for _, r := range rows {
 		switch {
 		case r.Run == state.RunFailed:
@@ -128,6 +132,9 @@ func boardSummary(rows []dashRow) string {
 		}
 		if r.Branch != r.TaskTrunk {
 			outstanding += r.Ahead
+			if r.Run == "" && r.WaitsFor == "" {
+				ready++
+			}
 		}
 	}
 	switch {
@@ -137,6 +144,8 @@ func boardSummary(rows []dashRow) string {
 		return fmt.Sprintf("%d strand(s) waiting on you", waiting)
 	case outstanding > 0:
 		return fmt.Sprintf("%d commit(s) still to reach the trunk", outstanding)
+	case ready > 0:
+		return fmt.Sprintf("%d strand(s) can start now: R", ready)
 	default:
 		return "everything written is on the trunk: the integrating strand can verify and open the PR"
 	}

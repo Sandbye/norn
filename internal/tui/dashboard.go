@@ -223,6 +223,10 @@ type dashRow struct {
 	Bell          bool              // the strand rang the terminal bell and nobody has looked (ephemeral)
 	Ahead         int               // commits this strand has that the trunk does not (ephemeral)
 	Plan          *plan.Plan        // the fan-out this strand proposes, when it is a planner (ephemeral)
+	// WaitsFor is the strand this one starts after, while that one has not
+	// landed. Empty once it can start, so the board can say "waits for tests"
+	// instead of leaving a row that looks idle for no reason. (ephemeral)
+	WaitsFor string
 }
 
 type dashTickMsg time.Time
@@ -1944,6 +1948,13 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				// is carried out. Hanging it on every strand of the task asked
 				// each of them to create strands that already exist.
 				row.Plan = planProposal(store, planners.of(sess.Path), sess)
+				// What this strand is waiting for, so a row that has not
+				// started reads as sequenced rather than stuck.
+				if sess.Run == "" {
+					if after := waitFor(cfg, sess.TaskID, sess.Role, rolesOf(store.SessionsForTask(sess.TaskID))); after != "" && !hasLanded(store, sess.TaskID, after) {
+						row.WaitsFor = after
+					}
+				}
 			}
 			if git.CurrentBranch(sess.Path) == "" {
 				// Branch deleted under the worktree: label the sha so the row
