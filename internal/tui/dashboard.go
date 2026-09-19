@@ -57,6 +57,9 @@ type Dashboard struct {
 	// inside a pane.
 	switcher switcherState
 
+	// strandSel remembers which strand you were on in each task, so leaving a
+	// task and coming back does not send you to the top of it.
+	strandSel map[string]string
 	// focusTask is a task the cursor should land on at the next load, which is
 	// how norn comes back to where you were after a detour into the diff.
 	focusTask string
@@ -221,6 +224,10 @@ type dashRow struct {
 	// Uncommitted is work in the strand's tree that no commit holds. norn
 	// merges commits, so this is work `L` cannot see. (ephemeral)
 	Uncommitted bool
+	// TaskCreatedAt orders tasks in the left column. A live-state order moves
+	// rows under the cursor on every tick, which is the one thing a list you
+	// are pointing at must not do. (ephemeral)
+	TaskCreatedAt time.Time
 	// WaitsFor is the strand this one starts after, while that one has not
 	// landed. Empty once it can start, so the board can say "waits for tests"
 	// instead of leaving a row that looks idle for no reason. (ephemeral)
@@ -535,6 +542,32 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.focusTask = d.pane.taskID
 					d.pane.close()
 					return d, d.loadCmd()
+				case s == "d":
+					// Read this strand's work without first finding its row:
+					// deciding "is this going the right way" happens while you
+					// are watching it, not after you have navigated away.
+					row, ok := d.paneRow()
+					if !ok {
+						d.notice = "no worktree for " + d.pane.role
+						return d, nil
+					}
+					d.pane.close()
+					d.quit = true
+					d.result = Result{
+						Action: ResultReview, Path: row.Path,
+						Base: row.TaskTrunk, TaskID: row.TaskID, Role: row.Role,
+					}
+					return d, tea.Quit
+				case s == "L":
+					// Land it from where you are, for the same reason.
+					row, ok := d.paneRow()
+					if !ok {
+						d.notice = "no worktree for " + d.pane.role
+						return d, nil
+					}
+					d.pane.close()
+					d.notice, d.landing = "landing "+row.Role+"…", row.Role
+					return d, tea.Batch(landStrandCmd(d.cfg, row), landTick())
 				case s == leader:
 					// Leader twice sends a literal one, so a key the agent
 					// binds never becomes unreachable.
@@ -649,15 +682,19 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		vis := d.visibleRows()
 		switch s {
+		// Movement follows the column you are in: j/k walk tasks on the left,
+		// J/K walk that task's strands on the right. One index for two columns
+		// is what made j look like it did nothing and then jump a whole task.
 		case "j", "down", "ctrl+n":
 			d.notice = ""
-			if d.cursor < len(vis)-1 {
-				d.cursor++
-			}
+			return d.moveLeftColumn(vis, 1), nil
 		case "k", "up", "ctrl+p":
-			if d.cursor > 0 {
-				d.cursor--
-			}
+			return d.moveLeftColumn(vis, -1), nil
+		case "J":
+			d.notice = ""
+			return d.moveStrand(vis, 1), nil
+		case "K":
+			return d.moveStrand(vis, -1), nil
 		case "g":
 			d.cursor = 0
 		case "G":
@@ -1321,111 +1358,54 @@ func (d Dashboard) renderHeader() string {
 
 // Thread groups. The rail is a queue, not a log: what needs you sits at the
 // top, what is running below it, what is quiet last. Ordering by group beats
-// ordering by recency here, because recency does not tell you where to go next.
-const (
-	groupNeedsYou = iota
-	groupWorking
-	groupQuiet
-)
-
-var groupLabels = map[int]string{
-	groupNeedsYou: "NEEDS YOU",
-	groupWorking:  "WORKING",
-	groupQuiet:    "QUIET",
-}
-
-// threadGroup buckets a row by its live agent state. idle and unknown share a
-// bucket: both mean "nothing is happening here", and splitting them would put a
-// header above a single row for no gain.
+// orderRows puts the rows in the order the two columns draw them, and keeps
+// them there.
 //
-// A headless role is bucketed by its run state instead, because live agent
-// state is read from a claude transcript and a role served by another agent has
-// none: without this, a failed codex role would sit in QUIET.
-func threadGroup(r dashRow) int {
-	switch {
-	case r.TaskBlocked != "" || r.Run == state.RunFailed:
-		return groupNeedsYou
-	// Waiting beats running. A strand whose process is alive but whose agent is
-	// asking a question is the definition of needing you, and grouping it by
-	// the process left it reading as WORKING until it timed out.
-	case needsUser(r.AgentState) || r.Bell:
-		return groupNeedsYou
-	case r.Run == state.RunRunning, r.AgentState == claude.StateWorking:
-		return groupWorking
-	default:
-		return groupQuiet
+// The rail used to sort by live agent state, so a strand flipping to waiting
+// moved its whole task to the top while you were reading it. Urgency belongs in
+// what a row says, not in where it is: a list you are pointing at has to hold
+// still. Tasks come first, oldest first, each one's strands with the trunk
+// leading; loose worktrees follow, most recent first.
+func orderRows(rows []dashRow) []dashRow {
+	type key struct {
+		row      dashRow
+		task     bool
+		created  time.Time
+		activity time.Time
+		trunk    bool
+		seq      int
 	}
-}
-
-// groupRows orders rows by group, keeping each group's existing order (activity,
-// most recent first). Returns a new slice: the caller's order is a view, and the
-// header gauge reads the same slice.
-//
-// A task's role worktrees move as one cluster: they stay adjacent, and the
-// cluster sits in its most urgent member's bucket. Otherwise one waiting role
-// would sit in NEEDS YOU with its siblings three headers down, and the task
-// would read as unrelated threads again.
-func groupRows(rows []dashRow) []dashRow {
-	groups, lead := clusterGroups(rows)
-	type keyed struct {
-		row     dashRow
-		group   int
-		cluster int // original index of the cluster's first row; own index when standalone
-		seq     int
-	}
-	keys := make([]keyed, len(rows))
+	keys := make([]key, len(rows))
 	for i, r := range rows {
-		k := keyed{row: r, group: groups[i], cluster: i, seq: i}
-		if r.TaskID != "" {
-			k.cluster = lead[r.TaskID]
+		keys[i] = key{
+			row: r, task: r.TaskID != "", created: r.TaskCreatedAt,
+			activity: r.LastActivityAt, trunk: r.Branch == r.TaskTrunk, seq: i,
 		}
-		keys[i] = k
 	}
 	sort.SliceStable(keys, func(i, j int) bool {
-		if keys[i].group != keys[j].group {
-			return keys[i].group < keys[j].group
+		a, b := keys[i], keys[j]
+		if a.task != b.task {
+			return a.task // tasks above the worktrees that belong to none
 		}
-		if keys[i].cluster != keys[j].cluster {
-			return keys[i].cluster < keys[j].cluster
+		if !a.task {
+			return a.activity.After(b.activity)
 		}
-		return keys[i].seq < keys[j].seq
+		if !a.created.Equal(b.created) {
+			return a.created.Before(b.created)
+		}
+		if a.row.TaskID != b.row.TaskID {
+			return a.row.TaskID < b.row.TaskID
+		}
+		if a.trunk != b.trunk {
+			return a.trunk // the trunk leads its own task
+		}
+		return a.seq < b.seq
 	})
 	out := make([]dashRow, len(keys))
 	for i, k := range keys {
 		out[i] = k.row
 	}
 	return out
-}
-
-// clusterGroups returns each row's effective group and, per task, the index of
-// its first row. A standalone row's effective group is its own; a task row's is
-// the most urgent among its siblings, so every row of a task reports the same
-// one. Ordering and the rail's headers both read this, or a header would land
-// in the middle of a cluster.
-func clusterGroups(rows []dashRow) ([]int, map[string]int) {
-	bucket := map[string]int{}
-	lead := map[string]int{}
-	for i, r := range rows {
-		if r.TaskID == "" {
-			continue
-		}
-		g := threadGroup(r)
-		if b, seen := bucket[r.TaskID]; !seen || g < b {
-			bucket[r.TaskID] = g
-		}
-		if _, seen := lead[r.TaskID]; !seen {
-			lead[r.TaskID] = i
-		}
-	}
-	groups := make([]int, len(rows))
-	for i, r := range rows {
-		if r.TaskID != "" {
-			groups[i] = bucket[r.TaskID]
-			continue
-		}
-		groups[i] = threadGroup(r)
-	}
-	return groups, lead
 }
 
 // sidebarLine is one rendered row of the rail. row indexes into vis, or is -1
@@ -1440,109 +1420,6 @@ type sidebarLine struct {
 // visible. The age carries glanceable recency so the left rail reads as a live
 // index, not a bare list.
 //
-// Scrolling windows over rendered lines rather than rows, because the group
-// headers take vertical space too: windowing over rows would let the cursor
-// slide off the bottom by as many lines as there are headers on screen.
-func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
-	const ageW = 3
-	branchW := max(w-ageW-3, 4) // glyph + two spaces + age column
-
-	// With no live state at all (a non-claude agent, or no transcript yet) every
-	// row is quiet, and a "QUIET" header over the whole list says nothing. Fall
-	// back to the plain rail in that case.
-	groups, _ := clusterGroups(vis)
-	grouped := false
-	for _, g := range groups {
-		if g != groupQuiet {
-			grouped = true
-			break
-		}
-	}
-
-	var all []sidebarLine
-	lastGroup := -1
-	lastTask := ""
-	if !grouped {
-		all = append(all, sidebarLine{dimStyle.Render(fitCell("THREADS", w)), -1})
-	}
-	for i, r := range vis {
-		if g := groups[i]; grouped && g != lastGroup {
-			all = append(all, sidebarLine{dimStyle.Render(fitCell(groupLabels[g], w)), -1})
-			lastGroup = g
-			lastTask = "" // a cluster split by the filter re-labels under its new header
-		}
-		// One header per task cluster, its rows indented under it. Standalone
-		// rows take neither, so they render exactly as before.
-		indent := ""
-		if r.TaskID != "" {
-			if r.TaskID != lastTask {
-				// The header carries the task's progress, because "how far is
-				// this" was otherwise only answerable from the board or from
-				// git, and it is the question you ask every time you look.
-				label := taskLabel(r) + taskProgress(d.rows, r.TaskID)
-				all = append(all, sidebarLine{taskHeaderStyle.Render(fitCell("◈ "+label, w)), -1})
-			}
-			indent = "  "
-		}
-		lastTask = r.TaskID
-		name := r.Branch
-		if r.Role != "" {
-			name = r.Role // under a task header the role is the distinguishing part
-		}
-		// A strand's row answers "is this mine to act on", so the right-hand
-		// column is its status. Age only survives on a plain worktree, where
-		// there is no status to show and staleness is the useful fact.
-		status, statusStyle := strandStatus(r)
-		tail, tailW := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt)), ageW
-		if status != "" {
-			tail, tailW = fmt.Sprintf("%-*s", statusWidth, truncate(status, statusWidth)), statusWidth
-		}
-		nameW := max(branchW-len(indent)-(tailW-ageW), 4)
-		if i == d.cursor {
-			plain := indent + glyphRune(r.AgentState) + " " + fitCell(name, nameW) + " " + tail
-			all = append(all, sidebarLine{lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(fitCell(plain, w)), i})
-			continue
-		}
-		branch := fitCell(name, nameW)
-		switch {
-		case r.DetachedAt != "":
-			branch = dirtyStyle.Render(branch) // branch deleted under the worktree
-		case r.WorktreeAlive:
-			branch = branchStyle.Render(branch)
-		default:
-			branch = dimStyle.Render(branch)
-		}
-		if status == "" {
-			tail = dimStyle.Render(tail)
-		} else {
-			tail = statusStyle.Render(tail)
-		}
-		all = append(all, sidebarLine{indent + statusGlyph(r) + " " + branch + " " + tail, i})
-	}
-	if len(all) == 0 {
-		return dimStyle.Render(fitCell("THREADS", w))
-	}
-
-	// Window over display lines, anchored on the cursor's own line.
-	cursorLine := 0
-	for i, l := range all {
-		if l.row == d.cursor {
-			cursorLine = i
-		}
-	}
-	listH := max(h-1, 3) // 1 for the counter below
-	start, end := scrollWindow(cursorLine, len(all), listH)
-
-	lines := make([]string, 0, listH+1)
-	for _, l := range all[start:end] {
-		lines = append(lines, l.text)
-	}
-	if len(all) > listH {
-		lines = append(lines, dimStyle.Render(fmt.Sprintf("  %d/%d", d.cursor+1, len(vis))))
-	}
-	return strings.Join(lines, "\n")
-}
-
 // taskLabel names a task cluster in the rail: its goal, falling back to the
 // trunk branch when the task carries no goal yet. A blocked task says so in the
 // header, since the conflict sits in the trunk worktree and not in the role row
@@ -1802,7 +1679,7 @@ func (d Dashboard) dashKeyHelp() string {
 	// The comment above was a promise the code did not keep: one fixed list,
 	// led by the key that leaves norn. Lead with what this row is asking for.
 	vis := d.visibleRows()
-	keys := "→ enter · d read · ⏎ cd · ? help"
+	keys := "j/k task · J/K strand · → enter · d read · ? help"
 	if d.cursor < len(vis) {
 		switch status, _ := strandStatus(vis[d.cursor]); {
 		case status == "needs you":
@@ -2019,6 +1896,7 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			row := dashRow{Session: sess, WorktreeAlive: true}
 			if task := store.FindTask(sess.TaskID); task != nil {
 				row.TaskGoal, row.TaskTrunk, row.TaskBlocked = task.Goal, task.Trunk, task.Blocked
+				row.TaskCreatedAt = task.CreatedAt
 			}
 			if sess.Role != "" && sess.TaskID != "" {
 				row.Bell = strand.Rang(sess.TaskID, sess.Role)
@@ -2056,7 +1934,7 @@ func (d Dashboard) loadCmd() tea.Cmd {
 			}
 			rows = append(rows, row)
 		}
-		return dashLoadedMsg{rows: groupRows(rows)}
+		return dashLoadedMsg{rows: orderRows(rows)}
 	}
 }
 

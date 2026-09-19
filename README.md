@@ -161,6 +161,8 @@ The marks are the same answer at a glance, and `?` lists them: `◆` act on me, 
 |---|---|
 | `←` | back to the rail |
 | `↓` / `↑` | next / previous strand |
+| `d` | review this strand's work |
+| `L` | land it on the trunk |
 | `f` | strand picker |
 | `b` | back to the rail, on this task |
 | `ctrl+a` | send a literal `ctrl+a` to the agent |

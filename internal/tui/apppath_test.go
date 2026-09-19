@@ -29,7 +29,7 @@ func TestAppReplyPathDoesNotQuit(t *testing.T) {
 	r := qrow("fix/rounding", claude.StateWaiting, 1)
 	r.Path = wt
 	a := App{current: ViewThreads, mainDir: "/repo"}
-	a.dashboard.rows = groupRows([]dashRow{r})
+	a.dashboard.rows = orderRows([]dashRow{r})
 	a.dashboard.cfg = config.Config{Agent: config.AgentConfig{Command: "claude"}}
 
 	m, _ := a.Update(key("i"))

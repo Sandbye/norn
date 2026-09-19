@@ -54,6 +54,17 @@ func paneKeyIs(s string, keys []string) bool {
 	return false
 }
 
+// paneRow is the dashboard row for the strand in the pane, so a key pressed
+// inside a pane can act on it without the person first finding its row.
+func (d Dashboard) paneRow() (dashRow, bool) {
+	for _, r := range d.rows {
+		if r.TaskID == d.pane.taskID && r.Role == d.pane.role {
+			return r, true
+		}
+	}
+	return dashRow{}, false
+}
+
 // paneState is the attached strand, or the zero value when none is.
 type paneState struct {
 	term   *pty.Term
@@ -194,9 +205,9 @@ func (d Dashboard) renderPane() string {
 	title := d.paneHeader()
 	body := d.pane.term.Screen()
 	leader := d.cfg.PaneLeaderKey()
-	foot := paneBarStyle.Width(max(d.width, 1)).Render("  " + leader + " ← back · ↓/↑ strand · f go to · b task")
+	foot := paneBarStyle.Width(max(d.width, 1)).Render("  " + leader + " ← back · ↓/↑ strand · d review · L land · f go to · b task")
 	if d.pane.armed {
-		foot = paneArmedStyle.Width(max(d.width, 1)).Render("  " + leader + " ▸  ← back · ↓/↑ strand · f go to · b task · " + leader + " literal")
+		foot = paneArmedStyle.Width(max(d.width, 1)).Render("  " + leader + " ▸  ← back · ↓/↑ strand · d review · L land · f go to · b task · " + leader + " literal")
 	}
 	if d.pane.dead() {
 		foot = paneArmedStyle.Width(max(d.width, 1)).Render("  this attachment ended · any key returns to threads")
