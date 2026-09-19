@@ -243,14 +243,14 @@ func runApp(cfg config.Config, repoRoot string, initialView tui.View) {
 // runAppOn is runApp, optionally reopening a task's board. Detours that leave
 // the TUI (the diff viewer) come back through here, so reviewing a strand
 // returns you to the board you left rather than to a fresh dashboard.
-func runAppOn(cfg config.Config, repoRoot string, initialView tui.View, boardTask string) {
+func runAppOn(cfg config.Config, repoRoot string, initialView tui.View, focusTask string) {
 	reapStale(repoRoot)
 
 	scope := ""
 	if repoRoot != "" {
 		scope = originRepoName(repoRoot)
 	}
-	app := tui.NewApp(cfg, repoRoot, scope, initialView).OpenBoardFor(boardTask)
+	app := tui.NewApp(cfg, repoRoot, scope, initialView).FocusTask(focusTask)
 	// Mouse reporting is on so the wheel reaches a strand's agent; the rail
 	// itself ignores mouse events.
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())

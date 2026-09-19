@@ -97,7 +97,7 @@ The trunk takes a leaf of its own rather than being `feature/payout-rounding/CU-
 
 `Tab` or `1`-`5` switch tabs, `?` shows keys, `esc` backs out, `q` quits.
 
-- **Threads** — every worktree across your repos: agent state (working / waiting / idle), branch, pull-request state, age, and the `next` action from the worktree's own notes. This is where you spend your time.
+- **Threads** — tasks on the left, one line each saying what that task needs next; the strands of the task under the cursor on the right, with what each is doing and what the selected one last asked. Worktrees belonging to no task get their own short section. This is where you spend your time.
 - **New** — create a worktree from a hint, with a Conventional Branch name. `T` seeds it from a tracker task, `M` picks the model.
 - **Clean** — preselects worktrees whose work is merged or whose remote branch is gone, so pruning is one keystroke.
 - **Settings** — edit config in place, with a scope switch between global, shared-repo and personal layers, showing which layer owns each value.
@@ -111,9 +111,22 @@ Each strand runs in a [tmux](https://github.com/tmux/tmux) session that norn own
 
 Because the agent has the keyboard, norn's own keys sit behind a leader, the way tmux does it: press `ctrl+a`, then one key. Pressing the leader twice sends a literal one through, so nothing the agent binds becomes unreachable. Change it with `pane_leader:` in config.
 
-### Task board
+### What a strand is doing
 
-`b` opens the board for the task under the cursor: every strand, what state it is in, how many commits it has that the trunk does not, what it says it is doing next, and one line answering whether the task can ship. A split task's truth is otherwise spread across several transcripts.
+Every surface uses one vocabulary, so the same word means the same thing on the rail, in a pane header and in the plan:
+
+| Status | Means |
+|---|---|
+| `needs you` | it asked a question, or it rang the bell |
+| `working` | running right now |
+| `N commit(s)` | committed work the trunk does not have: `L` lands it |
+| `uncommitted` | it wrote files it has not committed, so there is nothing to land yet |
+| `after <role>` | sequenced behind another strand, and starts when that one lands |
+| `can start` | nothing in the way: `R` starts it |
+| `landed` | merged into the trunk |
+| `failed` | its run exited non-zero, and the trunk is untouched |
+
+The marks are the same answer at a glance, and `?` lists them: `◆` act on me, `●` working, `○` waiting or startable, `✓` landed, `✗` failed.
 
 ### Plan reader
 
@@ -131,15 +144,15 @@ Because the agent has the keyboard, norn's own keys sit behind a leader, the way
 | `o` | open the agent |
 | `→` | enter a strand's live pane |
 | `f` | jump to any strand by name (telescope-style picker) |
-| `b` | task board |
 | `S` | read a planning strand's plan |
 | `L` | land a finished strand on the trunk |
-| `R` | spawn this task's strands |
+| `R` | start this task's strands |
 | `P` | approve the pull request the integrating strand is waiting to open |
 | `i` | answer a waiting thread without entering it |
 | `s` | summarize the branch (`esc` stops it) |
 | `p` / `t` | open the pull request / the tracker task |
-| `d` | clean this worktree |
+| `d` | read what this worktree wrote, and hand the review back to it |
+| `D` | clean this worktree |
 | `/` `a` `r` | filter · all repos · refresh |
 
 **Inside a strand pane** (after the `ctrl+a` leader)
@@ -149,18 +162,8 @@ Because the agent has the keyboard, norn's own keys sit behind a leader, the way
 | `←` | back to the rail |
 | `↓` / `↑` | next / previous strand |
 | `f` | strand picker |
-| `b` | task board |
+| `b` | back to the rail, on this task |
 | `ctrl+a` | send a literal `ctrl+a` to the agent |
-
-**Task board**
-
-| Key | Does |
-|---|---|
-| `↓` / `↑` | move |
-| `→` | enter that strand |
-| `d` | review that strand's work, and hand the review back to it |
-| `S` | read the plan |
-| `L` | land it |
 
 ---
 
@@ -251,7 +254,7 @@ A role's `args:` reaches the knobs norn has no opinion on, `-c model_reasoning_e
 
 You do not need a pull request, or even a commit, to review an agent's work.
 
-`d` on the board opens the strand's diff against the trunk, **including uncommitted and untracked files**. An agent commits when it reaches a point it likes, which is after the moment worth saying "not that way".
+`d` on any row opens that worktree's diff against the trunk, **including uncommitted and untracked files**. An agent commits when it reaches a point it likes, which is after the moment worth saying "not that way".
 
 In any diff: `c` comments the focused line, `v` first for a range, `C` for the whole file. Each comment starts with a [conventional-comment](https://conventionalcomments.org) label picked with one key, `i` issue, `s` suggestion, `n` nitpick, `q` question, `t` todo, `p` praise, `h` thought, `o` chore, and `b` marks it blocking. `tab` re-picks the label while you type, `x` deletes, `R` finishes with a summary.
 
