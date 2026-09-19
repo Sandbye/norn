@@ -57,20 +57,15 @@ type Dashboard struct {
 	// inside a pane.
 	switcher switcherState
 
-	// showBoard is the task board: one screen answering what is done and what
-	// is outstanding, without reading three agent transcripts. boardCursor is
-	// the strand selected in it.
-	showBoard   bool
-	boardCursor int
+	// focusTask is a task the cursor should land on at the next load, which is
+	// how norn comes back to where you were after a detour into the diff.
+	focusTask string
 	// showPlan is the full plan of planRow, read before accepting it.
 	showPlan bool
 	planRow  dashRow
 	// planCursor is the strand the plan view is on; planExpand shows its brief.
 	planCursor int
 	planExpand bool
-	// boardTask pins the board to a task even when the rail's cursor is
-	// elsewhere, which is how norn reopens it after the diff viewer.
-	boardTask string
 
 	showLog   bool
 	logTask   string
@@ -399,51 +394,98 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 
-		// The board owns the keyboard while it is open: it is a place to read
-		// and to jump from, so a stray key must not act on the rail behind it.
-		if d.showBoard {
-			rows := d.boardRows(d.visibleRows())
-			switch {
-			case s == "esc" || s == "b" || s == "q":
-				d.showBoard, d.boardTask = false, ""
-			case s == "down" || s == "j":
-				if d.boardCursor < len(rows)-1 {
-					d.boardCursor++
+		// The plan reader owns the keyboard: it is a thing to read, and L from
+		// here is the same accept as on the rail.
+		if d.showPlan {
+			strands := 0
+			if d.planRow.Plan != nil {
+				strands = len(d.planRow.Plan.Strands)
+			}
+			switch s {
+			case "esc", "q", "S":
+				d.showPlan, d.planExpand = false, false
+			case "j", "down":
+				if d.planCursor < strands-1 {
+					d.planCursor++
 				}
-			case s == "up" || s == "k":
-				if d.boardCursor > 0 {
-					d.boardCursor--
+			case "k", "up":
+				if d.planCursor > 0 {
+					d.planCursor--
 				}
-			case s == "right" || s == "enter":
-				if row, ok := boardSelected(rows, d.boardCursor); ok {
-					d.showBoard = false
-					cols, paneRows := d.paneSize()
-					return d, tea.Batch(openPaneCmd(row.TaskID, row.Role, row.Branch, cols, paneRows), paneTick())
+			case "enter", "right":
+				d.planExpand = !d.planExpand
+			case "e":
+				// $EDITOR already scrolls, searches and edits better than a
+				// popover can, and an edit there is what L then creates.
+				return d, editPlanCmd(d.planRow.TaskID)
+			case "L":
+				d.showPlan, d.planExpand = false, false
+				d.notice, d.landing = "accepting "+d.planRow.Role+"…", d.planRow.Role
+				return d, tea.Batch(landStrandCmd(d.cfg, d.planRow), landTick())
+			}
+			return d, nil
+		}
+
+		// The plan reader owns the keyboard: it is a thing to read, and L from
+		// here is the same accept as on the rail.
+		if d.showPlan {
+			strands := 0
+			if d.planRow.Plan != nil {
+				strands = len(d.planRow.Plan.Strands)
+			}
+			switch s {
+			case "esc", "q", "S":
+				d.showPlan, d.planExpand = false, false
+			case "j", "down":
+				if d.planCursor < strands-1 {
+					d.planCursor++
 				}
-			case s == "d":
-				// Review this strand's work before it lands. The diff view and
-				// its review sink already exist; this only points them at a
-				// strand and hands the result back to that strand's session.
-				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Branch != row.TaskTrunk {
-					d.showBoard, d.quit = false, true
-					d.result = Result{
-						Action: ResultReview, Path: row.Path,
-						Base: row.TaskTrunk, TaskID: row.TaskID, Role: row.Role,
-					}
-					return d, tea.Quit
+			case "k", "up":
+				if d.planCursor > 0 {
+					d.planCursor--
 				}
-			case s == "S":
-				// The board is where a split task is judged, so the plan that
-				// made the split is readable from here too.
-				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Plan != nil {
-					d.showPlan, d.planRow, d.planCursor, d.planExpand = true, row, 0, false
+			case "enter", "right":
+				d.planExpand = !d.planExpand
+			case "e":
+				// $EDITOR already scrolls, searches and edits better than a
+				// popover can, and an edit there is what L then creates.
+				return d, editPlanCmd(d.planRow.TaskID)
+			case "L":
+				d.showPlan, d.planExpand = false, false
+				d.notice, d.landing = "accepting "+d.planRow.Role+"…", d.planRow.Role
+				return d, tea.Batch(landStrandCmd(d.cfg, d.planRow), landTick())
+			}
+			return d, nil
+		}
+
+		// The plan reader owns the keyboard: it is a thing to read, and L from
+		// here is the same accept as on the rail.
+		if d.showPlan {
+			strands := 0
+			if d.planRow.Plan != nil {
+				strands = len(d.planRow.Plan.Strands)
+			}
+			switch s {
+			case "esc", "q", "S":
+				d.showPlan, d.planExpand = false, false
+			case "j", "down":
+				if d.planCursor < strands-1 {
+					d.planCursor++
 				}
-			case s == "L":
-				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Ahead > 0 {
-					d.showBoard = false
-					d.notice, d.landing = "landing "+row.Role+"…", row.Role
-					return d, tea.Batch(landStrandCmd(d.cfg, row), landTick())
+			case "k", "up":
+				if d.planCursor > 0 {
+					d.planCursor--
 				}
+			case "enter", "right":
+				d.planExpand = !d.planExpand
+			case "e":
+				// $EDITOR already scrolls, searches and edits better than a
+				// popover can, and an edit there is what L then creates.
+				return d, editPlanCmd(d.planRow.TaskID)
+			case "L":
+				d.showPlan, d.planExpand = false, false
+				d.notice, d.landing = "accepting "+d.planRow.Role+"…", d.planRow.Role
+				return d, tea.Batch(landStrandCmd(d.cfg, d.planRow), landTick())
 			}
 			return d, nil
 		}
@@ -488,12 +530,10 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.openSwitcher()
 					return d, nil
 				case s == "b":
-					// The board for the task you are inside, which is the one
-					// the pane belongs to rather than whatever the rail's
-					// cursor happens to sit on.
-					taskID := d.pane.taskID
+					// Back to the rail, on the task this pane belongs to
+					// rather than on whatever row the cursor left behind.
+					d.focusTask = d.pane.taskID
 					d.pane.close()
-					d.showBoard, d.boardCursor, d.boardTask = true, 0, taskID
 					return d, d.loadCmd()
 				case s == leader:
 					// Leader twice sends a literal one, so a key the agent
@@ -637,15 +677,6 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			fallthrough
-		case "b":
-			// The task board. One screen for the whole task, because a split
-			// task's truth is otherwise spread across three transcripts.
-			if d.cursor < len(vis) && vis[d.cursor].TaskID != "" {
-				d.showBoard, d.boardCursor, d.boardTask = true, 0, vis[d.cursor].TaskID
-			} else {
-				d.notice = "no task here: this thread is not part of one"
-			}
-			return d, nil
 		case "f":
 			d.openSwitcher()
 			return d, nil
@@ -890,6 +921,17 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		d.rows = msg.rows
 		d.lastLoad = time.Now()
+		// A task norn was told to come back to wins over the row the cursor
+		// happened to be on, and only for the first load after being asked.
+		if d.focusTask != "" {
+			for i, r := range d.visibleRows() {
+				if r.TaskID == d.focusTask {
+					d.cursor, selected = i, ""
+					break
+				}
+			}
+			d.focusTask = ""
+		}
 		if selected != "" {
 			for i, r := range d.visibleRows() {
 				if r.Path == selected {
@@ -1150,10 +1192,6 @@ func (d Dashboard) View() string {
 
 	if d.showPlan {
 		return d.renderPlanView()
-	}
-
-	if d.showBoard {
-		return d.renderBoard(d.visibleRows())
 	}
 
 	if d.pane.open() {

@@ -194,9 +194,9 @@ func (d Dashboard) renderPane() string {
 	title := d.paneHeader()
 	body := d.pane.term.Screen()
 	leader := d.cfg.PaneLeaderKey()
-	foot := paneBarStyle.Width(max(d.width, 1)).Render("  " + leader + " ← back · ↓/↑ strand · f go to · b board")
+	foot := paneBarStyle.Width(max(d.width, 1)).Render("  " + leader + " ← back · ↓/↑ strand · f go to · b task")
 	if d.pane.armed {
-		foot = paneArmedStyle.Width(max(d.width, 1)).Render("  " + leader + " ▸  ← back · ↓/↑ strand · f go to · b board · " + leader + " literal")
+		foot = paneArmedStyle.Width(max(d.width, 1)).Render("  " + leader + " ▸  ← back · ↓/↑ strand · f go to · b task · " + leader + " literal")
 	}
 	if d.pane.dead() {
 		foot = paneArmedStyle.Width(max(d.width, 1)).Render("  this attachment ended · any key returns to threads")

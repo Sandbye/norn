@@ -131,12 +131,11 @@ type errMsg struct{ err error }
 // NewApp builds the unified tabbed program. scope is the repo basename the
 // Threads/dashboard tab is scoped to ("" = all repos). initialView is the tab
 // (or the ViewCd picker) to open on.
-// OpenBoardFor makes the app open on a task's board, which is how norn comes
-// back to where you were after a detour into the diff viewer.
-func (a App) OpenBoardFor(taskID string) App {
+// FocusTask makes the app open with the cursor on a task, which is how norn
+// comes back to where you were after a detour into the diff viewer.
+func (a App) FocusTask(taskID string) App {
 	a.current = ViewThreads
-	a.dashboard.showBoard = taskID != ""
-	a.dashboard.boardTask = taskID
+	a.dashboard.focusTask = taskID
 	return a
 }
 
@@ -248,7 +247,7 @@ func (a App) capturing() bool {
 	case ViewThreads:
 		return a.dashboard.filter.active || a.dashboard.showSummary || a.dashboard.showLog ||
 			a.dashboard.reply.active || a.dashboard.pane.open() ||
-			a.dashboard.switcher.active || a.dashboard.showBoard || a.dashboard.showPlan
+			a.dashboard.switcher.active || a.dashboard.showPlan
 	case ViewTasks:
 		return a.tasks.filter.active || a.tasks.confirming
 	case ViewCreate:
@@ -612,7 +611,6 @@ func helpFor(v View) []keyHint {
 			{"L", "land a finished strand on the trunk"},
 			{"P", "approve the PR (the integrator waits for this)"},
 			{"S", "read a plan"}, {"f", "go to strand (ctrl+a f in a pane)"},
-			{"b", "task board: what is done, what is outstanding"},
 			{"d", "read what this worktree wrote, and hand the review back to it"},
 			{"D", "clean up this worktree"},
 			{"/", "filter"}, {"a", "all repos"}, {"r", "refresh"}, {"j/k g/G", "move"},
@@ -678,7 +676,7 @@ func (a App) View() string {
 	// them: a box sized to the terminal does not fit inside a frame that is
 	// narrower than it.
 	if a.current == ViewThreads &&
-		(a.dashboard.pane.open() || a.dashboard.switcher.active || a.dashboard.showBoard || a.dashboard.showPlan) {
+		(a.dashboard.pane.open() || a.dashboard.switcher.active || a.dashboard.showPlan) {
 		return a.dashboard.View()
 	}
 

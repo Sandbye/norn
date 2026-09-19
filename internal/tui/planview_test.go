@@ -69,20 +69,22 @@ func writePlan(t *testing.T, taskID string, p plan.Plan) {
 	}
 }
 
-// The board is pinned to its task: coming back from a review, the rail's
-// cursor is wherever a reload left it, and the board must still show strands.
-func TestBoardRowsFollowPinnedTask(t *testing.T) {
-	d := Dashboard{
-		boardTask: "t1",
-		rows: []dashRow{
-			{Session: state.Session{TaskID: "t1", Role: "contract", Branch: "f/t1/contract"}},
-			{Session: state.Session{TaskID: "t1", Role: "plan", Branch: "f/t1/plan"}},
-			{Session: state.Session{TaskID: "t2", Role: "logic", Branch: "f/t2/logic"}},
-		},
-		cursor: 2,
+// Coming back from a review, the cursor lands on the task norn was told to
+// return to, not on whatever row a reload left it on.
+func TestFocusTaskPlacesTheCursor(t *testing.T) {
+	rows := []dashRow{
+		{Session: state.Session{TaskID: "t2", Role: "logic", Branch: "f/t2/logic", Path: "/w/logic", Status: state.StatusActive}},
+		{Session: state.Session{TaskID: "t1", Role: "contract", Branch: "f/t1/contract", Path: "/w/contract", Status: state.StatusActive}},
 	}
-	got := d.boardRows(d.rows)
-	if len(got) != 2 {
-		t.Fatalf("pinned board showed %d strands, want 2", len(got))
+	d := Dashboard{width: 120, height: 40, cursor: 0, focusTask: "t1"}
+	m, _ := d.Update(dashLoadedMsg{rows: rows})
+	got := m.(Dashboard)
+
+	vis := got.visibleRows()
+	if got.cursor >= len(vis) || vis[got.cursor].TaskID != "t1" {
+		t.Fatalf("cursor is on %d, which is not a row of the task norn returned to", got.cursor)
+	}
+	if got.focusTask != "" {
+		t.Error("the request to focus a task survived the load, so it would fight the cursor forever")
 	}
 }
