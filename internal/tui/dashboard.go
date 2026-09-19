@@ -542,6 +542,32 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.focusTask = d.pane.taskID
 					d.pane.close()
 					return d, d.loadCmd()
+				case s == "d":
+					// Read this strand's work without first finding its row:
+					// deciding "is this going the right way" happens while you
+					// are watching it, not after you have navigated away.
+					row, ok := d.paneRow()
+					if !ok {
+						d.notice = "no worktree for " + d.pane.role
+						return d, nil
+					}
+					d.pane.close()
+					d.quit = true
+					d.result = Result{
+						Action: ResultReview, Path: row.Path,
+						Base: row.TaskTrunk, TaskID: row.TaskID, Role: row.Role,
+					}
+					return d, tea.Quit
+				case s == "L":
+					// Land it from where you are, for the same reason.
+					row, ok := d.paneRow()
+					if !ok {
+						d.notice = "no worktree for " + d.pane.role
+						return d, nil
+					}
+					d.pane.close()
+					d.notice, d.landing = "landing "+row.Role+"…", row.Role
+					return d, tea.Batch(landStrandCmd(d.cfg, row), landTick())
 				case s == leader:
 					// Leader twice sends a literal one, so a key the agent
 					// binds never becomes unreachable.

@@ -611,6 +611,7 @@ func helpFor(v View) []keyHint {
 			{"L", "land a finished strand on the trunk"},
 			{"P", "approve the PR (the integrator waits for this)"},
 			{"S", "read a plan"}, {"f", "go to strand (ctrl+a f in a pane)"},
+			{"ctrl+a d", "review the strand you are watching, without leaving it first"},
 			{"d", "read what this worktree wrote, and hand the review back to it"},
 			{"D", "clean up this worktree"},
 			{"j/k", "move between tasks"}, {"J/K", "move between that task's strands"},

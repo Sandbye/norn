@@ -108,3 +108,25 @@ func TestStrandKeysOnALooseWorktreeMoveTheColumn(t *testing.T) {
 		t.Errorf("K on a loose worktree landed in %q, want the previous entry", got)
 	}
 }
+
+// Deciding "is this going the right way" happens while you are watching a
+// strand, so reading its work must not require leaving the pane to find its
+// row first.
+func TestPaneRowFindsTheStrandBehindThePane(t *testing.T) {
+	rows := navRows()
+	d := Dashboard{width: 160, height: 40, rows: rows}
+	d.pane.taskID, d.pane.role = "a", "logic"
+
+	row, ok := d.paneRow()
+	if !ok {
+		t.Fatal("the pane's own strand was not found among the rows")
+	}
+	if row.Path != "/a/logic" || row.TaskTrunk != "f/a/trunk" {
+		t.Errorf("paneRow returned %+v, want the logic strand of task a", row)
+	}
+
+	d.pane.role = "gone"
+	if _, ok := d.paneRow(); ok {
+		t.Error("a strand with no row was reported as found")
+	}
+}
