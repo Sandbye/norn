@@ -818,6 +818,23 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "d":
+			// Read what this worktree has written, before anything of it
+			// reaches the trunk or a remote. `d` means diff everywhere else in
+			// norn, and it used to mean delete only here.
+			if d.cursor < len(vis) {
+				row := vis[d.cursor]
+				if !row.WorktreeAlive {
+					d.notice = "no worktree to read: this thread's directory is gone"
+					return d, nil
+				}
+				d.quit = true
+				d.result = Result{
+					Action: ResultReview, Path: row.Path,
+					Base: row.TaskTrunk, TaskID: row.TaskID, Role: row.Role,
+				}
+				return d, tea.Quit
+			}
+		case "D":
 			// Hand off to Clean, focused on this worktree: that's where removal
 			// lives (remote/merged state, stash-before-force, branch handling).
 			if d.cursor < len(vis) {
@@ -1747,21 +1764,21 @@ func (d Dashboard) dashKeyHelp() string {
 	// The comment above was a promise the code did not keep: one fixed list,
 	// led by the key that leaves norn. Lead with what this row is asking for.
 	vis := d.visibleRows()
-	keys := "→ enter · b board · ? help"
+	keys := "→ enter · d read · ⏎ cd · ? help"
 	if d.cursor < len(vis) {
 		switch status, _ := strandStatus(vis[d.cursor]); {
 		case status == "needs you":
-			keys = "→ enter · i answer · b board · ? help"
+			keys = "→ enter · i answer · d read · ? help"
 		case status == "uncommitted":
-			keys = "→ enter · tell it to commit · b board · ? help"
+			keys = "d read · → enter · tell it to commit · ? help"
 		case strings.HasSuffix(status, "commit(s)"):
-			keys = "d review · L land · → enter · b board · ? help"
+			keys = "d review · L land · → enter · ? help"
 		case status == "can start":
-			keys = "R start · → enter · b board · ? help"
+			keys = "R start · → enter · ? help"
 		case status == "landed":
-			keys = "P approve pr · b board · ⏎ cd · ? help"
+			keys = "P approve pr · d read · ⏎ cd · ? help"
 		case status == "failed":
-			keys = "→ enter · R restart · b board · ? help"
+			keys = "→ enter · R restart · d read · ? help"
 		}
 	}
 	return dimStyle.Render(keys)

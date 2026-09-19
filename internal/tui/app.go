@@ -607,13 +607,14 @@ func helpFor(v View) []keyHint {
 	case ViewThreads:
 		return []keyHint{
 			{"⏎", "cd into worktree"}, {"o", "open the agent"}, {"s", "summarize"},
-			{"p", "open PR"}, {"t", "open task"}, {"d", "clean worktree"},
+			{"p", "open PR"}, {"t", "open task"},
 			{"R", "start this task's strands"}, {"→", "enter a strand (ctrl+a ← leaves)"},
 			{"L", "land a finished strand on the trunk"},
 			{"P", "approve the PR (the integrator waits for this)"},
 			{"S", "read a plan"}, {"f", "go to strand (ctrl+a f in a pane)"},
 			{"b", "task board: what is done, what is outstanding"},
-			{"d (in board)", "review a strand's work, hand it back to that strand"},
+			{"d", "read what this worktree wrote, and hand the review back to it"},
+			{"D", "clean up this worktree"},
 			{"/", "filter"}, {"a", "all repos"}, {"r", "refresh"}, {"j/k g/G", "move"},
 		}
 	case ViewTasks:
