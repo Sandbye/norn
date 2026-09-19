@@ -223,6 +223,9 @@ type dashRow struct {
 	Bell          bool              // the strand rang the terminal bell and nobody has looked (ephemeral)
 	Ahead         int               // commits this strand has that the trunk does not (ephemeral)
 	Plan          *plan.Plan        // the fan-out this strand proposes, when it is a planner (ephemeral)
+	// Uncommitted is work in the strand's tree that no commit holds. norn
+	// merges commits, so this is work `L` cannot see. (ephemeral)
+	Uncommitted bool
 	// WaitsFor is the strand this one starts after, while that one has not
 	// landed. Empty once it can start, so the board can say "waits for tests"
 	// instead of leaving a row that looks idle for no reason. (ephemeral)
@@ -1944,6 +1947,10 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				// still reads as running, and nothing offers to land it.
 				row.Run = reconcileRun(sess, &row)
 				row.Ahead = strandAhead(store, sess)
+				// Uncommitted work is the difference between "wrote nothing"
+				// and "wrote something nobody can land", and those look the
+				// same on a row that only counts commits.
+				row.Uncommitted = git.IsDirty(sess.Path)
 				// A plan belongs to the strand that wrote it, and only until it
 				// is carried out. Hanging it on every strand of the task asked
 				// each of them to create strands that already exist.

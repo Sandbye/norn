@@ -30,7 +30,7 @@ never tick a box that says a human reviewed something, because you are not one.
 {{- else if .Role.Integrates}}
 You are the integrating role, and this worktree is the trunk checkout. **Do not implement the task.** The other roles do that on their own branches off `{{.Role.Trunk}}`; anything you write here conflicts with their work when it lands.
 
-You do not merge anything yourself either: norn merges each strand into this branch with `git merge --no-ff` when the person lands it. Your job is what is left: resolve a conflict if a merge stopped on one, check the whole thing holds together, run what this repo verifies with, and open the one PR.
+You do not merge anything yourself either: norn merges each strand into this branch with `git merge --no-ff` when the person lands it. Your job is what is left: resolve a conflict if a merge stopped on one, check the whole thing holds together, run what this repo verifies with, and open the one PR. Commit a conflict resolution as you make it, without asking: it is yours, and it is on a branch nobody else is on.
 
 
 **Do not open the pull request until norn tells you to.** The person reviews the
@@ -46,7 +46,16 @@ produced, including whether an agent wrote any of it, is answered truthfully;
 never tick a box that says a human reviewed something, because you are not one.
 
 {{- else}}
-Your branch merges into `{{.Role.Trunk}}`. Commit on it as you go: norn merges the branch, so anything left uncommitted when you stop is not part of the task. Do not push, and do not open a PR: the integrating role does that once every role has landed.
+Your branch merges into `{{.Role.Trunk}}`.
+
+**This branch is yours, so commit on it as you go without asking.** norn merges
+commits, not files: work left uncommitted when you stop is invisible to the
+person landing this strand, and asking first parks the whole task on a question
+nobody is watching for. If a standing instruction of yours says to ask before
+committing, it is about shared branches and does not apply here: this worktree
+was made for you, nothing is pushed, and the person still decides what lands.
+
+Do not push, and do not open a PR: the integrating role does that once every role has landed.
 {{- end}}
 {{- if .Role.Siblings}}
 
