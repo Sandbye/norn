@@ -1182,22 +1182,16 @@ func (d Dashboard) View() string {
 	innerH := frameInnerHeight(d.height)
 	bodyH := max(innerH-14, 6)
 
-	sidebar := lipgloss.NewStyle().
-		Width(sidebarW).
-		Height(bodyH). // full-height so the right border is a clean vertical rule
-		Border(lipgloss.NormalBorder(), false, true, false, false).
-		BorderForeground(colorSurface).
-		Render(d.renderSidebar(vis, sidebarW, bodyH))
-
-	var detail string
-	if d.cursor >= 0 && d.cursor < len(vis) {
-		detail = d.renderDetail(vis[d.cursor], detailW)
-	}
+	// Task-first: the left column is tasks, the right is the strands of the one
+	// the cursor is in. The cursor still walks rows, so every action key acts
+	// on exactly what it acted on before.
+	cards, loose, looseCursor := taskCards(vis, d.cursor)
+	left := d.renderTaskList(cards, loose, looseCursor, sidebarW, bodyH)
+	right := d.renderStrands(vis, cards, detailW, bodyH)
 
 	// Pin the split to a fixed height so the footer/help below doesn't jump as
 	// the selected thread's detail grows or shrinks (goal present, more fields…).
-	body := lipgloss.NewStyle().Height(bodyH).Render(
-		lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", detail))
+	body := lipgloss.NewStyle().Height(bodyH).Render(joinColumns(left, right, sidebarW, bodyH))
 
 	// Reply line above the help: the input while open, otherwise the outcome of
 	// the last one, so a failure does not vanish on the next tick.
