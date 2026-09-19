@@ -39,6 +39,9 @@ type Dashboard struct {
 	width  int
 	height int
 	err    error
+	// landing is the strand whose gate is running, so the rail can say what
+	// that gate is doing rather than leaving one line on screen for minutes.
+	landing string
 	// notice is a one-line answer to a key that did nothing, so a no-op key
 	// does not read as a hang. Cleared by the next keypress.
 	notice string
@@ -223,6 +226,14 @@ type dashRow struct {
 }
 
 type dashTickMsg time.Time
+
+// landTickMsg redraws the rail while a landing's gate runs.
+type landTickMsg time.Time
+
+func landTick() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return landTickMsg(t) })
+}
+
 type markTickMsg struct{}
 
 // markTick schedules the next animation frame (for the spinning 3D mark).
@@ -375,8 +386,8 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return d, editPlanCmd(d.planRow.TaskID)
 			case "L":
 				d.showPlan, d.planExpand = false, false
-				d.notice = "accepting " + d.planRow.Role + "…"
-				return d, landStrandCmd(d.cfg, d.planRow)
+				d.notice, d.landing = "accepting "+d.planRow.Role+"…", d.planRow.Role
+				return d, tea.Batch(landStrandCmd(d.cfg, d.planRow), landTick())
 			}
 			return d, nil
 		}
@@ -423,8 +434,8 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case s == "L":
 				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Ahead > 0 {
 					d.showBoard = false
-					d.notice = "landing " + row.Role + "…"
-					return d, landStrandCmd(d.cfg, row)
+					d.notice, d.landing = "landing "+row.Role+"…", row.Role
+					return d, tea.Batch(landStrandCmd(d.cfg, row), landTick())
 				}
 			}
 			return d, nil
@@ -693,8 +704,8 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case row.Run == state.RunMerged:
 					d.notice = row.Role + " is already landed"
 				default:
-					d.notice = "landing " + row.Role + "…"
-					return d, landStrandCmd(d.cfg, row)
+					d.notice, d.landing = "landing "+row.Role+"…", row.Role
+					return d, tea.Batch(landStrandCmd(d.cfg, row), landTick())
 				}
 				return d, nil
 			}
@@ -974,7 +985,16 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return d, nil
 
+	case landTickMsg:
+		// Only while a gate runs: the rail's own 5s tick is too slow to show
+		// seconds moving, and a faster tick the rest of the time is waste.
+		if d.landing != "" && landingInFlight() {
+			return d, landTick()
+		}
+		return d, nil
+
 	case landedMsg:
+		d.landing = ""
 		switch {
 		case msg.blocked:
 			d.notice = ""
@@ -1188,7 +1208,9 @@ func (d Dashboard) View() string {
 		body += "\n\n" + dimStyle.Render(truncate(d.reply.sent, max(avail-2, 20)))
 	}
 
-	if d.notice != "" {
+	if line := verifyLine(d.landing); line != "" {
+		body += "\n\n" + activeStyle.Render(truncate(line, max(avail-2, 20)))
+	} else if d.notice != "" {
 		body += "\n\n" + dimStyle.Render(truncate(d.notice, max(avail-2, 20)))
 	}
 

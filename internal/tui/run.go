@@ -318,7 +318,12 @@ func checkExpect(cfg config.Config, row dashRow) error {
 	if len(cfg.Verify) == 0 {
 		return fmt.Errorf("%s expects %s, but this repo declares no verify commands to check it with", row.Role, expect)
 	}
-	passed, failing, out := runVerify(row.Path, cfg.Verify)
+	// The gate reports what it is on: a suite takes minutes, and silence for
+	// minutes is indistinguishable from a hang.
+	defer clearVerifyStep(row.Role)
+	passed, failing, out := runVerify(row.Path, cfg.Verify, func(cmd string, i, n int) {
+		setVerifyStep(row.Role, cmd, i, n)
+	})
 	switch {
 	case expect == config.ExpectGreen && !passed:
 		return fmt.Errorf("%s must leave the tree green, and `%s` fails:\n%s", row.Role, failing, out)
@@ -330,8 +335,11 @@ func checkExpect(cfg config.Config, row dashRow) error {
 
 // runVerify runs the configured commands in dir, stopping at the first failure.
 // The output of that one is returned, since it is the only one worth reading.
-func runVerify(dir string, cmds []string) (passed bool, failing, output string) {
-	for _, c := range cmds {
+func runVerify(dir string, cmds []string, onStep func(cmd string, index, total int)) (passed bool, failing, output string) {
+	for i, c := range cmds {
+		if onStep != nil {
+			onStep(c, i+1, len(cmds))
+		}
 		cmd := exec.Command("sh", "-c", c)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
