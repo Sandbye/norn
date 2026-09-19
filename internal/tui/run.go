@@ -92,6 +92,19 @@ func hasLanded(store *state.Store, taskID, role string) bool {
 	return false
 }
 
+// whyStuck turns a fast-forward failure into something worth reading on a
+// status line: what the strand is holding, not what git printed.
+func whyStuck(err error) string {
+	switch {
+	case errors.Is(err, git.ErrWorktreeDirty):
+		return "has uncommitted changes"
+	case errors.Is(err, git.ErrHasOwnCommits):
+		return "has commits the trunk does not, so it needs landing first"
+	default:
+		return "could not move: " + err.Error()
+	}
+}
+
 // rolesOf is the set of roles a task actually has, which is what a wait is
 // checked against.
 func rolesOf(sessions []state.Session) map[string]bool {
@@ -119,6 +132,7 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 
 		present := rolesOf(store.SessionsForTask(taskID))
 		started := 0
+		var stalled []string
 		for _, sess := range store.SessionsForTask(taskID) {
 			// The trunk is a strand like any other: it is where a conflict gets
 			// resolved and where the PR is opened, and both have to be possible
@@ -134,7 +148,16 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 				// The pane is dead, which is what `/exit` leaves behind. Put the
 				// agent back in it, resuming its own session rather than
 				// starting one that has never seen this task.
-				agent := cfg.AgentFor(sess.Role)
+				//
+				// Bring it up to the trunk first, the way a fresh spawn does:
+				// a strand that exited before its predecessor landed would
+				// otherwise resume on the checkout it left behind. Best effort,
+				// because a strand that has committed is not fast-forwardable
+				// and merging its work is a decision, not a side effect.
+				if task := store.FindTask(taskID); task != nil {
+					_ = git.FastForward(sess.Path, task.Trunk)
+				}
+				agent := agentFor(cfg, taskID, sess.Role)
 				argv := resumeArgs(cfg, agent, sess.Path)
 				if err := strand.Respawn(taskID, sess.Role, sess.Path, argv); err != nil {
 					return runStartedMsg{taskID: taskID, err: err}
@@ -155,7 +178,10 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 			if after != "" {
 				if task := store.FindTask(taskID); task != nil {
 					if err := git.FastForward(sess.Path, task.Trunk); err != nil {
-						return runStartedMsg{taskID: taskID, err: fmt.Errorf("%s: %w", sess.Role, err)}
+						// Report it, but keep going: one strand nobody can move
+						// is not a reason to leave the rest of the task unstarted.
+						stalled = append(stalled, sess.Role+" "+whyStuck(err))
+						continue
 					}
 				}
 			}
@@ -167,8 +193,13 @@ func startRoleRunCmd(cfg config.Config, taskID string, cols, rows int) tea.Cmd {
 			setStrandRunning(sess.Path)
 			started++
 		}
-		if started == 0 {
+		switch {
+		case started == 0 && len(stalled) > 0:
+			return runStartedMsg{taskID: taskID, err: fmt.Errorf("nothing started: %s", strings.Join(stalled, "; "))}
+		case started == 0:
 			return runStartedMsg{taskID: taskID, err: errors.New("nothing to start: every strand is already running or waits for one that is")}
+		case len(stalled) > 0:
+			return runStartedMsg{taskID: taskID, err: fmt.Errorf("started %d · waiting: %s", started, strings.Join(stalled, "; "))}
 		}
 		return runStartedMsg{taskID: taskID}
 	}
@@ -318,7 +349,12 @@ func checkExpect(cfg config.Config, row dashRow) error {
 	if len(cfg.Verify) == 0 {
 		return fmt.Errorf("%s expects %s, but this repo declares no verify commands to check it with", row.Role, expect)
 	}
-	passed, failing, out := runVerify(row.Path, cfg.Verify)
+	// The gate reports what it is on: a suite takes minutes, and silence for
+	// minutes is indistinguishable from a hang.
+	defer clearVerifyStep(row.Role)
+	passed, failing, out := runVerify(row.Path, cfg.Verify, func(cmd string, i, n int) {
+		setVerifyStep(row.Role, cmd, i, n)
+	})
 	switch {
 	case expect == config.ExpectGreen && !passed:
 		return fmt.Errorf("%s must leave the tree green, and `%s` fails:\n%s", row.Role, failing, out)
@@ -330,8 +366,11 @@ func checkExpect(cfg config.Config, row dashRow) error {
 
 // runVerify runs the configured commands in dir, stopping at the first failure.
 // The output of that one is returned, since it is the only one worth reading.
-func runVerify(dir string, cmds []string) (passed bool, failing, output string) {
-	for _, c := range cmds {
+func runVerify(dir string, cmds []string, onStep func(cmd string, index, total int)) (passed bool, failing, output string) {
+	for i, c := range cmds {
+		if onStep != nil {
+			onStep(c, i+1, len(cmds))
+		}
 		cmd := exec.Command("sh", "-c", c)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
@@ -391,6 +430,48 @@ func spawnWaitingCmd(cfg config.Config, taskID, landed string, cols, rows int) t
 	}
 }
 
+// ownershipBlock states which paths are this strand's and which belong to a
+// sibling, in the brief where the agent will look for it.
+//
+// The plan already knows: a strand that writes a path another strand owns is
+// the conflict the split exists to avoid, and prose alone has never stopped it.
+func ownershipBlock(p plan.Plan, role string) string {
+	var mine []string
+	others := map[string][]string{}
+	for _, s := range p.Strands {
+		switch {
+		case s.Role == role:
+			mine = append(mine, s.Files...)
+		default:
+			others[s.Role] = append(others[s.Role], s.Files...)
+		}
+	}
+	if len(mine) == 0 && len(others) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	if len(mine) > 0 {
+		b.WriteString("\n\nYours to write, and nobody else's:\n")
+		for _, f := range mine {
+			b.WriteString("- `" + f + "`\n")
+		}
+	}
+	var claimed []string
+	for _, s := range p.Strands {
+		if s.Role == role || len(others[s.Role]) == 0 {
+			continue
+		}
+		claimed = append(claimed, "- "+s.Role+": `"+strings.Join(others[s.Role], "`, `")+"`")
+	}
+	if len(claimed) > 0 {
+		b.WriteString("\nOwned by another strand, so read them if you must and write none of them:\n")
+		b.WriteString(strings.Join(claimed, "\n") + "\n")
+		b.WriteString("\nIf your work needs a change in one of those, say so with `norn tell <role> \"<one line>\"` and let that strand make it.\n")
+	}
+	return b.String()
+}
+
 // carryOutPlan creates the strands a planning strand asked for, and starts the
 // ones that are not waiting on another.
 //
@@ -414,7 +495,7 @@ func carryOutPlan(cfg config.Config, row dashRow, task state.Task) ([]string, er
 	waiting := p.Waiting()
 	var created []string
 	for _, s := range p.Strands {
-		t, err := worktree.AddStrand(cfg, repoRoot, task, s.Role, s.Brief)
+		t, err := worktree.AddStrand(cfg, repoRoot, task, s.Role, s.Brief+ownershipBlock(*p, s.Role))
 		if err != nil {
 			return created, fmt.Errorf("creating %s: %w", s.Role, err)
 		}

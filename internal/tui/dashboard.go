@@ -39,6 +39,9 @@ type Dashboard struct {
 	width  int
 	height int
 	err    error
+	// landing is the strand whose gate is running, so the rail can say what
+	// that gate is doing rather than leaving one line on screen for minutes.
+	landing string
 	// notice is a one-line answer to a key that did nothing, so a no-op key
 	// does not read as a hang. Cleared by the next keypress.
 	notice string
@@ -220,9 +223,24 @@ type dashRow struct {
 	Bell          bool              // the strand rang the terminal bell and nobody has looked (ephemeral)
 	Ahead         int               // commits this strand has that the trunk does not (ephemeral)
 	Plan          *plan.Plan        // the fan-out this strand proposes, when it is a planner (ephemeral)
+	// Uncommitted is work in the strand's tree that no commit holds. norn
+	// merges commits, so this is work `L` cannot see. (ephemeral)
+	Uncommitted bool
+	// WaitsFor is the strand this one starts after, while that one has not
+	// landed. Empty once it can start, so the board can say "waits for tests"
+	// instead of leaving a row that looks idle for no reason. (ephemeral)
+	WaitsFor string
 }
 
 type dashTickMsg time.Time
+
+// landTickMsg redraws the rail while a landing's gate runs.
+type landTickMsg time.Time
+
+func landTick() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return landTickMsg(t) })
+}
+
 type markTickMsg struct{}
 
 // markTick schedules the next animation frame (for the spinning 3D mark).
@@ -375,8 +393,8 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return d, editPlanCmd(d.planRow.TaskID)
 			case "L":
 				d.showPlan, d.planExpand = false, false
-				d.notice = "accepting " + d.planRow.Role + "…"
-				return d, landStrandCmd(d.cfg, d.planRow)
+				d.notice, d.landing = "accepting "+d.planRow.Role+"…", d.planRow.Role
+				return d, tea.Batch(landStrandCmd(d.cfg, d.planRow), landTick())
 			}
 			return d, nil
 		}
@@ -423,8 +441,8 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case s == "L":
 				if row, ok := boardSelected(rows, d.boardCursor); ok && row.Ahead > 0 {
 					d.showBoard = false
-					d.notice = "landing " + row.Role + "…"
-					return d, landStrandCmd(d.cfg, row)
+					d.notice, d.landing = "landing "+row.Role+"…", row.Role
+					return d, tea.Batch(landStrandCmd(d.cfg, row), landTick())
 				}
 			}
 			return d, nil
@@ -693,8 +711,8 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case row.Run == state.RunMerged:
 					d.notice = row.Role + " is already landed"
 				default:
-					d.notice = "landing " + row.Role + "…"
-					return d, landStrandCmd(d.cfg, row)
+					d.notice, d.landing = "landing "+row.Role+"…", row.Role
+					return d, tea.Batch(landStrandCmd(d.cfg, row), landTick())
 				}
 				return d, nil
 			}
@@ -974,7 +992,16 @@ func (d Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return d, nil
 
+	case landTickMsg:
+		// Only while a gate runs: the rail's own 5s tick is too slow to show
+		// seconds moving, and a faster tick the rest of the time is waste.
+		if d.landing != "" && landingInFlight() {
+			return d, landTick()
+		}
+		return d, nil
+
 	case landedMsg:
+		d.landing = ""
 		switch {
 		case msg.blocked:
 			d.notice = ""
@@ -1188,7 +1215,9 @@ func (d Dashboard) View() string {
 		body += "\n\n" + dimStyle.Render(truncate(d.reply.sent, max(avail-2, 20)))
 	}
 
-	if d.notice != "" {
+	if line := verifyLine(d.landing); line != "" {
+		body += "\n\n" + activeStyle.Render(truncate(line, max(avail-2, 20)))
+	} else if d.notice != "" {
 		body += "\n\n" + dimStyle.Render(truncate(d.notice, max(avail-2, 20)))
 	}
 
@@ -1409,12 +1438,19 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		lastTask = r.TaskID
 		name := r.Branch
 		if r.Role != "" {
-			name = r.Role + runMark(r) // under a task header the role is the distinguishing part
+			name = r.Role // under a task header the role is the distinguishing part
 		}
-		nameW := max(branchW-len(indent), 4)
-		age := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt))
+		// A strand's row answers "is this mine to act on", so the right-hand
+		// column is its status. Age only survives on a plain worktree, where
+		// there is no status to show and staleness is the useful fact.
+		status, statusStyle := strandStatus(r)
+		tail, tailW := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt)), ageW
+		if status != "" {
+			tail, tailW = fmt.Sprintf("%-*s", statusWidth, truncate(status, statusWidth)), statusWidth
+		}
+		nameW := max(branchW-len(indent)-(tailW-ageW), 4)
 		if i == d.cursor {
-			plain := indent + glyphRune(r.AgentState) + " " + fitCell(name, nameW) + " " + age
+			plain := indent + glyphRune(r.AgentState) + " " + fitCell(name, nameW) + " " + tail
 			all = append(all, sidebarLine{lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(fitCell(plain, w)), i})
 			continue
 		}
@@ -1427,7 +1463,12 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		default:
 			branch = dimStyle.Render(branch)
 		}
-		all = append(all, sidebarLine{indent + stateGlyph(r.AgentState) + " " + branch + " " + dimStyle.Render(age), i})
+		if status == "" {
+			tail = dimStyle.Render(tail)
+		} else {
+			tail = statusStyle.Render(tail)
+		}
+		all = append(all, sidebarLine{indent + statusGlyph(r) + " " + branch + " " + tail, i})
 	}
 	if len(all) == 0 {
 		return dimStyle.Render(fitCell("THREADS", w))
@@ -1709,8 +1750,27 @@ func (d Dashboard) dashKeyHelp() string {
 	if d.reply.active {
 		return dimStyle.Render("type your answer · ⏎ send · ⇥ permission · ctrl+u clear · esc cancel")
 	}
-	// Concise essentials; the full keymap lives in the global `?` help overlay.
-	return dimStyle.Render("⏎ cd · → enter · R spawn · L land · P pr · b board · ? help")
+	// The comment above was a promise the code did not keep: one fixed list,
+	// led by the key that leaves norn. Lead with what this row is asking for.
+	vis := d.visibleRows()
+	keys := "→ enter · b board · ? help"
+	if d.cursor < len(vis) {
+		switch status, _ := strandStatus(vis[d.cursor]); {
+		case status == "needs you":
+			keys = "→ enter · i answer · b board · ? help"
+		case status == "uncommitted":
+			keys = "→ enter · tell it to commit · b board · ? help"
+		case strings.HasSuffix(status, "commit(s)"):
+			keys = "d review · L land · → enter · b board · ? help"
+		case status == "can start":
+			keys = "R start · → enter · b board · ? help"
+		case status == "landed":
+			keys = "P approve pr · b board · ⏎ cd · ? help"
+		case status == "failed":
+			keys = "→ enter · R restart · b board · ? help"
+		}
+	}
+	return dimStyle.Render(keys)
 }
 
 func openPRInBrowser(branch, repoDir string) {
@@ -1918,10 +1978,21 @@ func (d Dashboard) loadCmd() tea.Cmd {
 				// still reads as running, and nothing offers to land it.
 				row.Run = reconcileRun(sess, &row)
 				row.Ahead = strandAhead(store, sess)
+				// Uncommitted work is the difference between "wrote nothing"
+				// and "wrote something nobody can land", and those look the
+				// same on a row that only counts commits.
+				row.Uncommitted = git.IsDirty(sess.Path)
 				// A plan belongs to the strand that wrote it, and only until it
 				// is carried out. Hanging it on every strand of the task asked
 				// each of them to create strands that already exist.
 				row.Plan = planProposal(store, planners.of(sess.Path), sess)
+				// What this strand is waiting for, so a row that has not
+				// started reads as sequenced rather than stuck.
+				if sess.Run == "" {
+					if after := waitFor(cfg, sess.TaskID, sess.Role, rolesOf(store.SessionsForTask(sess.TaskID))); after != "" && !hasLanded(store, sess.TaskID, after) {
+						row.WaitsFor = after
+					}
+				}
 			}
 			if git.CurrentBranch(sess.Path) == "" {
 				// Branch deleted under the worktree: label the sha so the row
@@ -2169,24 +2240,43 @@ func oneLine(s string) string {
 // taskProgress summarises a task in a few characters: how many strands have
 // landed, and how many still hold work the trunk does not have.
 func taskProgress(rows []dashRow, taskID string) string {
-	var strands, landed, waiting int
+	var strands, landed, toLand, needsYou, canStart int
+	trunkHasPR := false
 	for _, r := range rows {
-		if r.TaskID != taskID || r.Role == "" || r.Branch == r.TaskTrunk {
+		if r.TaskID != taskID || r.Role == "" {
+			continue
+		}
+		if r.Branch == r.TaskTrunk {
+			trunkHasPR = r.PRNumber > 0
 			continue // the trunk is what they land on, not one of them
 		}
 		strands++
+		status, _ := strandStatus(r)
 		switch {
+		case status == "needs you" || status == "uncommitted" || status == "failed":
+			needsYou++
 		case r.Ahead > 0:
-			waiting++
+			toLand++
 		case r.Run == state.RunMerged || r.Run == state.RunDone:
 			landed++
+		case status == "can start":
+			canStart++
 		}
 	}
 	if strands == 0 {
 		return ""
 	}
-	if waiting > 0 {
-		return fmt.Sprintf(" · %d to land", waiting)
+	// One line, and it names the next thing a person does rather than a ratio
+	// that is the same whether the task is sequenced or stuck.
+	switch {
+	case needsYou > 0:
+		return fmt.Sprintf(" · %d need you", needsYou)
+	case toLand > 0:
+		return fmt.Sprintf(" · %d strand(s) to land · L", toLand)
+	case canStart > 0:
+		return fmt.Sprintf(" · %d can start · R", canStart)
+	case landed == strands && !trunkHasPR:
+		return " · all landed · ready for review"
 	}
 	return fmt.Sprintf(" · %d/%d landed", landed, strands)
 }

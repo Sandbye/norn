@@ -18,6 +18,14 @@ var ErrMergeConflict = errors.New("merge conflict")
 // merge commit or fail halfway.
 var ErrTrunkDirty = errors.New("trunk worktree has uncommitted changes")
 
+// Why a strand could not be brought up to the trunk. Both are ordinary states
+// rather than faults, so the caller says them in a sentence instead of showing
+// git's output.
+var (
+	ErrWorktreeDirty = errors.New("uncommitted changes")
+	ErrHasOwnCommits = errors.New("commits of its own")
+)
+
 // CommitsAhead counts the commits on branch that trunk does not have. Zero
 // means the role wrote nothing worth merging, which is a finished role with no
 // output rather than a failure.
@@ -70,13 +78,16 @@ func MergeNoFF(trunkPath, branch, message string) error {
 // the branch would discard or rewrite somebody's work.
 func FastForward(wtPath, trunk string) error {
 	if IsDirty(wtPath) {
-		return fmt.Errorf("%s has uncommitted changes", wtPath)
+		return ErrWorktreeDirty
 	}
 	out, err := captureRun(wtPath, "git", "merge", "--ff-only", trunk)
-	if err != nil {
-		return fmt.Errorf("fast-forward %s to %s: %w: %s", wtPath, trunk, err, strings.TrimSpace(out))
+	if err == nil {
+		return nil
 	}
-	return nil
+	if n, cerr := CommitsAhead(wtPath, trunk, "HEAD"); cerr == nil && n > 0 {
+		return fmt.Errorf("%w: %d commit(s)", ErrHasOwnCommits, n)
+	}
+	return fmt.Errorf("fast-forward to %s: %w: %s", trunk, err, strings.TrimSpace(out))
 }
 
 // InMerge reports whether the worktree is sitting in an unfinished merge. It is
