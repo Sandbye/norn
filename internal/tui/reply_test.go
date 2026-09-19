@@ -119,7 +119,7 @@ func TestReplyInputEditing(t *testing.T) {
 // While the input is open, letters have to type rather than trigger actions:
 // "d" is drop and "o" opens the agent.
 func TestReplyInputSwallowsActionKeys(t *testing.T) {
-	d := Dashboard{width: 120, height: 40, rows: groupRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})}
+	d := Dashboard{width: 120, height: 40, rows: orderRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})}
 	d.reply = replyState{active: true, path: "/wt/fix/rounding", branch: "fix/rounding"}
 
 	for _, s := range []string{"d", "o", "/", "j"} {
@@ -138,7 +138,7 @@ func TestReplyInputSwallowsActionKeys(t *testing.T) {
 }
 
 func TestReplyEscapeCancelsWithoutSending(t *testing.T) {
-	d := Dashboard{width: 120, height: 40, rows: groupRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})}
+	d := Dashboard{width: 120, height: 40, rows: orderRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})}
 	d.reply = replyState{active: true, text: "yes", path: "/wt/x", branch: "fix/rounding"}
 
 	m, cmd := d.Update(key("esc"))
@@ -154,7 +154,7 @@ func TestReplyEscapeCancelsWithoutSending(t *testing.T) {
 // An empty reply must not be sent: --continue with an empty prompt would still
 // resume the session and spend a turn on nothing.
 func TestEmptyReplyIsNotSent(t *testing.T) {
-	d := Dashboard{width: 120, height: 40, rows: groupRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})}
+	d := Dashboard{width: 120, height: 40, rows: orderRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})}
 	d.reply = replyState{active: true, text: "   ", path: "/wt/x", branch: "fix/rounding"}
 
 	m, cmd := d.Update(key("enter"))
@@ -186,7 +186,7 @@ func TestReplyOutcomeIsReported(t *testing.T) {
 // time it was used for real.
 func TestReplyShowsWhatWasSentWhileRunning(t *testing.T) {
 	row := seedWaitingThread(t)
-	d := Dashboard{width: 120, height: 40, rows: groupRows([]dashRow{row})}
+	d := Dashboard{width: 120, height: 40, rows: orderRows([]dashRow{row})}
 	d.reply = replyState{active: true, text: "option B please", path: row.Path, branch: row.Branch, target: row}
 
 	m, cmd := d.Update(key("enter"))
@@ -230,7 +230,7 @@ func TestQuoteOneLine(t *testing.T) {
 // tabs. capturing() is the existing guard; a new input has to register with it.
 func TestAppKeysDoNotLeakWhileReplying(t *testing.T) {
 	a := App{current: ViewThreads, mainDir: "/repo"}
-	a.dashboard.rows = groupRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})
+	a.dashboard.rows = orderRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})
 	a.dashboard.reply = replyState{active: true, path: "/wt/x", branch: "fix/rounding"}
 
 	if !a.capturing() {
@@ -258,7 +258,7 @@ func TestAppKeysDoNotLeakWhileReplying(t *testing.T) {
 // claude's own errors run long. A wrapped status line pushes the help row
 // around under the table, which is how the "already running" error looked.
 func TestReplyStatusStaysOneLine(t *testing.T) {
-	d := Dashboard{width: 100, height: 40, rows: groupRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})}
+	d := Dashboard{width: 100, height: 40, rows: orderRows([]dashRow{qrow("fix/rounding", claude.StateWaiting, 1)})}
 	d.reply.branch = "fix/rounding" // the line belongs to its thread
 	d.reply.sent = "reply to fix/rounding failed: claude: " + strings.Repeat("a long explanation from claude ", 10)
 
@@ -281,7 +281,7 @@ func TestRefusedReplyNeverLeavesYouTypingAtTheDashboard(t *testing.T) {
 	row.AgentState = claude.StateWorking // nothing to answer yet
 
 	a := App{current: ViewThreads, mainDir: "/repo"}
-	a.dashboard.rows = groupRows([]dashRow{row})
+	a.dashboard.rows = orderRows([]dashRow{row})
 	a.dashboard.cfg = config.Config{Agent: config.AgentConfig{Command: "claude"}}
 
 	m, _ := a.Update(key("i"))
@@ -321,7 +321,7 @@ func TestReplyGrantCyclesAndIsShown(t *testing.T) {
 
 	row := seedWaitingThread(t)
 	a := App{current: ViewThreads}
-	a.dashboard.rows = groupRows([]dashRow{row})
+	a.dashboard.rows = orderRows([]dashRow{row})
 	a.dashboard.cfg = config.Config{Agent: config.AgentConfig{Command: "claude"}}
 
 	m, _ := a.Update(key("i"))
@@ -350,7 +350,7 @@ func TestReplyGrantCyclesAndIsShown(t *testing.T) {
 func TestReplyModeStartsFromConfig(t *testing.T) {
 	row := seedWaitingThread(t)
 	a := App{current: ViewThreads}
-	a.dashboard.rows = groupRows([]dashRow{row})
+	a.dashboard.rows = orderRows([]dashRow{row})
 	a.dashboard.cfg = config.Config{
 		Agent:               config.AgentConfig{Command: "claude"},
 		ReplyPermissionMode: "act",
@@ -366,7 +366,7 @@ func TestReplyModeStartsFromConfig(t *testing.T) {
 // A reply is one thread's business. Showing its spinner while you are looking
 // at another thread says the wrong one is busy.
 func TestReplyLineOnlyShowsOnItsOwnThread(t *testing.T) {
-	rows := groupRows([]dashRow{
+	rows := orderRows([]dashRow{
 		qrow("fix/rounding", claude.StateWaiting, 1),
 		qrow("feature/login", claude.StateWaiting, 2),
 	})
@@ -457,7 +457,7 @@ func TestReplyLogRecordsBothSides(t *testing.T) {
 // "run the tests" in, which is the whole reason it has an input.
 func TestRunLogPaneTypesInsteadOfActing(t *testing.T) {
 	d := Dashboard{}
-	d.rows = groupRows([]dashRow{roleRow()})
+	d.rows = orderRows([]dashRow{roleRow()})
 	d.showLog, d.logTask, d.logRole, d.logRow = true, "t1", "logic", roleRow()
 	d.reply.active = true
 

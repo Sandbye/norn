@@ -28,103 +28,98 @@ func order(rows []dashRow) []string {
 	return out
 }
 
-// The rail is meant to read as a queue: what needs you first, whatever its age.
-func TestGroupRowsPutsWaitingFirst(t *testing.T) {
+// A list you are pointing at has to hold still: urgency belongs in what a row
+// says, not in where it sits, or the row under the cursor changes while you
+// read it.
+func TestOrderRowsDoesNotMoveRowsWhenStateChanges(t *testing.T) {
 	in := []dashRow{
 		qrow("a-idle", claude.StateIdle, 5),
 		qrow("b-working", claude.StateWorking, 10),
 		qrow("c-waiting", claude.StateWaiting, 60),
-		qrow("d-stuck", claude.StateStuck, 90),
-		qrow("e-unknown", claude.StateUnknown, 1),
 	}
-	got := order(groupRows(in))
-	want := []string{"c-waiting", "d-stuck", "b-working", "a-idle", "e-unknown"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("order = %v, want %v", got, want)
-		}
+	before := order(orderRows(in))
+
+	// The same rows, one of them now asking a question.
+	in[0].AgentState = claude.StateWaiting
+	if after := order(orderRows(in)); strings.Join(after, ",") != strings.Join(before, ",") {
+		t.Errorf("a state change reordered the list: %v then %v", before, after)
 	}
 }
 
-// Recency ordering has to survive inside a group, since that is what the store
-// already sorted by and it is still the tiebreak that matters.
-func TestGroupRowsKeepsOrderWithinAGroup(t *testing.T) {
-	in := []dashRow{
-		qrow("newer", claude.StateWaiting, 1),
-		qrow("older", claude.StateWaiting, 90),
-		qrow("working", claude.StateWorking, 2),
-	}
-	got := order(groupRows(in))
-	if got[0] != "newer" || got[1] != "older" {
-		t.Errorf("order = %v, want newer before older", got)
+// Tasks are what you came to work on; a worktree belonging to none is one you
+// left behind, so it sits below them however recent it is.
+func TestOrderRowsPutsTasksAboveLooseWorktrees(t *testing.T) {
+	loose := qrow("chore/readme", claude.StateIdle, 1)
+	strand := qrow("f/t/logic", claude.StateIdle, 900)
+	strand.TaskID, strand.TaskTrunk = "t", "f/t/trunk"
+
+	got := order(orderRows([]dashRow{loose, strand}))
+	if got[0] != "f/t/logic" {
+		t.Errorf("order = %v, want the task's strand first", got)
 	}
 }
 
-func TestGroupRowsDoesNotMutateTheInput(t *testing.T) {
+// Inside a task the trunk leads, because it is what the others land on and
+// where the pull request comes from.
+func TestOrderRowsLeadsATaskWithItsTrunk(t *testing.T) {
+	logic := qrow("f/t/logic", claude.StateIdle, 1)
+	logic.TaskID, logic.TaskTrunk = "t", "f/t/trunk"
+	trunk := qrow("f/t/trunk", claude.StateIdle, 90)
+	trunk.TaskID, trunk.TaskTrunk = "t", "f/t/trunk"
+
+	got := order(orderRows([]dashRow{logic, trunk}))
+	if got[0] != "f/t/trunk" {
+		t.Errorf("order = %v, want the trunk first", got)
+	}
+}
+
+func TestOrderRowsDoesNotMutateTheInput(t *testing.T) {
 	in := []dashRow{qrow("idle", claude.StateIdle, 5), qrow("waiting", claude.StateWaiting, 60)}
-	_ = groupRows(in)
+	_ = orderRows(in)
 	if in[0].Branch != "idle" {
 		t.Errorf("input was reordered: %v", order(in))
 	}
 }
 
-func TestSidebarShowsGroupHeaders(t *testing.T) {
-	d := Dashboard{width: 120, height: 40}
-	d.rows = groupRows([]dashRow{
-		qrow("fix/rounding", claude.StateWaiting, 60),
-		qrow("feature/login", claude.StateWorking, 2),
-		qrow("chore/deps", claude.StateIdle, 120),
-	})
-
-	out := d.renderSidebar(d.rows, 40, 20)
-	for _, want := range []string{"NEEDS YOU", "WORKING", "QUIET", "fix/rounding"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("sidebar missing %q:\n%s", want, out)
-		}
-	}
-	if strings.Index(out, "NEEDS YOU") > strings.Index(out, "WORKING") {
-		t.Error("NEEDS YOU is not the first group")
-	}
-}
-
-// A non-claude agent, or a worktree with no transcript yet, has no live state.
-// Heading that whole list "QUIET" tells the user nothing, so the plain rail
-// stays in that case.
-func TestSidebarSkipsHeadersWithNoLiveState(t *testing.T) {
-	d := Dashboard{width: 120, height: 40}
-	d.rows = []dashRow{qrow("fix/one", claude.StateUnknown, 5), qrow("fix/two", claude.StateUnknown, 9)}
-
-	out := d.renderSidebar(d.rows, 40, 20)
-	if strings.Contains(out, "QUIET") {
-		t.Errorf("headers shown with no live state:\n%s", out)
-	}
-	if !strings.Contains(out, "THREADS") {
-		t.Errorf("plain rail header missing:\n%s", out)
-	}
-}
-
-// The cursor's own rendered line has to stay on screen. Windowing over rows
-// rather than lines would let it slide off by one line per header.
-func TestSidebarKeepsTheCursorVisibleWithHeaders(t *testing.T) {
+// Every loose worktree is one line with its age, and the section says how many
+// there are, since the column shows only the recent few.
+func TestLooseSectionCountsWhatItDoesNotShow(t *testing.T) {
+	ApplyTheme("nord")
 	var rows []dashRow
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 9; i++ {
+		rows = append(rows, qrow("chore/"+string(rune('a'+i)), claude.StateIdle, i))
+	}
+	d := Dashboard{width: 120, height: 40, rows: orderRows(rows)}
+
+	cards, loose, looseCursor := taskCards(d.visibleRows(), 0)
+	out := stripANSI(d.renderTaskList(cards, loose, looseCursor, 40, 20))
+	if !strings.Contains(out, "LOOSE · 9") {
+		t.Errorf("the section does not say how many there are:\n%s", out)
+	}
+	if !strings.Contains(out, "older") {
+		t.Errorf("the rows it left out are not accounted for:\n%s", out)
+	}
+}
+
+// The cursor's own line has to stay on screen: the left column trims what it
+// cannot fit, and trimming away the row you are pointing at is the one cut it
+// must not make.
+func TestLeftColumnKeepsTheCursorVisible(t *testing.T) {
+	ApplyTheme("nord")
+	var rows []dashRow
+	for i := 0; i < 24; i++ {
 		rows = append(rows, qrow("wait/"+string(rune('a'+i)), claude.StateWaiting, i))
 	}
-	for i := 0; i < 8; i++ {
-		rows = append(rows, qrow("work/"+string(rune('a'+i)), claude.StateWorking, i))
-	}
-	for i := 0; i < 8; i++ {
-		rows = append(rows, qrow("idle/"+string(rune('a'+i)), claude.StateIdle, i))
-	}
 
 	d := Dashboard{width: 120, height: 40}
-	d.rows = groupRows(rows)
+	d.rows = orderRows(rows)
 
-	for _, cursor := range []int{0, 7, 8, 15, 16, 23} {
+	for _, cursor := range []int{0, 7, 15, 23} {
 		d.cursor = cursor
-		out := d.renderSidebar(d.rows, 40, 10)
+		cards, loose, looseCursor := taskCards(d.visibleRows(), d.cursor)
+		out := stripANSI(d.renderTaskList(cards, loose, looseCursor, 40, 10))
 		if !strings.Contains(out, d.rows[cursor].Branch) {
-			t.Errorf("cursor %d (%s) scrolled out of view:\n%s", cursor, d.rows[cursor].Branch, out)
+			t.Errorf("cursor %d (%s) was trimmed out of the column:\n%s", cursor, d.rows[cursor].Branch, out)
 		}
 	}
 }
@@ -132,7 +127,7 @@ func TestSidebarKeepsTheCursorVisibleWithHeaders(t *testing.T) {
 // Rows reorder on every tick now, so an index-based cursor points at a
 // different thread after a state flip. The cursor has to track the thread.
 func TestCursorFollowsTheThreadAcrossAReorder(t *testing.T) {
-	before := groupRows([]dashRow{
+	before := orderRows([]dashRow{
 		qrow("fix/rounding", claude.StateWaiting, 60),
 		qrow("feature/login", claude.StateWorking, 2),
 		qrow("chore/deps", claude.StateIdle, 120),
@@ -152,7 +147,7 @@ func TestCursorFollowsTheThreadAcrossAReorder(t *testing.T) {
 	// It finishes its turn. loadCmd sorts by activity before grouping, so the
 	// thread that just moved arrives first, which is what shifts every index
 	// below it.
-	after := groupRows([]dashRow{
+	after := orderRows([]dashRow{
 		qrow("feature/login", claude.StateWaiting, 0),
 		qrow("fix/rounding", claude.StateWaiting, 61),
 		qrow("chore/deps", claude.StateIdle, 121),
@@ -171,13 +166,13 @@ func TestCursorFollowsTheThreadAcrossAReorder(t *testing.T) {
 // A thread that disappears (deleted worktree) must not leave the cursor out of
 // range or silently pointing at a neighbour without clamping.
 func TestCursorSurvivesAThreadDisappearing(t *testing.T) {
-	d := Dashboard{width: 120, height: 40, rows: groupRows([]dashRow{
+	d := Dashboard{width: 120, height: 40, rows: orderRows([]dashRow{
 		qrow("a", claude.StateWaiting, 1),
 		qrow("b", claude.StateWorking, 2),
 	})}
 	d.cursor = 1
 
-	m, _ := d.Update(dashLoadedMsg{rows: groupRows([]dashRow{qrow("a", claude.StateWaiting, 1)})})
+	m, _ := d.Update(dashLoadedMsg{rows: orderRows([]dashRow{qrow("a", claude.StateWaiting, 1)})})
 	d = m.(Dashboard)
 
 	if d.cursor < 0 || d.cursor >= len(d.visibleRows()) {
