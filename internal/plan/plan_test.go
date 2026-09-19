@@ -90,3 +90,28 @@ func TestPlanLivesOutsideTheRepo(t *testing.T) {
 		t.Fatalf("plan path %q is still repo-shaped", got)
 	}
 }
+
+// Two strands that may write the same path conflict at landing, after both
+// have done the work. The plan is where that is still cheap to catch.
+func TestPlanRejectsTwoOwnersOfOnePath(t *testing.T) {
+	p := Plan{Strands: []Strand{
+		{Role: "api", Brief: "the endpoint", Files: []string{"src/api.ts", "src/shared.ts"}},
+		{Role: "web", Brief: "the page", Files: []string{"src/web.ts", "src/shared.ts"}},
+	}}
+	err := p.Validate()
+	if err == nil {
+		t.Fatal("a plan with two owners of src/shared.ts was accepted")
+	}
+	for _, want := range []string{"api", "web", "src/shared.ts"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+
+	// Reading the same file is not owning it, so a plan that declares no
+	// overlap stays valid.
+	p.Strands[1].Files = []string{"src/web.ts"}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("a plan with distinct owners was rejected: %v", err)
+	}
+}

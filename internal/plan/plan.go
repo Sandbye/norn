@@ -55,6 +55,10 @@ type Strand struct {
 	// Expect is "red" or "green": what the repo's verify must report before
 	// this strand may land.
 	Expect string `yaml:"expect,omitempty"`
+	// Files are the paths this strand may write, and nobody else may. Globs
+	// allowed. A path claimed twice is a merge conflict the plan could have
+	// prevented, so it is rejected before anything is created.
+	Files []string `yaml:"files,omitempty"`
 	// Brief is what this strand owns, in the planner's words. It is appended to
 	// the generated worktree brief, and it is the part worth reading: it says
 	// which files and which service belong to this strand and nobody else.
@@ -105,6 +109,9 @@ func (p Plan) Validate() error {
 		}
 		seen[s.Role] = true
 	}
+	if err := p.checkOwnership(); err != nil {
+		return err
+	}
 	for _, s := range p.Strands {
 		switch {
 		case s.After == "":
@@ -117,6 +124,31 @@ func (p Plan) Validate() error {
 		case "", "red", "green":
 		default:
 			return fmt.Errorf("strand %q expects %q, and the only values are red and green", s.Role, s.Expect)
+		}
+	}
+	return nil
+}
+
+// checkOwnership rejects a plan where two strands may write the same path.
+//
+// Two agents editing one file in parallel is the failure the split exists to
+// avoid: it surfaces as a conflict at landing, after both have done the work,
+// and neither of them could have seen it coming from inside its own worktree.
+//
+// Reading a file is not owning it, so this only compares what each strand
+// declares it will write.
+func (p Plan) checkOwnership() error {
+	owner := map[string]string{}
+	for _, s := range p.Strands {
+		for _, f := range s.Files {
+			f = strings.TrimSpace(f)
+			if f == "" {
+				continue
+			}
+			if first, taken := owner[f]; taken {
+				return fmt.Errorf("%s and %s both claim %s: one strand owns a path, or they conflict at landing", first, s.Role, f)
+			}
+			owner[f] = s.Role
 		}
 	}
 	return nil

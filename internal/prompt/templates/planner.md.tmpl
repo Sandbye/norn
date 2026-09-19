@@ -26,6 +26,9 @@ strands:
     model: opus               # optional
     after: <other-role>       # optional; starts only once that strand has landed
     expect: red               # optional; red or green, checked when it lands
+    files:                    # every path this strand may write; globs allowed
+      - packages/x/src/**
+      - docs/x.md
     brief: |
       What this strand owns, in your words: which files, which service, which
       part of the task. Name what it must not touch, since the others are
@@ -47,6 +50,12 @@ exist yet, and the implementation starts from a trunk that already contains it.
 {{end}}
 Rules that make a plan work:
 
+- `files:` is what each strand may write, and norn rejects a plan where two
+  strands claim the same path: a shared file is a conflict at landing, after
+  both have done the work, and neither could see it coming from inside its own
+  worktree. Reading a file is not owning it, so list only what a strand writes.
+  When two parts genuinely need the same file, give it to one of them and let
+  the other wait with `after:`.
 - One strand per part that can be worked on independently. Two strands editing
   the same files is a merge conflict you chose in advance.
 - Every strand's brief names its files or its service. A strand that only knows

@@ -430,6 +430,48 @@ func spawnWaitingCmd(cfg config.Config, taskID, landed string, cols, rows int) t
 	}
 }
 
+// ownershipBlock states which paths are this strand's and which belong to a
+// sibling, in the brief where the agent will look for it.
+//
+// The plan already knows: a strand that writes a path another strand owns is
+// the conflict the split exists to avoid, and prose alone has never stopped it.
+func ownershipBlock(p plan.Plan, role string) string {
+	var mine []string
+	others := map[string][]string{}
+	for _, s := range p.Strands {
+		switch {
+		case s.Role == role:
+			mine = append(mine, s.Files...)
+		default:
+			others[s.Role] = append(others[s.Role], s.Files...)
+		}
+	}
+	if len(mine) == 0 && len(others) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	if len(mine) > 0 {
+		b.WriteString("\n\nYours to write, and nobody else's:\n")
+		for _, f := range mine {
+			b.WriteString("- `" + f + "`\n")
+		}
+	}
+	var claimed []string
+	for _, s := range p.Strands {
+		if s.Role == role || len(others[s.Role]) == 0 {
+			continue
+		}
+		claimed = append(claimed, "- "+s.Role+": `"+strings.Join(others[s.Role], "`, `")+"`")
+	}
+	if len(claimed) > 0 {
+		b.WriteString("\nOwned by another strand, so read them if you must and write none of them:\n")
+		b.WriteString(strings.Join(claimed, "\n") + "\n")
+		b.WriteString("\nIf your work needs a change in one of those, say so with `norn tell <role> \"<one line>\"` and let that strand make it.\n")
+	}
+	return b.String()
+}
+
 // carryOutPlan creates the strands a planning strand asked for, and starts the
 // ones that are not waiting on another.
 //
@@ -453,7 +495,7 @@ func carryOutPlan(cfg config.Config, row dashRow, task state.Task) ([]string, er
 	waiting := p.Waiting()
 	var created []string
 	for _, s := range p.Strands {
-		t, err := worktree.AddStrand(cfg, repoRoot, task, s.Role, s.Brief)
+		t, err := worktree.AddStrand(cfg, repoRoot, task, s.Role, s.Brief+ownershipBlock(*p, s.Role))
 		if err != nil {
 			return created, fmt.Errorf("creating %s: %w", s.Role, err)
 		}
