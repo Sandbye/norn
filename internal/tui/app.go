@@ -608,7 +608,7 @@ func helpFor(v View) []keyHint {
 		return []keyHint{
 			{"⏎", "cd into worktree"}, {"o", "open the agent"}, {"s", "summarize"},
 			{"p", "open PR"}, {"t", "open task"}, {"d", "clean worktree"},
-			{"R", "spawn this task's strands"}, {"→", "enter a strand (ctrl+a ← leaves)"},
+			{"R", "start this task's strands"}, {"→", "enter a strand (ctrl+a ← leaves)"},
 			{"L", "land a finished strand on the trunk"},
 			{"P", "approve the PR (the integrator waits for this)"},
 			{"S", "read a plan"}, {"f", "go to strand (ctrl+a f in a pane)"},
@@ -652,6 +652,12 @@ func renderHelp(current View) string {
 	b.WriteString(subtitleStyle.Render(tabLabel(current)) + "\n")
 	for _, h := range helpFor(current) {
 		b.WriteString("  " + keyStyle.Render(fmt.Sprintf("%-11s", h.key)) + dimStyle.Render("  "+h.desc) + "\n")
+	}
+	if current == ViewThreads {
+		b.WriteString("\n" + subtitleStyle.Render("Marks") + "\n")
+		for _, h := range statusLegend {
+			b.WriteString("  " + keyStyle.Render(fmt.Sprintf("%-11s", h.key)) + dimStyle.Render("  "+h.desc) + "\n")
+		}
 	}
 	b.WriteString("\n" + dimStyle.Render("any key to close"))
 	return boxStyle.Render(b.String())

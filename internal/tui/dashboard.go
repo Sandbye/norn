@@ -1438,12 +1438,19 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		lastTask = r.TaskID
 		name := r.Branch
 		if r.Role != "" {
-			name = r.Role + runMark(r) // under a task header the role is the distinguishing part
+			name = r.Role // under a task header the role is the distinguishing part
 		}
-		nameW := max(branchW-len(indent), 4)
-		age := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt))
+		// A strand's row answers "is this mine to act on", so the right-hand
+		// column is its status. Age only survives on a plain worktree, where
+		// there is no status to show and staleness is the useful fact.
+		status, statusStyle := strandStatus(r)
+		tail, tailW := fmt.Sprintf("%*s", ageW, compactAge(r.LastActivityAt)), ageW
+		if status != "" {
+			tail, tailW = fmt.Sprintf("%-*s", statusWidth, truncate(status, statusWidth)), statusWidth
+		}
+		nameW := max(branchW-len(indent)-(tailW-ageW), 4)
 		if i == d.cursor {
-			plain := indent + glyphRune(r.AgentState) + " " + fitCell(name, nameW) + " " + age
+			plain := indent + glyphRune(r.AgentState) + " " + fitCell(name, nameW) + " " + tail
 			all = append(all, sidebarLine{lipgloss.NewStyle().Foreground(colorBase).Background(colorLavender).Render(fitCell(plain, w)), i})
 			continue
 		}
@@ -1456,7 +1463,12 @@ func (d Dashboard) renderSidebar(vis []dashRow, w, h int) string {
 		default:
 			branch = dimStyle.Render(branch)
 		}
-		all = append(all, sidebarLine{indent + stateGlyph(r.AgentState) + " " + branch + " " + dimStyle.Render(age), i})
+		if status == "" {
+			tail = dimStyle.Render(tail)
+		} else {
+			tail = statusStyle.Render(tail)
+		}
+		all = append(all, sidebarLine{indent + statusGlyph(r) + " " + branch + " " + tail, i})
 	}
 	if len(all) == 0 {
 		return dimStyle.Render(fitCell("THREADS", w))
@@ -1738,8 +1750,27 @@ func (d Dashboard) dashKeyHelp() string {
 	if d.reply.active {
 		return dimStyle.Render("type your answer · ⏎ send · ⇥ permission · ctrl+u clear · esc cancel")
 	}
-	// Concise essentials; the full keymap lives in the global `?` help overlay.
-	return dimStyle.Render("⏎ cd · → enter · R spawn · L land · P pr · b board · ? help")
+	// The comment above was a promise the code did not keep: one fixed list,
+	// led by the key that leaves norn. Lead with what this row is asking for.
+	vis := d.visibleRows()
+	keys := "→ enter · b board · ? help"
+	if d.cursor < len(vis) {
+		switch status, _ := strandStatus(vis[d.cursor]); {
+		case status == "needs you":
+			keys = "→ enter · i answer · b board · ? help"
+		case status == "uncommitted":
+			keys = "→ enter · tell it to commit · b board · ? help"
+		case strings.HasSuffix(status, "commit(s)"):
+			keys = "d review · L land · → enter · b board · ? help"
+		case status == "can start":
+			keys = "R start · → enter · b board · ? help"
+		case status == "landed":
+			keys = "P approve pr · b board · ⏎ cd · ? help"
+		case status == "failed":
+			keys = "→ enter · R restart · b board · ? help"
+		}
+	}
+	return dimStyle.Render(keys)
 }
 
 func openPRInBrowser(branch, repoDir string) {
@@ -2209,24 +2240,43 @@ func oneLine(s string) string {
 // taskProgress summarises a task in a few characters: how many strands have
 // landed, and how many still hold work the trunk does not have.
 func taskProgress(rows []dashRow, taskID string) string {
-	var strands, landed, waiting int
+	var strands, landed, toLand, needsYou, canStart int
+	trunkHasPR := false
 	for _, r := range rows {
-		if r.TaskID != taskID || r.Role == "" || r.Branch == r.TaskTrunk {
+		if r.TaskID != taskID || r.Role == "" {
+			continue
+		}
+		if r.Branch == r.TaskTrunk {
+			trunkHasPR = r.PRNumber > 0
 			continue // the trunk is what they land on, not one of them
 		}
 		strands++
+		status, _ := strandStatus(r)
 		switch {
+		case status == "needs you" || status == "uncommitted" || status == "failed":
+			needsYou++
 		case r.Ahead > 0:
-			waiting++
+			toLand++
 		case r.Run == state.RunMerged || r.Run == state.RunDone:
 			landed++
+		case status == "can start":
+			canStart++
 		}
 	}
 	if strands == 0 {
 		return ""
 	}
-	if waiting > 0 {
-		return fmt.Sprintf(" · %d to land", waiting)
+	// One line, and it names the next thing a person does rather than a ratio
+	// that is the same whether the task is sequenced or stuck.
+	switch {
+	case needsYou > 0:
+		return fmt.Sprintf(" · %d need you", needsYou)
+	case toLand > 0:
+		return fmt.Sprintf(" · %d strand(s) to land · L", toLand)
+	case canStart > 0:
+		return fmt.Sprintf(" · %d can start · R", canStart)
+	case landed == strands && !trunkHasPR:
+		return " · all landed · ready for review"
 	}
 	return fmt.Sprintf(" · %d/%d landed", landed, strands)
 }
